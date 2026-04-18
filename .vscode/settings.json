@@ -1,0 +1,7 @@
+{
+  "cmake.configurePreset": "default",
+  "cmake.buildPreset": "default",
+  "cmake.configureOnOpen": true,
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json"
+}

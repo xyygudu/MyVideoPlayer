@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug mvp_app",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/bin/mvp_app.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}/build/bin",
+      "environment": [
+        {
+          "name": "PATH",
+          "value": "${workspaceFolder}/build/bin;D:\\Install\\ffmpeg-7.1.1-full_build-shared\\bin;D:\\Install\\SDL3-3.2.16\\lib\\x64;D:\\Install\\Qt\\6.7.3\\msvc2022_64\\bin;${env:PATH}"
+        },
+        {
+          "name": "QT_PLUGIN_PATH",
+          "value": "D:\\Install\\Qt\\6.7.3\\msvc2022_64\\plugins"
+        }
+      ],
+      "console": "integratedTerminal"
+    }
+  ]
+}

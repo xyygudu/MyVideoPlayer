@@ -1,0 +1,126 @@
+#include "main_window.h"
+
+#include <QFileDialog>
+#include <QHBoxLayout>
+#include <QVBoxLayout>
+
+#include "video_widget.h"
+
+MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), slider_pressed_(false) {
+    player_ = std::make_unique<mvp::Player>();
+    SetupUi();
+
+    // Set up video frame callback
+    player_->SetVideoFrameCallback([this](const uint8_t* data, int width, int height) {
+        QImage image(data, width, height, width * 4, QImage::Format_RGB32);
+        // Use queued connection to update from render thread to UI thread
+        QMetaObject::invokeMethod(video_widget_, "UpdateFrame", Qt::QueuedConnection,
+                                  Q_ARG(QImage, image.copy()));
+    });
+
+    // Timer for updating progress
+    timer_ = new QTimer(this);
+    connect(timer_, &QTimer::timeout, this, &MainWindow::OnTimerTick);
+    timer_->start(100);  // 100ms interval
+}
+
+MainWindow::~MainWindow() {
+    timer_->stop();
+    player_->Close();
+}
+
+void MainWindow::SetupUi() {
+    setWindowTitle("MyVideoPlayer");
+    resize(800, 600);
+
+    auto* central = new QWidget(this);
+    setCentralWidget(central);
+
+    auto* main_layout = new QVBoxLayout(central);
+    main_layout->setContentsMargins(0, 0, 0, 0);
+    main_layout->setSpacing(0);
+
+    // Video area
+    video_widget_ = new VideoWidget(central);
+    main_layout->addWidget(video_widget_, 1);
+
+    // Control bar
+    auto* control_widget = new QWidget(central);
+    auto* control_layout = new QHBoxLayout(control_widget);
+    control_layout->setContentsMargins(8, 4, 8, 4);
+
+    open_btn_ = new QPushButton(QStringLiteral("\u6253\u5F00"), control_widget);  // "打开"
+    connect(open_btn_, &QPushButton::clicked, this, &MainWindow::OnOpenFile);
+    control_layout->addWidget(open_btn_);
+
+    play_pause_btn_ = new QPushButton(QStringLiteral("\u25B6"), control_widget);  // "▶"
+    play_pause_btn_->setFixedWidth(40);
+    connect(play_pause_btn_, &QPushButton::clicked, this, &MainWindow::OnPlayPause);
+    control_layout->addWidget(play_pause_btn_);
+
+    progress_slider_ = new QSlider(Qt::Horizontal, control_widget);
+    progress_slider_->setRange(0, 1000);
+    connect(progress_slider_, &QSlider::sliderPressed, this, [this] { slider_pressed_ = true; });
+    connect(progress_slider_, &QSlider::sliderReleased, this, &MainWindow::OnSliderReleased);
+    control_layout->addWidget(progress_slider_, 1);
+
+    time_label_ = new QLabel("00:00:00 / 00:00:00", control_widget);
+    time_label_->setFixedWidth(140);
+    control_layout->addWidget(time_label_);
+
+    main_layout->addWidget(control_widget);
+}
+
+void MainWindow::OnOpenFile() {
+    QString filepath = QFileDialog::getOpenFileName(
+        this, QStringLiteral("\u6253\u5F00\u89C6\u9891\u6587\u4EF6"), QString(),
+        "Video Files (*.mp4 *.avi *.mkv *.mov *.flv *.wmv);;All Files (*)");
+    if (filepath.isEmpty()) return;
+
+    player_->Close();
+    if (player_->Open(filepath.toStdString())) {
+        player_->Play();
+        play_pause_btn_->setText(QStringLiteral("\u23F8"));  // "⏸"
+    }
+}
+
+void MainWindow::OnPlayPause() {
+    if (player_->IsPlaying()) {
+        player_->Pause();
+        play_pause_btn_->setText(QStringLiteral("\u25B6"));  // "▶"
+    } else {
+        player_->Play();
+        play_pause_btn_->setText(QStringLiteral("\u23F8"));  // "⏸"
+    }
+}
+
+void MainWindow::OnSliderReleased() {
+    slider_pressed_ = false;
+    double duration = player_->Duration();
+    if (duration <= 0) return;
+    double pos = static_cast<double>(progress_slider_->value()) / 1000.0 * duration;
+    player_->Seek(pos);
+}
+
+void MainWindow::OnTimerTick() {
+    double duration = player_->Duration();
+    double position = player_->CurrentPosition();
+
+    if (!slider_pressed_ && duration > 0) {
+        int slider_pos = static_cast<int>(position / duration * 1000.0);
+        progress_slider_->setValue(slider_pos);
+    }
+
+    time_label_->setText(FormatTime(position) + " / " + FormatTime(duration));
+}
+
+QString MainWindow::FormatTime(double seconds) const {
+    int total = static_cast<int>(seconds);
+    int h = total / 3600;
+    int m = (total % 3600) / 60;
+    int s = total % 60;
+    return QString("%1:%2:%3")
+        .arg(h, 2, 10, QChar('0'))
+        .arg(m, 2, 10, QChar('0'))
+        .arg(s, 2, 10, QChar('0'));
+}

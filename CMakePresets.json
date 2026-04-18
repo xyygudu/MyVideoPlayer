@@ -1,0 +1,63 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "MSVC x64 Debug",
+      "description": "MSVC compiler, x64, Debug build for VS Code",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "environment": {
+        "MSVC_ROOT": "D:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207",
+        "SDK_ROOT": "D:/Windows Kits/10",
+        "SDK_VER": "10.0.22621.0",
+        "PATH": "D:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64;D:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja;D:/Windows Kits/10/bin/10.0.22621.0/x64;$penv{PATH}",
+        "INCLUDE": "D:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/include;D:/Windows Kits/10/Include/10.0.22621.0/ucrt;D:/Windows Kits/10/Include/10.0.22621.0/shared;D:/Windows Kits/10/Include/10.0.22621.0/um;D:/Windows Kits/10/Include/10.0.22621.0/winrt",
+        "LIB": "D:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/lib/x64;D:/Windows Kits/10/Lib/10.0.22621.0/ucrt/x64;D:/Windows Kits/10/Lib/10.0.22621.0/um/x64"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "D:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe",
+        "CMAKE_C_COMPILER": "D:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe",
+        "CMAKE_RC_COMPILER": "D:/Windows Kits/10/bin/10.0.22621.0/x64/rc.exe",
+        "CMAKE_MT": "D:/Windows Kits/10/bin/10.0.22621.0/x64/mt.exe",
+        "CMAKE_MAKE_PROGRAM": "D:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe",
+        "CMAKE_PREFIX_PATH": "D:/Install/Qt/6.7.3/msvc2022_64",
+        "FFMPEG_ROOT": "D:/Install/ffmpeg-7.1.1-full_build-shared",
+        "SDL3_DIR": "D:/Install/SDL3-3.2.16/cmake"
+      }
+    },
+    {
+      "name": "vs2026",
+      "displayName": "Visual Studio 18 2026 x64",
+      "description": "Generate VS2026 solution",
+      "generator": "Visual Studio 18 2026",
+      "architecture": {
+        "value": "x64",
+        "strategy": "set"
+      },
+      "binaryDir": "${sourceDir}/build-vs",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "D:/Install/Qt/6.7.3/msvc2022_64",
+        "FFMPEG_ROOT": "D:/Install/ffmpeg-7.1.1-full_build-shared",
+        "SDL3_DIR": "D:/Install/SDL3-3.2.16/cmake"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default"
+    },
+    {
+      "name": "vs2026-debug",
+      "configurePreset": "vs2026",
+      "configuration": "Debug"
+    }
+  ]
+}
