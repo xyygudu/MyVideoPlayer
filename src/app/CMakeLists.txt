@@ -29,4 +29,13 @@ if(WIN32)
         $<TARGET_FILE_DIR:mvp_app>
     )
   endforeach()
+
+  # Copy Qt platform plugin (qwindows.dll) so the app can start
+  add_custom_command(TARGET mvp_app POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+      "$<TARGET_FILE_DIR:mvp_app>/platforms"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "$<TARGET_PROPERTY:Qt6::QWindowsIntegrationPlugin,LOCATION_$<CONFIG>>"
+      "$<TARGET_FILE_DIR:mvp_app>/platforms/"
+  )
 endif()
