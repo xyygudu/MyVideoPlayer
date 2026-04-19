@@ -45,6 +45,7 @@ void PacketQueue::Flush() {
         queue_.pop();
         av_packet_free(&pkt);
     }
+    abort_ = false;
     cond_push_.notify_all();
 }
 

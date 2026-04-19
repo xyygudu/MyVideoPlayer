@@ -45,6 +45,7 @@ void FrameQueue::Flush() {
         queue_.pop();
         av_frame_free(&frame);
     }
+    abort_ = false;
     cond_push_.notify_all();
 }
 
