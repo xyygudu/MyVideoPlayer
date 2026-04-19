@@ -4,6 +4,8 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 
+#include <spdlog/spdlog.h>
+
 #include "video_widget.h"
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), slider_pressed_(false) {
@@ -77,6 +79,7 @@ void MainWindow::OnOpenFile() {
         "Video Files (*.mp4 *.avi *.mkv *.mov *.flv *.wmv);;All Files (*)");
     if (filepath.isEmpty()) return;
 
+    SPDLOG_INFO("UI: open file '{}'", filepath.toStdString());
     player_->Close();
     if (player_->Open(filepath.toStdString())) {
         player_->Play();
@@ -86,9 +89,11 @@ void MainWindow::OnOpenFile() {
 
 void MainWindow::OnPlayPause() {
     if (player_->IsPlaying()) {
+        SPDLOG_INFO("UI: pause");
         player_->Pause();
         play_pause_btn_->setText(QStringLiteral("\u25B6"));  // "▶"
     } else {
+        SPDLOG_INFO("UI: play");
         player_->Play();
         play_pause_btn_->setText(QStringLiteral("\u23F8"));  // "⏸"
     }
@@ -99,6 +104,7 @@ void MainWindow::OnSliderReleased() {
     double duration = player_->Duration();
     if (duration <= 0) return;
     double pos = static_cast<double>(progress_slider_->value()) / 1000.0 * duration;
+    SPDLOG_INFO("UI: seek to {:.2f}s", pos);
     player_->Seek(pos);
 }
 

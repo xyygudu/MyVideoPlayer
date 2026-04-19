@@ -1,4 +1,5 @@
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(spdlog REQUIRED)
 qt_standard_project_setup()
 
 file(GLOB_RECURSE MVP_APP_SOURCES src/*.cc)
@@ -9,6 +10,7 @@ qt_add_executable(mvp_app ${MVP_APP_SOURCES} ${MVP_APP_HEADERS})
 target_link_libraries(mvp_app PRIVATE
   mvp_core
   Qt6::Widgets
+  spdlog::spdlog
 )
 
 # Copy Qt/SDL DLLs on Windows for debugging convenience

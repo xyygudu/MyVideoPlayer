@@ -1,5 +1,7 @@
 #include "frame_queue.h"
 
+#include <spdlog/spdlog.h>
+
 extern "C" {
 #include <libavutil/frame.h>
 }
@@ -51,6 +53,7 @@ void FrameQueue::Flush() {
 
 void FrameQueue::Abort() {
     std::lock_guard<std::mutex> lock(mutex_);
+    SPDLOG_INFO("FrameQueue: abort (size={})", queue_.size());
     abort_ = true;
     cond_push_.notify_all();
     cond_pop_.notify_all();

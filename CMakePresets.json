@@ -29,7 +29,8 @@
         "CMAKE_MAKE_PROGRAM": "D:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe",
         "CMAKE_PREFIX_PATH": "D:/Install/Qt/6.7.3/msvc2022_64",
         "FFMPEG_ROOT": "D:/Install/ffmpeg-7.1.1-full_build-shared",
-        "SDL3_DIR": "D:/Install/SDL3-3.2.16/cmake"
+        "SDL3_DIR": "D:/Install/SDL3-3.2.16/cmake",
+        "spdlog_DIR": "D:/Install/spdlog/lib/cmake/spdlog"
       }
     },
     {
@@ -45,7 +46,8 @@
       "cacheVariables": {
         "CMAKE_PREFIX_PATH": "D:/Install/Qt/6.7.3/msvc2022_64",
         "FFMPEG_ROOT": "D:/Install/ffmpeg-7.1.1-full_build-shared",
-        "SDL3_DIR": "D:/Install/SDL3-3.2.16/cmake"
+        "SDL3_DIR": "D:/Install/SDL3-3.2.16/cmake",
+        "spdlog_DIR": "D:/Install/spdlog/lib/cmake/spdlog"
       }
     }
   ],

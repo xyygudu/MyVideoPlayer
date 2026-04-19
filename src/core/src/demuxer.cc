@@ -2,6 +2,8 @@
 
 #include "packet_queue.h"
 
+#include <spdlog/spdlog.h>
+
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/time.h>
@@ -25,10 +27,12 @@ bool Demuxer::Open(const std::string& filepath) {
     Close();
 
     if (avformat_open_input(&format_ctx_, filepath.c_str(), nullptr, nullptr) < 0) {
+        SPDLOG_ERROR("Demuxer: failed to open '{}'", filepath);
         return false;
     }
 
     if (avformat_find_stream_info(format_ctx_, nullptr) < 0) {
+        SPDLOG_ERROR("Demuxer: failed to find stream info for '{}'", filepath);
         avformat_close_input(&format_ctx_);
         return false;
     }
@@ -47,12 +51,18 @@ bool Demuxer::Open(const std::string& filepath) {
         }
     }
 
+    if (audio_stream_index_ >= 0 || video_stream_index_ >= 0) {
+        SPDLOG_INFO("Demuxer: opened '{}' — {} streams, duration {:.2f}s, audio={}, video={}",
+                    filepath, format_ctx_->nb_streams, Duration(), audio_stream_index_,
+                    video_stream_index_);
+    }
     return audio_stream_index_ >= 0 || video_stream_index_ >= 0;
 }
 
 void Demuxer::Close() {
     Stop();
     if (format_ctx_) {
+        SPDLOG_INFO("Demuxer: closing");
         avformat_close_input(&format_ctx_);
         format_ctx_ = nullptr;
     }

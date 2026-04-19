@@ -12,6 +12,8 @@
 #include "frame_queue.h"
 #include "packet_queue.h"
 
+#include <spdlog/spdlog.h>
+
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/frame.h>
@@ -62,6 +64,7 @@ bool PlayerImpl::Open(const std::string& filepath) {
     Close();
 
     if (!demuxer_.Open(filepath)) {
+        SPDLOG_ERROR("Player: failed to open '{}'", filepath);
         return false;
     }
 
@@ -83,10 +86,12 @@ bool PlayerImpl::Open(const std::string& filepath) {
         }
     }
 
+    SPDLOG_INFO("Player: opened '{}'", filepath);
     return true;
 }
 
 void PlayerImpl::Close() {
+    SPDLOG_INFO("Player: closing");
     running_ = false;
     paused_ = false;
 
@@ -120,6 +125,7 @@ void PlayerImpl::Play() {
     if (!running_) {
         running_ = true;
         paused_ = false;
+        SPDLOG_INFO("Player: play (starting threads)");
 
         // Start demux
         demuxer_.Start(&audio_packet_queue_, &video_packet_queue_);
@@ -139,6 +145,7 @@ void PlayerImpl::Play() {
         video_render_thread_ = std::thread(&PlayerImpl::VideoRenderLoop, this);
     } else {
         // Resume from pause
+        SPDLOG_INFO("Player: resumed from pause");
         paused_ = false;
         if (audio_output_) audio_output_->SetPaused(false);
     }
@@ -146,11 +153,13 @@ void PlayerImpl::Play() {
 
 void PlayerImpl::Pause() {
     if (!running_ || paused_) return;
+    SPDLOG_INFO("Player: paused");
     paused_ = true;
     if (audio_output_) audio_output_->SetPaused(true);
 }
 
 void PlayerImpl::Seek(double position_seconds) {
+    SPDLOG_INFO("Player: seek to {:.2f}s", position_seconds);
     // Flush queues
     audio_packet_queue_.Flush();
     video_packet_queue_.Flush();

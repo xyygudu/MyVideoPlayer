@@ -7,6 +7,8 @@
 #include "frame_queue.h"
 #include "packet_queue.h"
 
+#include <spdlog/spdlog.h>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -36,6 +38,7 @@ bool AudioOutput::Open(AVStream* stream, PacketQueue* packet_queue, Clock* audio
 
     // Initialize SDL audio subsystem
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        SPDLOG_ERROR("AudioOutput: SDL_InitSubSystem failed: {}", SDL_GetError());
         return false;
     }
 
@@ -48,6 +51,7 @@ bool AudioOutput::Open(AVStream* stream, PacketQueue* packet_queue, Clock* audio
     sdl_stream_ =
         SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &src_spec, nullptr, nullptr);
     if (!sdl_stream_) {
+        SPDLOG_ERROR("AudioOutput: SDL_OpenAudioDeviceStream failed: {}", SDL_GetError());
         return false;
     }
 
@@ -56,9 +60,12 @@ bool AudioOutput::Open(AVStream* stream, PacketQueue* packet_queue, Clock* audio
     audio_frame_queue_ = std::make_unique<FrameQueue>(64);
 
     if (!decoder_->Open(stream)) {
+        SPDLOG_ERROR("AudioOutput: failed to open audio decoder");
         return false;
     }
 
+    SPDLOG_INFO("AudioOutput: opened (rate={}, channels={})", stream->codecpar->sample_rate,
+                stream->codecpar->ch_layout.nb_channels);
     return true;
 }
 

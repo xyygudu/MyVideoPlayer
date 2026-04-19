@@ -1,5 +1,7 @@
 #include "packet_queue.h"
 
+#include <spdlog/spdlog.h>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 }
@@ -51,6 +53,7 @@ void PacketQueue::Flush() {
 
 void PacketQueue::Abort() {
     std::lock_guard<std::mutex> lock(mutex_);
+    SPDLOG_INFO("PacketQueue: abort (size={})", queue_.size());
     abort_ = true;
     cond_push_.notify_all();
     cond_pop_.notify_all();

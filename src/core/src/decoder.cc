@@ -3,6 +3,8 @@
 #include "frame_queue.h"
 #include "packet_queue.h"
 
+#include <spdlog/spdlog.h>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -30,7 +32,10 @@ bool Decoder::Open(AVStream* stream) {
     stream_ = stream;
 
     const AVCodec* codec = avcodec_find_decoder(stream->codecpar->codec_id);
-    if (!codec) return false;
+    if (!codec) {
+        SPDLOG_ERROR("Decoder: codec not found for id {}", (int)stream->codecpar->codec_id);
+        return false;
+    }
 
     codec_ctx_ = avcodec_alloc_context3(codec);
     if (!codec_ctx_) return false;
@@ -41,10 +46,12 @@ bool Decoder::Open(AVStream* stream) {
     }
 
     if (avcodec_open2(codec_ctx_, codec, nullptr) < 0) {
+        SPDLOG_ERROR("Decoder: failed to open codec '{}'", codec->name);
         avcodec_free_context(&codec_ctx_);
         return false;
     }
 
+    SPDLOG_INFO("Decoder: opened codec '{}'", codec->name);
     return true;
 }
 

@@ -1,5 +1,6 @@
 find_package(FFmpeg REQUIRED)
 find_package(SDL3 REQUIRED CONFIG)
+find_package(spdlog REQUIRED)
 
 file(GLOB_RECURSE MVP_CORE_SOURCES src/*.cc)
 file(GLOB_RECURSE MVP_CORE_HEADERS src/*.h include/*.h)
@@ -19,6 +20,7 @@ target_link_libraries(mvp_core
     FFmpeg::FFmpeg
   PRIVATE
     SDL3::SDL3
+    spdlog::spdlog
 )
 
 # Export symbols on Windows
