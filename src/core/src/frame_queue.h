@@ -11,7 +11,7 @@ namespace mvp {
 
 class FrameQueue {
   public:
-    explicit FrameQueue(int max_size = 16);
+    explicit FrameQueue(int max_size = 4);
     ~FrameQueue();
 
     FrameQueue(const FrameQueue&) = delete;

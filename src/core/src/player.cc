@@ -45,7 +45,7 @@ class PlayerImpl {
 
     PacketQueue audio_packet_queue_;
     PacketQueue video_packet_queue_;
-    FrameQueue video_frame_queue_;
+    FrameQueue video_frame_queue_{3};
 
     Clock audio_clock_;
 

@@ -2,6 +2,7 @@
 #define MVP_PACKET_QUEUE_H_
 
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <queue>
 
@@ -11,13 +12,13 @@ namespace mvp {
 
 class PacketQueue {
   public:
-    explicit PacketQueue(int max_size = 256);
+    explicit PacketQueue(int64_t max_bytes = 15 * 1024 * 1024);
     ~PacketQueue();
 
     PacketQueue(const PacketQueue&) = delete;
     PacketQueue& operator=(const PacketQueue&) = delete;
 
-    // Push a packet (blocks if queue is full). Takes ownership of pkt data.
+    // Push a packet (blocks if byte limit reached). Takes ownership of pkt data.
     void Push(AVPacket* pkt);
 
     // Pop a packet (blocks if queue is empty). Caller owns the returned packet.
@@ -31,13 +32,15 @@ class PacketQueue {
     void Abort();
 
     int Size() const;
+    int64_t ByteSize() const;
 
   private:
     std::queue<AVPacket*> queue_;
     mutable std::mutex mutex_;
     std::condition_variable cond_push_;
     std::condition_variable cond_pop_;
-    int max_size_;
+    int64_t max_bytes_;
+    int64_t total_bytes_;
     bool abort_;
 };
 

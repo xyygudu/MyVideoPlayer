@@ -57,7 +57,7 @@ bool AudioOutput::Open(AVStream* stream, PacketQueue* packet_queue, Clock* audio
 
     // Create decoder and frame queue for audio
     decoder_ = std::make_unique<Decoder>();
-    audio_frame_queue_ = std::make_unique<FrameQueue>(64);
+    audio_frame_queue_ = std::make_unique<FrameQueue>(9);
 
     if (!decoder_->Open(stream)) {
         SPDLOG_ERROR("AudioOutput: failed to open audio decoder");
