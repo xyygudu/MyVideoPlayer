@@ -1,5 +1,7 @@
 #include "main_window.h"
 
+#include <cmath>
+
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QMouseEvent>
@@ -67,7 +69,10 @@ void MainWindow::SetupUi() {
     progress_slider_->setRange(0, 1000);
     progress_slider_->installEventFilter(this);
     connect(progress_slider_, &QSlider::sliderPressed, this, [this] { slider_pressed_ = true; });
-    connect(progress_slider_, &QSlider::sliderReleased, this, [this] { slider_pressed_ = false; });
+    connect(progress_slider_, &QSlider::sliderReleased, this, [this] {
+        OnSliderMoved(progress_slider_->value());
+        // slider_pressed_ stays true — timer clears it when video catches up
+    });
     connect(progress_slider_, &QSlider::sliderMoved, this, &MainWindow::OnSliderMoved);
     control_layout->addWidget(progress_slider_, 1);
 
@@ -121,6 +126,13 @@ void MainWindow::OnTimerTick() {
     double video_pos = player_->CurrentVideoPosition();
     double fps = player_->VideoFps();
 
+    // slider_pressed_ stays true after release until video catches up
+    if (slider_pressed_ && !progress_slider_->isSliderDown() && duration > 0) {
+        double slider_seconds = progress_slider_->value() / 1000.0 * duration;
+        if (std::abs(video_pos - slider_seconds) < 1.0) {
+            slider_pressed_ = false;
+        }
+    }
     if (!slider_pressed_ && duration > 0) {
         int slider_pos = static_cast<int>(video_pos / duration * 1000.0);
         progress_slider_->setValue(slider_pos);
@@ -156,16 +168,37 @@ QString MainWindow::FormatTime(double seconds) const {
 }
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
-    if (obj == progress_slider_ && event->type() == QEvent::MouseButtonPress) {
-        auto* mouse_event = static_cast<QMouseEvent*>(event);
-        if (mouse_event->button() == Qt::LeftButton) {
+    if (obj == progress_slider_) {
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto* mouse_event = static_cast<QMouseEvent*>(event);
+            if (mouse_event->button() == Qt::LeftButton) {
+                int value = QStyle::sliderValueFromPosition(
+                    progress_slider_->minimum(), progress_slider_->maximum(),
+                    mouse_event->pos().x(), progress_slider_->width());
+                progress_slider_->setValue(value);
+                slider_pressed_ = true;
+                // Don't seek on press — wait for drag or release
+                return true;
+            }
+        } else if (event->type() == QEvent::MouseMove && slider_pressed_) {
+            auto* mouse_event = static_cast<QMouseEvent*>(event);
             int value = QStyle::sliderValueFromPosition(
                 progress_slider_->minimum(), progress_slider_->maximum(),
                 mouse_event->pos().x(), progress_slider_->width());
             progress_slider_->setValue(value);
-            slider_pressed_ = true;
             OnSliderMoved(value);
             return true;
+        } else if (event->type() == QEvent::MouseButtonRelease && slider_pressed_) {
+            auto* mouse_event = static_cast<QMouseEvent*>(event);
+            if (mouse_event->button() == Qt::LeftButton) {
+                int value = QStyle::sliderValueFromPosition(
+                    progress_slider_->minimum(), progress_slider_->maximum(),
+                    mouse_event->pos().x(), progress_slider_->width());
+                progress_slider_->setValue(value);
+                OnSliderMoved(value);
+                // slider_pressed_ stays true — timer clears it when video catches up
+                return true;
+            }
         }
     }
     return QMainWindow::eventFilter(obj, event);
