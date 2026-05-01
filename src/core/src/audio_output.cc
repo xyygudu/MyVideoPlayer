@@ -117,6 +117,9 @@ void AudioOutput::FlushFrameQueue() {
     if (audio_frame_queue_) {
         audio_frame_queue_->FlushAndIncrementSerial();
     }
+    if (sdl_stream_) {
+        SDL_ClearAudioStream(sdl_stream_);
+    }
 }
 
 void AudioOutput::AudioLoop() {

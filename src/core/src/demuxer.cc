@@ -117,8 +117,11 @@ void Demuxer::DemuxLoop() {
 
         int ret = av_read_frame(format_ctx_, pkt);
         if (ret < 0) {
-            // EOF or error
-            break;
+            // EOF or error — wait for a seek request instead of exiting
+            while (running_ && !seek_requested_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            continue;
         }
 
         if (pkt->stream_index == audio_stream_index_ && audio_queue_) {

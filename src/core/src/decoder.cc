@@ -121,6 +121,12 @@ void Decoder::DecodeLoop() {
             last_serial_ = pkt_serial;
         }
 
+        // Discard stale packets pushed between flush-increment and actual seek
+        if (pkt_serial != packet_queue_->serial()) {
+            av_packet_unref(pkt);
+            continue;
+        }
+
         int ret = avcodec_send_packet(codec_ctx_, pkt);
         av_packet_unref(pkt);
         if (ret < 0) continue;
