@@ -23,7 +23,8 @@ Decoder::Decoder()
       convert_to_rgb_(false),
       dst_width_(0),
       dst_height_(0),
-      running_(false) {}
+      running_(false),
+      flush_requested_(false) {}
 
 Decoder::~Decoder() { Close(); }
 
@@ -92,6 +93,8 @@ void Decoder::Stop() {
     }
 }
 
+void Decoder::RequestFlush() { flush_requested_ = true; }
+
 void Decoder::FlushBuffers() {
     if (codec_ctx_) {
         avcodec_flush_buffers(codec_ctx_);
@@ -118,6 +121,12 @@ void Decoder::DecodeLoop() {
     while (running_) {
         if (!packet_queue_->Pop(pkt)) {
             break;  // Aborted
+        }
+
+        // Handle flush request from seek (must run in decode thread to avoid race)
+        if (flush_requested_) {
+            avcodec_flush_buffers(codec_ctx_);
+            flush_requested_ = false;
         }
 
         int ret = avcodec_send_packet(codec_ctx_, pkt);

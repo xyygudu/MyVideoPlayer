@@ -165,12 +165,12 @@ void PlayerImpl::Seek(double position_seconds) {
     video_packet_queue_.Flush();
     video_frame_queue_.Flush();
 
-    // Flush decoders
+    // Request decoders to flush (executed in their own threads to avoid race)
     if (audio_output_ && audio_output_->GetDecoder()) {
-        audio_output_->GetDecoder()->FlushBuffers();
+        audio_output_->GetDecoder()->RequestFlush();
     }
     if (video_decoder_) {
-        video_decoder_->FlushBuffers();
+        video_decoder_->RequestFlush();
     }
 
     // Request demuxer to seek
