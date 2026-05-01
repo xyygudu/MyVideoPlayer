@@ -32,6 +32,8 @@ class MVP_CORE_EXPORT Player {
     // State queries
     double Duration() const;
     double CurrentPosition() const;
+    double CurrentVideoPosition() const;
+    double VideoFps() const;
     bool IsPlaying() const;
 
     // Callback registration

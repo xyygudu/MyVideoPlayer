@@ -37,6 +37,9 @@ class Decoder {
     // Flush the decoder buffers directly. Only safe when decode thread is NOT running.
     void FlushBuffers();
 
+    // Returns true after the decoder has completed the requested flush.
+    bool FlushCompleted() const { return flush_completed_.load(); }
+
     AVCodecContext* CodecContext() const { return codec_ctx_; }
 
   private:
@@ -57,6 +60,7 @@ class Decoder {
     std::thread decode_thread_;
     std::atomic<bool> running_;
     std::atomic<bool> flush_requested_;
+    std::atomic<bool> flush_completed_{true};
 };
 
 }  // namespace mvp

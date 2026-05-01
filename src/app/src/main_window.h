@@ -34,6 +34,7 @@ class MainWindow : public QMainWindow {
     QPushButton* open_btn_;
     QSlider* progress_slider_;
     QLabel* time_label_;
+    QLabel* frame_label_;
     QTimer* timer_;
 
     std::unique_ptr<mvp::Player> player_;

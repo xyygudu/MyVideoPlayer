@@ -33,6 +33,8 @@ class PlayerImpl {
     void Seek(double position_seconds);
     double Duration() const;
     double CurrentPosition() const;
+    double CurrentVideoPosition() const;
+    double VideoFps() const;
     bool IsPlaying() const;
     void SetVideoFrameCallback(Player::VideoFrameCallback cb);
 
@@ -48,12 +50,15 @@ class PlayerImpl {
     FrameQueue video_frame_queue_{3};
 
     Clock audio_clock_;
+    std::atomic<double> video_pts_{0.0};
+    double video_fps_{0.0};
 
     Player::VideoFrameCallback video_frame_cb_;
 
     std::thread video_render_thread_;
     std::atomic<bool> running_;
     std::atomic<bool> paused_;
+    std::atomic<bool> step_one_frame_{false};
 };
 
 PlayerImpl::PlayerImpl() : running_(false), paused_(false) {}
@@ -83,6 +88,14 @@ bool PlayerImpl::Open(const std::string& filepath) {
         AVStream* video_stream = demuxer_.FormatContext()->streams[demuxer_.VideoStreamIndex()];
         if (!video_decoder_->Open(video_stream)) {
             video_decoder_.reset();
+        }
+    }
+
+    // Cache video FPS
+    if (demuxer_.VideoStreamIndex() >= 0) {
+        AVStream* vs = demuxer_.FormatContext()->streams[demuxer_.VideoStreamIndex()];
+        if (vs->avg_frame_rate.den > 0) {
+            video_fps_ = av_q2d(vs->avg_frame_rate);
         }
     }
 
@@ -176,11 +189,21 @@ void PlayerImpl::Seek(double position_seconds) {
     // Request demuxer to seek
     demuxer_.RequestSeek(position_seconds);
     audio_clock_.Set(position_seconds);
+
+    if (paused_) {
+        step_one_frame_ = true;
+    }
 }
 
 double PlayerImpl::Duration() const { return demuxer_.Duration(); }
 
 double PlayerImpl::CurrentPosition() const { return audio_clock_.Get(); }
+
+double PlayerImpl::CurrentVideoPosition() const {
+    return video_pts_.load(std::memory_order_relaxed);
+}
+
+double PlayerImpl::VideoFps() const { return video_fps_; }
 
 bool PlayerImpl::IsPlaying() const { return running_ && !paused_; }
 
@@ -196,9 +219,20 @@ void PlayerImpl::VideoRenderLoop() {
     }
 
     while (running_) {
-        if (paused_) {
+        bool stepping = step_one_frame_.load();
+        if (paused_ && !stepping) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
+        }
+
+        if (stepping) {
+            step_one_frame_ = false;
+            // Wait for decoder flush to complete so we don't pop stale frames
+            if (video_decoder_) {
+                while (!video_decoder_->FlushCompleted() && running_) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            }
         }
 
         if (!video_frame_queue_.Pop(frame)) {
@@ -211,19 +245,21 @@ void PlayerImpl::VideoRenderLoop() {
             pts = static_cast<double>(frame->pts) * av_q2d(video_stream->time_base);
         }
 
-        // Sync to audio clock
-        double audio_time = audio_clock_.Get();
-        double diff = pts - audio_time;
+        if (!stepping) {
+            // Sync to audio clock (skip when stepping while paused)
+            double audio_time = audio_clock_.Get();
+            double diff = pts - audio_time;
 
-        if (diff > 0.01) {
-            // Video is ahead, wait
-            int wait_ms = static_cast<int>(diff * 1000);
-            if (wait_ms > 100) wait_ms = 100;  // Cap wait
-            std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
-        } else if (diff < -0.1) {
-            // Video is behind, drop frame
-            av_frame_unref(frame);
-            continue;
+            if (diff > 0.01) {
+                // Video is ahead, wait
+                int wait_ms = static_cast<int>(diff * 1000);
+                if (wait_ms > 100) wait_ms = 100;  // Cap wait
+                std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
+            } else if (diff < -0.1) {
+                // Video is behind, drop frame
+                av_frame_unref(frame);
+                continue;
+            }
         }
 
         // Deliver frame via callback
@@ -231,6 +267,7 @@ void PlayerImpl::VideoRenderLoop() {
             video_frame_cb_(frame->data[0], frame->width, frame->height);
         }
 
+        video_pts_.store(pts, std::memory_order_relaxed);
         av_frame_unref(frame);
     }
 
@@ -248,6 +285,8 @@ void Player::Pause() { impl_->Pause(); }
 void Player::Seek(double position_seconds) { impl_->Seek(position_seconds); }
 double Player::Duration() const { return impl_->Duration(); }
 double Player::CurrentPosition() const { return impl_->CurrentPosition(); }
+double Player::CurrentVideoPosition() const { return impl_->CurrentVideoPosition(); }
+double Player::VideoFps() const { return impl_->VideoFps(); }
 bool Player::IsPlaying() const { return impl_->IsPlaying(); }
 void Player::SetVideoFrameCallback(VideoFrameCallback cb) {
     impl_->SetVideoFrameCallback(std::move(cb));

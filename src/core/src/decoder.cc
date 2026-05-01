@@ -93,7 +93,10 @@ void Decoder::Stop() {
     }
 }
 
-void Decoder::RequestFlush() { flush_requested_ = true; }
+void Decoder::RequestFlush() {
+    flush_completed_ = false;
+    flush_requested_ = true;
+}
 
 void Decoder::FlushBuffers() {
     if (codec_ctx_) {
@@ -126,7 +129,9 @@ void Decoder::DecodeLoop() {
         // Handle flush request from seek (must run in decode thread to avoid race)
         if (flush_requested_) {
             avcodec_flush_buffers(codec_ctx_);
+            frame_queue_->Flush();  // Discard stale frames pushed during race window
             flush_requested_ = false;
+            flush_completed_ = true;
         }
 
         int ret = avcodec_send_packet(codec_ctx_, pkt);
@@ -134,6 +139,7 @@ void Decoder::DecodeLoop() {
         if (ret < 0) continue;
 
         while (ret >= 0 && running_) {
+            if (flush_requested_) break;  // Stop pushing stale frames
             ret = avcodec_receive_frame(codec_ctx_, frame);
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
             if (ret < 0) break;

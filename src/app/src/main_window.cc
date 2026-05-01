@@ -70,6 +70,10 @@ void MainWindow::SetupUi() {
     time_label_->setFixedWidth(140);
     control_layout->addWidget(time_label_);
 
+    frame_label_ = new QLabel("", control_widget);
+    frame_label_->setFixedWidth(120);
+    control_layout->addWidget(frame_label_);
+
     main_layout->addWidget(control_widget);
 }
 
@@ -111,13 +115,30 @@ void MainWindow::OnSliderReleased() {
 void MainWindow::OnTimerTick() {
     double duration = player_->Duration();
     double position = player_->CurrentPosition();
+    double video_pos = player_->CurrentVideoPosition();
+    double fps = player_->VideoFps();
 
     if (!slider_pressed_ && duration > 0) {
-        int slider_pos = static_cast<int>(position / duration * 1000.0);
+        int slider_pos = static_cast<int>(video_pos / duration * 1000.0);
         progress_slider_->setValue(slider_pos);
     }
 
     time_label_->setText(FormatTime(position) + " / " + FormatTime(duration));
+
+    if (fps > 0 && duration > 0) {
+        int total_seconds = static_cast<int>(video_pos);
+        int h = total_seconds / 3600;
+        int m = (total_seconds % 3600) / 60;
+        int s = total_seconds % 60;
+        int frame_in_second = static_cast<int>((video_pos - total_seconds) * fps);
+        frame_label_->setText(QString("%1:%2:%3.%4")
+                                  .arg(h, 2, 10, QChar('0'))
+                                  .arg(m, 2, 10, QChar('0'))
+                                  .arg(s, 2, 10, QChar('0'))
+                                  .arg(frame_in_second, 2, 10, QChar('0')));
+    } else {
+        frame_label_->setText("");
+    }
 }
 
 QString MainWindow::FormatTime(double seconds) const {
