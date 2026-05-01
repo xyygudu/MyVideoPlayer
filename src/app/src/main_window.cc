@@ -18,8 +18,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), slider_pressed_(f
     SetupUi();
 
     // Set up video frame callback
-    player_->SetVideoFrameCallback([this](const uint8_t* data, int width, int height) {
-        QImage image(data, width, height, width * 4, QImage::Format_RGB32);
+    player_->SetVideoFrameCallback([this](const uint8_t* data, int width, int height, int stride) {
+        QImage image(data, width, height, stride, QImage::Format_RGB32);
         // Use queued connection to update from render thread to UI thread
         QMetaObject::invokeMethod(video_widget_, "UpdateFrame", Qt::QueuedConnection,
                                   Q_ARG(QImage, image.copy()));

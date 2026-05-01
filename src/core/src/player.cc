@@ -257,7 +257,7 @@ void PlayerImpl::VideoRenderLoop() {
 
         // Deliver frame via callback
         if (video_frame_cb_ && frame->data[0]) {
-            video_frame_cb_(frame->data[0], frame->width, frame->height);
+            video_frame_cb_(frame->data[0], frame->width, frame->height, frame->linesize[0]);
         }
 
         video_pts_.store(pts, std::memory_order_relaxed);

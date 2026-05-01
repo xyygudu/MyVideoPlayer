@@ -37,7 +37,7 @@ class MVP_CORE_EXPORT Player {
     bool IsPlaying() const;
 
     // Callback registration
-    using VideoFrameCallback = std::function<void(const uint8_t* data, int width, int height)>;
+    using VideoFrameCallback = std::function<void(const uint8_t* data, int width, int height, int stride)>;
     void SetVideoFrameCallback(VideoFrameCallback cb);
 
   private:
