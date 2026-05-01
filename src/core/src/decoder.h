@@ -30,16 +30,6 @@ class Decoder {
     void Start(PacketQueue* packet_queue, FrameQueue* frame_queue, bool convert_to_rgb = false);
     void Stop();
 
-    // Request the decode thread to flush codec buffers (thread-safe, non-blocking).
-    // The actual flush happens inside DecodeLoop before the next send_packet.
-    void RequestFlush();
-
-    // Flush the decoder buffers directly. Only safe when decode thread is NOT running.
-    void FlushBuffers();
-
-    // Returns true after the decoder has completed the requested flush.
-    bool FlushCompleted() const { return flush_completed_.load(); }
-
     AVCodecContext* CodecContext() const { return codec_ctx_; }
 
   private:
@@ -59,8 +49,7 @@ class Decoder {
 
     std::thread decode_thread_;
     std::atomic<bool> running_;
-    std::atomic<bool> flush_requested_;
-    std::atomic<bool> flush_completed_{true};
+    int last_serial_{0};  // Tracks serial for flush-on-change
 };
 
 }  // namespace mvp

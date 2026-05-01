@@ -126,9 +126,9 @@ void PlayerImpl::Close() {
     demuxer_.Close();
 
     // Flush queues
-    audio_packet_queue_.Flush();
-    video_packet_queue_.Flush();
-    video_frame_queue_.Flush();
+    audio_packet_queue_.FlushAndIncrementSerial();
+    video_packet_queue_.FlushAndIncrementSerial();
+    video_frame_queue_.FlushAndIncrementSerial();
     audio_clock_.Reset();
 }
 
@@ -173,20 +173,12 @@ void PlayerImpl::Pause() {
 
 void PlayerImpl::Seek(double position_seconds) {
     SPDLOG_INFO("Player: seek to {:.2f}s", position_seconds);
-    // Flush queues
-    audio_packet_queue_.Flush();
-    video_packet_queue_.Flush();
-    video_frame_queue_.Flush();
+    // Flush + increment serial (FFplay dual-insurance: immediate free + serial guard)
+    audio_packet_queue_.FlushAndIncrementSerial();
+    video_packet_queue_.FlushAndIncrementSerial();
+    video_frame_queue_.FlushAndIncrementSerial();
+    if (audio_output_) audio_output_->FlushFrameQueue();
 
-    // Request decoders to flush (executed in their own threads to avoid race)
-    if (audio_output_ && audio_output_->GetDecoder()) {
-        audio_output_->GetDecoder()->RequestFlush();
-    }
-    if (video_decoder_) {
-        video_decoder_->RequestFlush();
-    }
-
-    // Request demuxer to seek
     demuxer_.RequestSeek(position_seconds);
     audio_clock_.Set(position_seconds);
 
@@ -225,18 +217,21 @@ void PlayerImpl::VideoRenderLoop() {
             continue;
         }
 
-        if (stepping) {
-            step_one_frame_ = false;
-            // Wait for decoder flush to complete so we don't pop stale frames
-            if (video_decoder_) {
-                while (!video_decoder_->FlushCompleted() && running_) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-            }
+        int frame_serial = 0;
+        if (!video_frame_queue_.Pop(frame, &frame_serial)) {
+            break;  // Aborted
         }
 
-        if (!video_frame_queue_.Pop(frame)) {
-            break;  // Aborted
+        // Discard stale frames from before seek (compare against packet queue serial)
+        int current_serial = video_packet_queue_.serial();
+        if (frame_serial != current_serial) {
+            av_frame_unref(frame);
+            continue;  // Keep stepping flag alive until we get a valid frame
+        }
+
+        // Clear step flag only after accepting a valid frame
+        if (stepping) {
+            step_one_frame_ = false;
         }
 
         // Calculate PTS
@@ -251,12 +246,10 @@ void PlayerImpl::VideoRenderLoop() {
             double diff = pts - audio_time;
 
             if (diff > 0.01) {
-                // Video is ahead, wait
                 int wait_ms = static_cast<int>(diff * 1000);
-                if (wait_ms > 100) wait_ms = 100;  // Cap wait
+                if (wait_ms > 100) wait_ms = 100;
                 std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
             } else if (diff < -0.1) {
-                // Video is behind, drop frame
                 av_frame_unref(frame);
                 continue;
             }

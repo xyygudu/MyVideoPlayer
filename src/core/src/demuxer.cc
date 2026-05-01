@@ -99,6 +99,9 @@ double Demuxer::Duration() const {
 
 void Demuxer::DemuxLoop() {
     AVPacket* pkt = av_packet_alloc();
+    // Local serial copies: only updated after seek, so pre-seek packets keep old serial
+    int audio_serial = audio_queue_ ? audio_queue_->serial() : 0;
+    int video_serial = video_queue_ ? video_queue_->serial() : 0;
 
     while (running_) {
         // Handle seek request
@@ -106,9 +109,10 @@ void Demuxer::DemuxLoop() {
             double pos = seek_position_;
             int64_t timestamp = static_cast<int64_t>(pos * AV_TIME_BASE);
             av_seek_frame(format_ctx_, -1, timestamp, AVSEEK_FLAG_BACKWARD);
-            if (audio_queue_) audio_queue_->Flush();
-            if (video_queue_) video_queue_->Flush();
             seek_requested_ = false;
+            // Read latest serial AFTER seek (main thread already flushed+incremented)
+            if (audio_queue_) audio_serial = audio_queue_->serial();
+            if (video_queue_) video_serial = video_queue_->serial();
         }
 
         int ret = av_read_frame(format_ctx_, pkt);
@@ -118,9 +122,9 @@ void Demuxer::DemuxLoop() {
         }
 
         if (pkt->stream_index == audio_stream_index_ && audio_queue_) {
-            audio_queue_->Push(pkt);
+            audio_queue_->Push(pkt, audio_serial);
         } else if (pkt->stream_index == video_stream_index_ && video_queue_) {
-            video_queue_->Push(pkt);
+            video_queue_->Push(pkt, video_serial);
         }
         av_packet_unref(pkt);
     }

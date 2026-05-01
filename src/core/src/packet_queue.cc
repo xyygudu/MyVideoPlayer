@@ -11,9 +11,9 @@ namespace mvp {
 PacketQueue::PacketQueue(int64_t max_bytes)
     : max_bytes_(max_bytes), total_bytes_(0), abort_(false) {}
 
-PacketQueue::~PacketQueue() { Flush(); }
+PacketQueue::~PacketQueue() { FlushAndIncrementSerial(); }
 
-void PacketQueue::Push(AVPacket* pkt) {
+void PacketQueue::Push(AVPacket* pkt, int serial) {
     AVPacket* copy = av_packet_alloc();
     av_packet_move_ref(copy, pkt);
 
@@ -24,33 +24,35 @@ void PacketQueue::Push(AVPacket* pkt) {
         return;
     }
     total_bytes_ += copy->size;
-    queue_.push(copy);
+    queue_.push({copy, serial});
     cond_pop_.notify_one();
 }
 
-bool PacketQueue::Pop(AVPacket* pkt) {
+bool PacketQueue::Pop(AVPacket* pkt, int* out_serial) {
     std::unique_lock<std::mutex> lock(mutex_);
     cond_pop_.wait(lock, [this] { return abort_ || !queue_.empty(); });
     if (abort_ && queue_.empty()) {
         return false;
     }
-    AVPacket* front = queue_.front();
+    SerialPacket sp = queue_.front();
     queue_.pop();
-    total_bytes_ -= front->size;
-    av_packet_move_ref(pkt, front);
-    av_packet_free(&front);
+    total_bytes_ -= sp.pkt->size;
+    av_packet_move_ref(pkt, sp.pkt);
+    av_packet_free(&sp.pkt);
+    *out_serial = sp.serial;
     cond_push_.notify_one();
     return true;
 }
 
-void PacketQueue::Flush() {
+void PacketQueue::FlushAndIncrementSerial() {
     std::lock_guard<std::mutex> lock(mutex_);
     while (!queue_.empty()) {
-        AVPacket* pkt = queue_.front();
+        SerialPacket sp = queue_.front();
         queue_.pop();
-        av_packet_free(&pkt);
+        av_packet_free(&sp.pkt);
     }
     total_bytes_ = 0;
+    serial_.fetch_add(1, std::memory_order_release);
     abort_ = false;
     cond_push_.notify_all();
 }

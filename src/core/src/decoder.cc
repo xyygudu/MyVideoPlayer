@@ -23,8 +23,7 @@ Decoder::Decoder()
       convert_to_rgb_(false),
       dst_width_(0),
       dst_height_(0),
-      running_(false),
-      flush_requested_(false) {}
+      running_(false) {}
 
 Decoder::~Decoder() { Close(); }
 
@@ -93,17 +92,6 @@ void Decoder::Stop() {
     }
 }
 
-void Decoder::RequestFlush() {
-    flush_completed_ = false;
-    flush_requested_ = true;
-}
-
-void Decoder::FlushBuffers() {
-    if (codec_ctx_) {
-        avcodec_flush_buffers(codec_ctx_);
-    }
-}
-
 void Decoder::DecodeLoop() {
     AVPacket* pkt = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
@@ -122,16 +110,15 @@ void Decoder::DecodeLoop() {
     }
 
     while (running_) {
-        if (!packet_queue_->Pop(pkt)) {
+        int pkt_serial = 0;
+        if (!packet_queue_->Pop(pkt, &pkt_serial)) {
             break;  // Aborted
         }
 
-        // Handle flush request from seek (must run in decode thread to avoid race)
-        if (flush_requested_) {
+        // Serial changed → seek happened, flush codec internal buffers
+        if (pkt_serial != last_serial_) {
             avcodec_flush_buffers(codec_ctx_);
-            frame_queue_->Flush();  // Discard stale frames pushed during race window
-            flush_requested_ = false;
-            flush_completed_ = true;
+            last_serial_ = pkt_serial;
         }
 
         int ret = avcodec_send_packet(codec_ctx_, pkt);
@@ -139,30 +126,22 @@ void Decoder::DecodeLoop() {
         if (ret < 0) continue;
 
         while (ret >= 0 && running_) {
-            if (flush_requested_) break;  // Stop pushing stale frames
             ret = avcodec_receive_frame(codec_ctx_, frame);
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
             if (ret < 0) break;
 
-            // Calculate PTS in seconds
-            double pts = 0.0;
-            if (frame->pts != AV_NOPTS_VALUE) {
-                pts = static_cast<double>(frame->pts) * av_q2d(stream_->time_base);
-            }
-
             if (convert_to_rgb_ && sws_ctx_ && rgb_frame) {
-                sws_scale(sws_ctx_, frame->data, frame->linesize, 0, frame->height, rgb_frame->data,
-                          rgb_frame->linesize);
+                sws_scale(sws_ctx_, frame->data, frame->linesize, 0, frame->height,
+                          rgb_frame->data, rgb_frame->linesize);
                 rgb_frame->pts = frame->pts;
 
-                // Store PTS in the frame for sync
                 AVFrame* out = av_frame_alloc();
                 av_frame_ref(out, rgb_frame);
                 out->pts = frame->pts;
-                frame_queue_->Push(out);
+                frame_queue_->Push(out, last_serial_);
                 av_frame_free(&out);
             } else {
-                frame_queue_->Push(frame);
+                frame_queue_->Push(frame, last_serial_);
             }
             av_frame_unref(frame);
         }

@@ -30,6 +30,7 @@ class AudioOutput {
     void Start();
     void Stop();
     void SetPaused(bool paused);
+    void FlushFrameQueue();
 
     Decoder* GetDecoder() { return decoder_.get(); }
 

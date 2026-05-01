@@ -113,9 +113,16 @@ void AudioOutput::SetPaused(bool paused) {
     }
 }
 
+void AudioOutput::FlushFrameQueue() {
+    if (audio_frame_queue_) {
+        audio_frame_queue_->FlushAndIncrementSerial();
+    }
+}
+
 void AudioOutput::AudioLoop() {
     AVFrame* frame = av_frame_alloc();
     SwrContext* swr_ctx = nullptr;
+    int frame_serial = 0;
 
     while (running_) {
         if (paused_) {
@@ -133,8 +140,15 @@ void AudioOutput::AudioLoop() {
             continue;
         }
 
-        if (!audio_frame_queue_->Pop(frame)) {
+        if (!audio_frame_queue_->Pop(frame, &frame_serial)) {
             break;  // Aborted
+        }
+
+        // Discard stale frames from before seek (compare against packet queue serial)
+        int current_serial = packet_queue_->serial();
+        if (frame_serial != current_serial) {
+            av_frame_unref(frame);
+            continue;
         }
 
         // Update audio clock
