@@ -2,6 +2,9 @@
 
 #include <QFileDialog>
 #include <QHBoxLayout>
+#include <QMouseEvent>
+#include <QStyle>
+#include <QStyleOptionSlider>
 #include <QVBoxLayout>
 
 #include <spdlog/spdlog.h>
@@ -62,8 +65,10 @@ void MainWindow::SetupUi() {
 
     progress_slider_ = new QSlider(Qt::Horizontal, control_widget);
     progress_slider_->setRange(0, 1000);
+    progress_slider_->installEventFilter(this);
     connect(progress_slider_, &QSlider::sliderPressed, this, [this] { slider_pressed_ = true; });
-    connect(progress_slider_, &QSlider::sliderReleased, this, &MainWindow::OnSliderReleased);
+    connect(progress_slider_, &QSlider::sliderReleased, this, [this] { slider_pressed_ = false; });
+    connect(progress_slider_, &QSlider::sliderMoved, this, &MainWindow::OnSliderMoved);
     control_layout->addWidget(progress_slider_, 1);
 
     time_label_ = new QLabel("00:00:00 / 00:00:00", control_widget);
@@ -103,12 +108,10 @@ void MainWindow::OnPlayPause() {
     }
 }
 
-void MainWindow::OnSliderReleased() {
-    slider_pressed_ = false;
+void MainWindow::OnSliderMoved(int value) {
     double duration = player_->Duration();
     if (duration <= 0) return;
-    double pos = static_cast<double>(progress_slider_->value()) / 1000.0 * duration;
-    SPDLOG_INFO("UI: seek to {:.2f}s", pos);
+    double pos = static_cast<double>(value) / 1000.0 * duration;
     player_->Seek(pos);
 }
 
@@ -150,4 +153,20 @@ QString MainWindow::FormatTime(double seconds) const {
         .arg(h, 2, 10, QChar('0'))
         .arg(m, 2, 10, QChar('0'))
         .arg(s, 2, 10, QChar('0'));
+}
+
+bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
+    if (obj == progress_slider_ && event->type() == QEvent::MouseButtonPress) {
+        auto* mouse_event = static_cast<QMouseEvent*>(event);
+        if (mouse_event->button() == Qt::LeftButton) {
+            int value = QStyle::sliderValueFromPosition(
+                progress_slider_->minimum(), progress_slider_->maximum(),
+                mouse_event->pos().x(), progress_slider_->width());
+            progress_slider_->setValue(value);
+            slider_pressed_ = true;
+            OnSliderMoved(value);
+            return true;
+        }
+    }
+    return QMainWindow::eventFilter(obj, event);
 }

@@ -19,10 +19,13 @@ class MainWindow : public QMainWindow {
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
+  protected:
+    bool eventFilter(QObject* obj, QEvent* event) override;
+
   private slots:
     void OnOpenFile();
     void OnPlayPause();
-    void OnSliderReleased();
+    void OnSliderMoved(int value);
     void OnTimerTick();
 
   private:
