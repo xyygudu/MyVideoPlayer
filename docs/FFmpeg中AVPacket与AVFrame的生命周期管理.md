@@ -11,6 +11,8 @@ FFmpeg 的 AVPacket 和 AVFrame 都采用**两层结构**设计：
 - **壳（结构体）**：存放元数据（pts、size、stream_index 等）和一个指向数据缓冲区的指针
 - **数据缓冲区（AVBufferRef）**：存放实际的压缩/解压数据，通过**引用计数**管理生命周期
 
+> 📊 可视化版本见 [avpacket-avframe-lifecycle.drawio](avpacket-avframe-lifecycle.drawio) → **Page 1: 壳与数据的两层结构**
+
 ```
 ┌──────────────────────────┐
 │  AVPacket / AVFrame 壳    │  ← alloc 分配的是这个
@@ -65,6 +67,8 @@ void av_packet_move_ref(AVPacket *dst, AVPacket *src) {
 ## 3. AVPacket 在本项目中的完整流转
 
 ### 3.1 数据流全景
+
+> 📊 可视化版本见 [avpacket-avframe-lifecycle.drawio](avpacket-avframe-lifecycle.drawio) → **Page 2: AVPacket 数据流全景**
 
 ```
 DemuxLoop (demuxer.cc)          PacketQueue           DecodeLoop (decoder.cc)
@@ -272,6 +276,8 @@ while (...) {
 ---
 
 ## 8. 总结：所有权转移全景图
+
+> 📊 可视化版本见 [avpacket-avframe-lifecycle.drawio](avpacket-avframe-lifecycle.drawio) → **Page 3: 所有权转移全景图**
 
 ```
 av_read_frame          PacketQueue         avcodec_send_packet      FrameQueue          渲染/播放
