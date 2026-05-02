@@ -3,6 +3,8 @@
 #include "frame_queue.h"
 #include "packet_queue.h"
 
+#include <chrono>
+
 #include <spdlog/spdlog.h>
 
 extern "C" {
@@ -124,6 +126,45 @@ void Decoder::DecodeLoop() {
         // Discard stale packets pushed between flush-increment and actual seek
         if (pkt_serial != packet_queue_->serial()) {
             av_packet_unref(pkt);
+            continue;
+        }
+
+        // Null packet (data==NULL) signals EOF from demuxer → enter drain mode
+        if (!pkt->data) {
+            // Send NULL to codec to trigger drain of buffered frames
+            avcodec_send_packet(codec_ctx_, nullptr);
+
+            // Receive all remaining buffered frames
+            while (running_) {
+                int drain_ret = avcodec_receive_frame(codec_ctx_, frame);
+                if (drain_ret == AVERROR_EOF || drain_ret == AVERROR(EAGAIN)) break;
+                if (drain_ret < 0) break;
+
+                if (convert_to_rgb_ && sws_ctx_ && rgb_frame) {
+                    sws_scale(sws_ctx_, frame->data, frame->linesize, 0, frame->height,
+                              rgb_frame->data, rgb_frame->linesize);
+                    rgb_frame->pts = frame->pts;
+
+                    AVFrame* out = av_frame_alloc();
+                    av_frame_ref(out, rgb_frame);
+                    out->pts = frame->pts;
+                    frame_queue_->Push(out, last_serial_);
+                    av_frame_free(&out);
+                } else {
+                    frame_queue_->Push(frame, last_serial_);
+                }
+                av_frame_unref(frame);
+            }
+
+            // Push EOF marker to notify downstream renderer
+            frame_queue_->PushEof(last_serial_);
+
+            // Wait for either abort or a new serial (indicating seek)
+            while (running_) {
+                int current_serial = packet_queue_->serial();
+                if (current_serial != last_serial_) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
             continue;
         }
 

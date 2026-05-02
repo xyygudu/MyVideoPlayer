@@ -7,6 +7,7 @@
 #include <string>
 
 #include "mvp/export.h"
+#include "mvp/player_state.h"
 
 namespace mvp {
 
@@ -28,6 +29,7 @@ class MVP_CORE_EXPORT Player {
     void Play();
     void Pause();
     void Seek(double position_seconds);
+    void StepFrame();
 
     // State queries
     double Duration() const;
@@ -35,10 +37,12 @@ class MVP_CORE_EXPORT Player {
     double CurrentVideoPosition() const;
     double VideoFps() const;
     bool IsPlaying() const;
+    PlayerState State() const;
 
     // Callback registration
     using VideoFrameCallback = std::function<void(const uint8_t* data, int width, int height, int stride)>;
     void SetVideoFrameCallback(VideoFrameCallback cb);
+    void SetPlaybackFinishedCallback(std::function<void()> cb);
 
   private:
     std::unique_ptr<PlayerImpl> impl_;

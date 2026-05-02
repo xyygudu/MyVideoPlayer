@@ -7,13 +7,15 @@
 #include <mutex>
 #include <queue>
 
+#include "sync_constants.h"
+
 struct AVPacket;
 
 namespace mvp {
 
 class PacketQueue {
   public:
-    explicit PacketQueue(int64_t max_bytes = 15 * 1024 * 1024);
+    explicit PacketQueue(int64_t max_bytes = sync::kDefaultMaxQueueBytes);
     ~PacketQueue();
 
     PacketQueue(const PacketQueue&) = delete;
@@ -27,12 +29,17 @@ class PacketQueue {
     // Returns false if aborted. Writes the packet's serial to *out_serial.
     bool Pop(AVPacket* pkt, int* out_serial);
 
-    // Flush all packets, release memory, and increment serial (atomic operation).
-    // Equivalent to FFplay's packet_queue_flush.
-    void FlushAndIncrementSerial();
+    // Flush all packets and increment serial. Does NOT change abort state.
+    // Use for Seek — clears stale data while keeping the queue operational.
+    void Flush();
 
-    // Signal all waiting threads to wake up and abort.
+    // Signal all waiting threads to wake up and abort. Does NOT clear data.
+    // Use for Stop/Close — terminates blocking Push/Pop calls.
     void Abort();
+
+    // Reset to initial state (abort=false, serial=0, data cleared).
+    // Use after Close() to prepare for reuse with a new Open().
+    void Reset();
 
     int serial() const { return serial_.load(std::memory_order_acquire); }
     int Size() const;
@@ -43,6 +50,8 @@ class PacketQueue {
         AVPacket* pkt;
         int serial;
     };
+
+    void ClearLocked();  // Internal: free all packets (must hold mutex_)
 
     std::queue<SerialPacket> queue_;
     mutable std::mutex mutex_;

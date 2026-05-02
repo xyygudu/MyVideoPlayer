@@ -1,9 +1,6 @@
-#include "audio_output.h"
-
-#include <memory>
+#include "audio_renderer.h"
 
 #include "clock.h"
-#include "decoder.h"
 #include "frame_queue.h"
 #include "packet_queue.h"
 
@@ -20,25 +17,24 @@ extern "C" {
 
 namespace mvp {
 
-AudioOutput::AudioOutput()
-    : packet_queue_(nullptr),
+AudioRenderer::AudioRenderer()
+    : frame_queue_(nullptr),
+      packet_queue_(nullptr),
       audio_clock_(nullptr),
       stream_(nullptr),
       sdl_stream_(nullptr),
       running_(false),
       paused_(false) {}
 
-AudioOutput::~AudioOutput() { Close(); }
+AudioRenderer::~AudioRenderer() { Close(); }
 
-bool AudioOutput::Open(AVStream* stream, PacketQueue* packet_queue, Clock* audio_clock) {
+bool AudioRenderer::Open(AVStream* stream) {
     Close();
     stream_ = stream;
-    packet_queue_ = packet_queue;
-    audio_clock_ = audio_clock;
 
     // Initialize SDL audio subsystem
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
-        SPDLOG_ERROR("AudioOutput: SDL_InitSubSystem failed: {}", SDL_GetError());
+        SPDLOG_ERROR("AudioRenderer: SDL_InitSubSystem failed: {}", SDL_GetError());
         return false;
     }
 
@@ -51,28 +47,17 @@ bool AudioOutput::Open(AVStream* stream, PacketQueue* packet_queue, Clock* audio
     sdl_stream_ =
         SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &src_spec, nullptr, nullptr);
     if (!sdl_stream_) {
-        SPDLOG_ERROR("AudioOutput: SDL_OpenAudioDeviceStream failed: {}", SDL_GetError());
+        SPDLOG_ERROR("AudioRenderer: SDL_OpenAudioDeviceStream failed: {}", SDL_GetError());
         return false;
     }
 
-    // Create decoder and frame queue for audio
-    decoder_ = std::make_unique<Decoder>();
-    audio_frame_queue_ = std::make_unique<FrameQueue>(9);
-
-    if (!decoder_->Open(stream)) {
-        SPDLOG_ERROR("AudioOutput: failed to open audio decoder");
-        return false;
-    }
-
-    SPDLOG_INFO("AudioOutput: opened (rate={}, channels={})", stream->codecpar->sample_rate,
+    SPDLOG_INFO("AudioRenderer: opened (rate={}, channels={})", stream->codecpar->sample_rate,
                 stream->codecpar->ch_layout.nb_channels);
     return true;
 }
 
-void AudioOutput::Close() {
+void AudioRenderer::Close() {
     Stop();
-    decoder_.reset();
-    audio_frame_queue_.reset();
 
     if (sdl_stream_) {
         SDL_DestroyAudioStream(sdl_stream_);
@@ -81,28 +66,26 @@ void AudioOutput::Close() {
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }
 
-void AudioOutput::Start() {
+void AudioRenderer::Start(FrameQueue* frame_queue, PacketQueue* packet_queue, Clock* audio_clock) {
     if (running_) return;
-
-    // Start audio decoder thread
-    decoder_->Start(packet_queue_, audio_frame_queue_.get(), false);
+    frame_queue_ = frame_queue;
+    packet_queue_ = packet_queue;
+    audio_clock_ = audio_clock;
 
     running_ = true;
     paused_ = false;
     SDL_ResumeAudioStreamDevice(sdl_stream_);
-    audio_thread_ = std::thread(&AudioOutput::AudioLoop, this);
+    audio_thread_ = std::thread(&AudioRenderer::AudioLoop, this);
 }
 
-void AudioOutput::Stop() {
+void AudioRenderer::Stop() {
     running_ = false;
-    if (audio_frame_queue_) audio_frame_queue_->Abort();
-    if (decoder_) decoder_->Stop();
     if (audio_thread_.joinable()) {
         audio_thread_.join();
     }
 }
 
-void AudioOutput::SetPaused(bool paused) {
+void AudioRenderer::SetPaused(bool paused) {
     paused_ = paused;
     if (sdl_stream_) {
         if (paused) {
@@ -113,16 +96,15 @@ void AudioOutput::SetPaused(bool paused) {
     }
 }
 
-void AudioOutput::FlushFrameQueue() {
-    if (audio_frame_queue_) {
-        audio_frame_queue_->Flush();
-    }
+void AudioRenderer::FlushSdlBuffer() {
     if (sdl_stream_) {
         SDL_ClearAudioStream(sdl_stream_);
     }
 }
 
-void AudioOutput::AudioLoop() {
+void AudioRenderer::SetEofCallback(EofCallback cb) { eof_cb_ = std::move(cb); }
+
+void AudioRenderer::AudioLoop() {
     AVFrame* frame = av_frame_alloc();
     SwrContext* swr_ctx = nullptr;
     int frame_serial = 0;
@@ -143,8 +125,15 @@ void AudioOutput::AudioLoop() {
             continue;
         }
 
-        if (!audio_frame_queue_->Pop(frame, &frame_serial)) {
+        bool is_eof = false;
+        if (!frame_queue_->Pop(frame, &frame_serial, &is_eof)) {
             break;  // Aborted
+        }
+
+        // EOF marker received — notify player and exit loop
+        if (is_eof) {
+            if (eof_cb_) eof_cb_();
+            break;
         }
 
         // Discard stale frames from before seek (compare against packet queue serial)

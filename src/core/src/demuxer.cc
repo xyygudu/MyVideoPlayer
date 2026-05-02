@@ -117,7 +117,20 @@ void Demuxer::DemuxLoop() {
 
         int ret = av_read_frame(format_ctx_, pkt);
         if (ret < 0) {
-            // EOF or error — wait for a seek request instead of exiting
+            if (ret == AVERROR_EOF || avio_feof(format_ctx_->pb)) {
+                // Push null (flush) packets to signal EOF to decoders.
+                // A null packet triggers drain mode in avcodec_send_packet.
+                AVPacket* eof_pkt = av_packet_alloc();
+                if (audio_queue_) {
+                    audio_queue_->Push(eof_pkt, audio_serial);
+                }
+                if (video_queue_) {
+                    av_packet_unref(eof_pkt);  // reset for reuse
+                    video_queue_->Push(eof_pkt, video_serial);
+                }
+                av_packet_free(&eof_pkt);
+            }
+            // Wait for a seek request or stop signal
             while (running_ && !seek_requested_) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
