@@ -8,19 +8,18 @@
 #include <mutex>
 #include <thread>
 
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavutil/frame.h>
+}
+#include <spdlog/spdlog.h>
+
 #include "audio_renderer.h"
 #include "clock.h"
 #include "demuxer.h"
 #include "mvp/player_state.h"
 #include "stream_context.h"
 #include "sync_constants.h"
-
-#include <spdlog/spdlog.h>
-
-extern "C" {
-#include <libavformat/avformat.h>
-#include <libavutil/frame.h>
-}
 
 namespace mvp {
 
@@ -51,6 +50,16 @@ class PlayerImpl {
     const Clock& MasterClock() const;
     bool TransitionTo(PlayerState target);
     void OnStreamEof();
+
+    // Pipeline lifecycle
+    void StopPipeline();
+    void ResetPipeline();
+    void StartPipeline(bool audio_paused);
+
+    // Video render helpers
+    double ComputeDisplayDelay(double pts, double last_pts,
+                               double last_display_time) const;
+    void CheckAllStreamsEof();
 
     Demuxer demuxer_;
     std::unique_ptr<StreamContext> audio_ctx_;
@@ -105,6 +114,8 @@ bool PlayerImpl::TransitionTo(PlayerState target) {
             case PlayerState::Finished:
                 valid = (current == PlayerState::Playing || current == PlayerState::Paused);
                 break;
+            default:
+                break;
         }
         if (!valid) {
             SPDLOG_WARN("Player: invalid state transition {} → {}",
@@ -122,7 +133,7 @@ bool PlayerImpl::TransitionTo(PlayerState target) {
 // Constructor / Destructor
 // ---------------------------------------------------------------------------
 
-PlayerImpl::PlayerImpl() {}
+PlayerImpl::PlayerImpl() = default;
 
 PlayerImpl::~PlayerImpl() { Close(); }
 
@@ -193,23 +204,7 @@ void PlayerImpl::Close() {
     if (state_.load() == PlayerState::Idle) return;
     SPDLOG_INFO("Player: closing");
 
-    // Signal all to stop
-    if (audio_ctx_) audio_ctx_->Abort();
-    if (video_ctx_) video_ctx_->Abort();
-
-    // Wake up render thread if paused
-    {
-        std::lock_guard<std::mutex> lock(step_mutex_);
-        frame_step_requested_ = true;
-    }
-    step_cond_.notify_one();
-
-    demuxer_.Stop();
-    if (audio_renderer_) audio_renderer_->Stop();
-
-    if (video_render_thread_.joinable()) {
-        video_render_thread_.join();
-    }
+    StopPipeline();
 
     audio_renderer_.reset();
     audio_ctx_.reset();
@@ -235,71 +230,29 @@ void PlayerImpl::Play() {
     if (s == PlayerState::Playing) return;
 
     if (s == PlayerState::Finished) {
-        // Tear down old pipeline (threads already exited on EOF)
-        if (video_render_thread_.joinable()) video_render_thread_.join();
-        demuxer_.Stop();
-        if (audio_renderer_) audio_renderer_->Stop();
-        if (audio_ctx_) audio_ctx_->Abort();
-        if (video_ctx_) video_ctx_->Abort();
-
-        // Reset queues to usable state (clears abort flag + data)
-        if (audio_ctx_) {
-            audio_ctx_->packet_queue.Reset();
-            audio_ctx_->frame_queue.Reset();
-        }
-        if (video_ctx_) {
-            video_ctx_->packet_queue.Reset();
-            video_ctx_->frame_queue.Reset();
-        }
-        if (audio_renderer_) audio_renderer_->FlushSdlBuffer();
+        StopPipeline();
+        ResetPipeline();
         audio_clock_.Set(0.0);
         video_clock_.Set(0.0);
         audio_clock_.SetPaused(false);
         video_clock_.SetPaused(false);
         seek_target_.store(sync::kNoSeekTarget, std::memory_order_relaxed);
         demuxer_.RequestSeek(0.0);
-
-        // Treat as fresh start
         s = PlayerState::Ready;
     }
 
     if (s == PlayerState::Ready) {
         TransitionTo(PlayerState::Playing);
         SPDLOG_INFO("Player: play (starting threads)");
-
         audio_eof_.store(false, std::memory_order_relaxed);
         video_eof_.store(false, std::memory_order_relaxed);
-
-        // Start demux
-        PacketQueue* audio_q = audio_ctx_ ? &audio_ctx_->packet_queue : nullptr;
-        PacketQueue* video_q = video_ctx_ ? &video_ctx_->packet_queue : nullptr;
-        demuxer_.Start(audio_q, video_q);
-
-        // Start audio decode + render
-        if (audio_ctx_) {
-            audio_ctx_->Start(false);
-            if (audio_renderer_) {
-                audio_renderer_->Start(&audio_ctx_->frame_queue,
-                                       &audio_ctx_->packet_queue, &audio_clock_);
-            }
-        }
-
-        // Start video decode
-        if (video_ctx_) {
-            video_ctx_->Start(true);
-        }
-
-        // Start video render loop
-        video_render_thread_ = std::thread(&PlayerImpl::VideoRenderLoop, this);
+        StartPipeline(false);
     } else if (s == PlayerState::Paused) {
-        // Resume from pause
         TransitionTo(PlayerState::Playing);
         SPDLOG_INFO("Player: resumed from pause");
         audio_clock_.SetPaused(false);
         video_clock_.SetPaused(false);
         if (audio_renderer_) audio_renderer_->SetPaused(false);
-
-        // Wake render thread
         step_cond_.notify_one();
     }
 }
@@ -328,58 +281,17 @@ void PlayerImpl::Seek(double position_seconds) {
 
     SPDLOG_INFO("Player: seek to {:.2f}s", position_seconds);
 
-    // If finished, restart pipeline in paused state at the new position
     if (s == PlayerState::Finished) {
-        // Tear down old pipeline
-        if (video_render_thread_.joinable()) video_render_thread_.join();
-        demuxer_.Stop();
-        if (audio_renderer_) audio_renderer_->Stop();
-        if (audio_ctx_) audio_ctx_->Abort();
-        if (video_ctx_) video_ctx_->Abort();
-
-        // Reset queues
-        if (audio_ctx_) {
-            audio_ctx_->packet_queue.Reset();
-            audio_ctx_->frame_queue.Reset();
-        }
-        if (video_ctx_) {
-            video_ctx_->packet_queue.Reset();
-            video_ctx_->frame_queue.Reset();
-        }
-        if (audio_renderer_) audio_renderer_->FlushSdlBuffer();
-
-        // Set clocks to target position, paused
+        StopPipeline();
+        ResetPipeline();
         audio_clock_.Set(position_seconds);
         video_clock_.Set(position_seconds);
         audio_clock_.SetPaused(true);
         video_clock_.SetPaused(true);
-        audio_eof_.store(false, std::memory_order_relaxed);
-        video_eof_.store(false, std::memory_order_relaxed);
         seek_target_.store(position_seconds, std::memory_order_release);
-
-        // Transition to Paused
         TransitionTo(PlayerState::Paused);
-
-        // Restart pipeline
         demuxer_.RequestSeek(position_seconds);
-        PacketQueue* audio_q = audio_ctx_ ? &audio_ctx_->packet_queue : nullptr;
-        PacketQueue* video_q = video_ctx_ ? &video_ctx_->packet_queue : nullptr;
-        demuxer_.Start(audio_q, video_q);
-
-        if (audio_ctx_) {
-            audio_ctx_->Start(false);
-            if (audio_renderer_) {
-                audio_renderer_->Start(&audio_ctx_->frame_queue,
-                                       &audio_ctx_->packet_queue, &audio_clock_);
-                audio_renderer_->SetPaused(true);
-            }
-        }
-        if (video_ctx_) {
-            video_ctx_->Start(true);
-        }
-
-        // Start video render loop (will immediately enter WaitIfPaused, then show one frame)
-        video_render_thread_ = std::thread(&PlayerImpl::VideoRenderLoop, this);
+        StartPipeline(true);
         {
             std::lock_guard<std::mutex> lock(step_mutex_);
             frame_step_requested_ = true;
@@ -393,20 +305,13 @@ void PlayerImpl::Seek(double position_seconds) {
     if (video_ctx_) video_ctx_->Flush();
     if (audio_renderer_) audio_renderer_->FlushSdlBuffer();
 
-    // Set seek target for frame-accurate discard in VideoRenderLoop
     seek_target_.store(position_seconds, std::memory_order_release);
-
-    // Reset EOF state
     audio_eof_.store(false, std::memory_order_relaxed);
     video_eof_.store(false, std::memory_order_relaxed);
-
     demuxer_.RequestSeek(position_seconds);
-
-    // Reset master clock to target position
     audio_clock_.Set(position_seconds);
     video_clock_.Set(position_seconds);
 
-    // If paused, request one frame to show the seek target
     if (state_.load() == PlayerState::Paused) {
         std::lock_guard<std::mutex> lock(step_mutex_);
         frame_step_requested_ = true;
@@ -468,10 +373,15 @@ const Clock& PlayerImpl::MasterClock() const {
 // ---------------------------------------------------------------------------
 
 void PlayerImpl::OnStreamEof() {
-    // Called from audio renderer thread when it receives EOF marker.
-    // For video, it's detected in VideoRenderLoop.
     audio_eof_.store(true, std::memory_order_release);
+    CheckAllStreamsEof();
+}
 
+// ---------------------------------------------------------------------------
+// CheckAllStreamsEof — transitions to Finished if all streams have ended
+// ---------------------------------------------------------------------------
+
+void PlayerImpl::CheckAllStreamsEof() {
     bool all_done = true;
     if (audio_ctx_ && !audio_eof_.load()) all_done = false;
     if (video_ctx_ && !video_eof_.load()) all_done = false;
@@ -487,6 +397,63 @@ void PlayerImpl::OnStreamEof() {
 }
 
 // ---------------------------------------------------------------------------
+// Pipeline lifecycle
+// ---------------------------------------------------------------------------
+
+void PlayerImpl::StopPipeline() {
+    if (audio_ctx_) audio_ctx_->Abort();
+    if (video_ctx_) video_ctx_->Abort();
+
+    // Wake render thread if blocked in WaitIfPaused
+    {
+        std::lock_guard<std::mutex> lock(step_mutex_);
+        frame_step_requested_ = true;
+    }
+    step_cond_.notify_one();
+
+    demuxer_.Stop();
+    if (audio_renderer_) audio_renderer_->Stop();
+
+    if (video_render_thread_.joinable()) {
+        video_render_thread_.join();
+    }
+}
+
+void PlayerImpl::ResetPipeline() {
+    if (audio_ctx_) {
+        audio_ctx_->packet_queue.Reset();
+        audio_ctx_->frame_queue.Reset();
+    }
+    if (video_ctx_) {
+        video_ctx_->packet_queue.Reset();
+        video_ctx_->frame_queue.Reset();
+    }
+    if (audio_renderer_) audio_renderer_->FlushSdlBuffer();
+    audio_eof_.store(false, std::memory_order_relaxed);
+    video_eof_.store(false, std::memory_order_relaxed);
+}
+
+void PlayerImpl::StartPipeline(bool audio_paused) {
+    PacketQueue* audio_q = audio_ctx_ ? &audio_ctx_->packet_queue : nullptr;
+    PacketQueue* video_q = video_ctx_ ? &video_ctx_->packet_queue : nullptr;
+    demuxer_.Start(audio_q, video_q);
+
+    if (audio_ctx_) {
+        audio_ctx_->Start(false);
+        if (audio_renderer_) {
+            audio_renderer_->Start(&audio_ctx_->frame_queue,
+                                   &audio_ctx_->packet_queue, &audio_clock_);
+            if (audio_paused) audio_renderer_->SetPaused(true);
+        }
+    }
+    if (video_ctx_) {
+        video_ctx_->Start(true);
+    }
+
+    video_render_thread_ = std::thread(&PlayerImpl::VideoRenderLoop, this);
+}
+
+// ---------------------------------------------------------------------------
 // WaitIfPaused — blocks render thread until resumed or step requested
 // ---------------------------------------------------------------------------
 
@@ -495,6 +462,39 @@ void PlayerImpl::WaitIfPaused() {
     step_cond_.wait(lock, [this] {
         return state_.load() != PlayerState::Paused || frame_step_requested_;
     });
+}
+
+// ---------------------------------------------------------------------------
+// ComputeDisplayDelay — pure timing calculation for A/V sync
+// Returns: seconds to wait (>=0), or negative if frame should be dropped.
+// ---------------------------------------------------------------------------
+
+double PlayerImpl::ComputeDisplayDelay(double pts, double last_pts,
+                                       double last_display_time) const {
+    if (sync_mode_ == SyncMode::AudioMaster) {
+        double master_time = audio_clock_.Get();
+        double diff = pts - master_time;
+        if (diff > sync::kSyncThreshold) {
+            return std::min(diff, sync::kMaxSleepSeconds);
+        }
+        if (diff < -sync::kDropThreshold) {
+            return -1.0;  // Drop
+        }
+        return 0.0;
+    }
+
+    // VideoMaster: self-driven by frame interval + wall-time
+    double delay = pts - last_pts;
+    if (delay <= sync::kFrameDelayMin || delay > sync::kFrameDelayMax) {
+        delay = (video_fps_ > 0) ? (1.0 / video_fps_) : 0.04;
+    }
+    double target_time = last_display_time + delay;
+    double now = Clock::Now();
+    double wait = target_time - now;
+    if (wait > sync::kFrameDelayMin) {
+        return std::min(wait, sync::kMaxSleepSeconds);
+    }
+    return 0.0;
 }
 
 // ---------------------------------------------------------------------------
@@ -512,10 +512,8 @@ void PlayerImpl::VideoRenderLoop() {
     double last_display_time = Clock::Now();
 
     while (state_.load() != PlayerState::Idle) {
-        // Wait if paused (uses condition variable, not polling)
         if (state_.load() == PlayerState::Paused && !frame_step_requested_) {
             WaitIfPaused();
-            // After waking: check if we should exit or step
             if (state_.load() == PlayerState::Idle) break;
         }
 
@@ -525,33 +523,20 @@ void PlayerImpl::VideoRenderLoop() {
             stepping = frame_step_requested_;
         }
 
-        // Pop frame from video frame queue
         int frame_serial = 0;
         bool is_eof = false;
         if (!video_ctx_->frame_queue.Pop(frame, &frame_serial, &is_eof)) {
-            break;  // Aborted
+            break;
         }
 
-        // EOF marker → notify and exit
         if (is_eof) {
             video_eof_.store(true, std::memory_order_release);
-            // Check if all streams are done
-            bool all_done = true;
-            if (audio_ctx_ && !audio_eof_.load()) all_done = false;
-            if (all_done) {
-                if (TransitionTo(PlayerState::Finished)) {
-                    SPDLOG_INFO("Player: playback finished (EOF)");
-                    audio_clock_.SetPaused(true);
-                    video_clock_.SetPaused(true);
-                    if (playback_finished_cb_) playback_finished_cb_();
-                }
-            }
+            CheckAllStreamsEof();
             break;
         }
 
         // Discard stale frames (serial mismatch)
-        int current_serial = video_ctx_->packet_queue.serial();
-        if (frame_serial != current_serial) {
+        if (frame_serial != video_ctx_->packet_queue.serial()) {
             av_frame_unref(frame);
             continue;
         }
@@ -568,55 +553,32 @@ void PlayerImpl::VideoRenderLoop() {
             av_frame_unref(frame);
             continue;
         }
-        // Reached target — clear seek state
         if (target > sync::kNoSeekTarget) {
             seek_target_.store(sync::kNoSeekTarget, std::memory_order_release);
         }
 
-        // --- Synchronization ---
+        // A/V synchronization
         if (!stepping) {
-            if (sync_mode_ == SyncMode::AudioMaster) {
-                // Sync video to audio clock
-                double master_time = audio_clock_.Get();
-                double diff = pts - master_time;
-
-                if (diff > sync::kSyncThreshold) {
-                    // Video is ahead — wait (capped to avoid long stalls)
-                    double wait = std::min(diff, sync::kMaxSleepSeconds);
-                    std::this_thread::sleep_for(
-                        std::chrono::microseconds(static_cast<int64_t>(wait * 1e6)));
-                } else if (diff < -sync::kDropThreshold) {
-                    // Video is too late — drop frame
-                    av_frame_unref(frame);
-                    continue;
-                }
-            } else {
-                // VideoMaster: self-driven by frame interval + wall-time
-                double delay = pts - last_pts;
-                if (delay <= sync::kFrameDelayMin || delay > sync::kFrameDelayMax) {
-                    delay = (video_fps_ > 0) ? (1.0 / video_fps_) : 0.04;
-                }
-
-                double target_time = last_display_time + delay;
-                double now = Clock::Now();
-                double wait = target_time - now;
-                if (wait > sync::kFrameDelayMin) {
-                    wait = std::min(wait, sync::kMaxSleepSeconds);
-                    std::this_thread::sleep_for(
-                        std::chrono::microseconds(static_cast<int64_t>(wait * 1e6)));
-                }
+            double delay = ComputeDisplayDelay(pts, last_pts, last_display_time);
+            if (delay < 0.0) {
+                av_frame_unref(frame);
+                continue;
+            }
+            if (delay > 0.0) {
+                std::this_thread::sleep_for(
+                    std::chrono::microseconds(static_cast<int64_t>(delay * 1e6)));
+            }
+            if (sync_mode_ == SyncMode::VideoMaster) {
                 last_display_time = Clock::Now();
                 video_clock_.Set(pts);
             }
         }
 
-        // Clear step flag after rendering a valid frame
         if (stepping) {
             std::lock_guard<std::mutex> lock(step_mutex_);
             frame_step_requested_ = false;
         }
 
-        // Deliver frame via callback
         if (video_frame_cb_ && frame->data[0]) {
             video_frame_cb_(frame->data[0], frame->width, frame->height, frame->linesize[0]);
         }

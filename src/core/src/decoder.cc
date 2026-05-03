@@ -1,11 +1,6 @@
 #include "decoder.h"
 
-#include "frame_queue.h"
-#include "packet_queue.h"
-
 #include <chrono>
-
-#include <spdlog/spdlog.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -13,6 +8,10 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 }
+#include <spdlog/spdlog.h>
+
+#include "frame_queue.h"
+#include "packet_queue.h"
 
 namespace mvp {
 
@@ -131,32 +130,16 @@ void Decoder::DecodeLoop() {
 
         // Null packet (data==NULL) signals EOF from demuxer → enter drain mode
         if (!pkt->data) {
-            // Send NULL to codec to trigger drain of buffered frames
             avcodec_send_packet(codec_ctx_, nullptr);
 
-            // Receive all remaining buffered frames
             while (running_) {
                 int drain_ret = avcodec_receive_frame(codec_ctx_, frame);
                 if (drain_ret == AVERROR_EOF || drain_ret == AVERROR(EAGAIN)) break;
                 if (drain_ret < 0) break;
-
-                if (convert_to_rgb_ && sws_ctx_ && rgb_frame) {
-                    sws_scale(sws_ctx_, frame->data, frame->linesize, 0, frame->height,
-                              rgb_frame->data, rgb_frame->linesize);
-                    rgb_frame->pts = frame->pts;
-
-                    AVFrame* out = av_frame_alloc();
-                    av_frame_ref(out, rgb_frame);
-                    out->pts = frame->pts;
-                    frame_queue_->Push(out, last_serial_);
-                    av_frame_free(&out);
-                } else {
-                    frame_queue_->Push(frame, last_serial_);
-                }
+                EnqueueFrame(frame, rgb_frame, last_serial_);
                 av_frame_unref(frame);
             }
 
-            // Push EOF marker to notify downstream renderer
             frame_queue_->PushEof(last_serial_);
 
             // Wait for either abort or a new serial (indicating seek)
@@ -176,20 +159,7 @@ void Decoder::DecodeLoop() {
             ret = avcodec_receive_frame(codec_ctx_, frame);
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
             if (ret < 0) break;
-
-            if (convert_to_rgb_ && sws_ctx_ && rgb_frame) {
-                sws_scale(sws_ctx_, frame->data, frame->linesize, 0, frame->height,
-                          rgb_frame->data, rgb_frame->linesize);
-                rgb_frame->pts = frame->pts;
-
-                AVFrame* out = av_frame_alloc();
-                av_frame_ref(out, rgb_frame);
-                out->pts = frame->pts;
-                frame_queue_->Push(out, last_serial_);
-                av_frame_free(&out);
-            } else {
-                frame_queue_->Push(frame, last_serial_);
-            }
+            EnqueueFrame(frame, rgb_frame, last_serial_);
             av_frame_unref(frame);
         }
     }
@@ -198,6 +168,22 @@ void Decoder::DecodeLoop() {
     av_frame_free(&frame);
     if (rgb_frame) av_frame_free(&rgb_frame);
     if (rgb_buffer) av_free(rgb_buffer);
+}
+
+void Decoder::EnqueueFrame(AVFrame* decoded, AVFrame* rgb_frame, int serial) {
+    if (convert_to_rgb_ && sws_ctx_ && rgb_frame) {
+        sws_scale(sws_ctx_, decoded->data, decoded->linesize, 0, decoded->height,
+                  rgb_frame->data, rgb_frame->linesize);
+        rgb_frame->pts = decoded->pts;
+
+        AVFrame* out = av_frame_alloc();
+        av_frame_ref(out, rgb_frame);
+        out->pts = decoded->pts;
+        frame_queue_->Push(out, serial);
+        av_frame_free(&out);
+    } else {
+        frame_queue_->Push(decoded, serial);
+    }
 }
 
 }  // namespace mvp

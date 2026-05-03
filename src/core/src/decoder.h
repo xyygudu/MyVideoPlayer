@@ -5,6 +5,7 @@
 #include <thread>
 
 struct AVCodecContext;
+struct AVFrame;
 struct AVStream;
 struct SwsContext;
 
@@ -34,6 +35,7 @@ class Decoder {
 
   private:
     void DecodeLoop();
+    void EnqueueFrame(AVFrame* decoded, AVFrame* rgb_frame, int serial);
 
     AVCodecContext* codec_ctx_;
     AVStream* stream_;
