@@ -98,7 +98,6 @@ double Demuxer::Duration() const {
 }
 
 void Demuxer::DemuxLoop() {
-    AVPacket* pkt = av_packet_alloc();
     // Local serial copies: only updated after seek, so pre-seek packets keep old serial
     int audio_serial = audio_queue_ ? audio_queue_->serial() : 0;
     int video_serial = video_queue_ ? video_queue_->serial() : 0;
@@ -115,7 +114,8 @@ void Demuxer::DemuxLoop() {
             if (video_queue_) video_serial = video_queue_->serial();
         }
 
-        int ret = av_read_frame(format_ctx_, pkt);
+        AVPacketPtr pkt;
+        int ret = av_read_frame(format_ctx_, pkt.get());
         if (ret < 0) {
             if (ret == AVERROR_EOF || avio_feof(format_ctx_->pb)) {
                 // Push null (flush) packets to signal EOF to decoders.
@@ -136,19 +136,12 @@ void Demuxer::DemuxLoop() {
             continue;
         }
 
-        if (pkt->stream_index == audio_stream_index_ && audio_queue_) {
-            AVPacketPtr owned;
-            av_packet_move_ref(owned.get(), pkt);
-            audio_queue_->Push(SerialPacket{std::move(owned), audio_serial});
-        } else if (pkt->stream_index == video_stream_index_ && video_queue_) {
-            AVPacketPtr owned;
-            av_packet_move_ref(owned.get(), pkt);
-            video_queue_->Push(SerialPacket{std::move(owned), video_serial});
+        if (pkt.get()->stream_index == audio_stream_index_ && audio_queue_) {
+            audio_queue_->Push(SerialPacket{std::move(pkt), audio_serial});
+        } else if (pkt.get()->stream_index == video_stream_index_ && video_queue_) {
+            video_queue_->Push(SerialPacket{std::move(pkt), video_serial});
         }
-        av_packet_unref(pkt);
     }
-
-    av_packet_free(&pkt);
 }
 
 }  // namespace mvp
