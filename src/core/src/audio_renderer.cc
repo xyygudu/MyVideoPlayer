@@ -105,9 +105,7 @@ void AudioRenderer::FlushSdlBuffer() {
 void AudioRenderer::SetEofCallback(EofCallback cb) { eof_cb_ = std::move(cb); }
 
 void AudioRenderer::AudioLoop() {
-    AVFrame* frame = av_frame_alloc();
     SwrContext* swr_ctx = nullptr;
-    int frame_serial = 0;
 
     while (running_) {
         if (paused_) {
@@ -126,20 +124,23 @@ void AudioRenderer::AudioLoop() {
         }
 
         bool is_eof = false;
-        if (!frame_queue_->Pop(frame, &frame_serial, &is_eof)) {
+        auto sf = frame_queue_->Pop();
+        if (!sf) {
             break;  // Aborted
         }
 
         // EOF marker received — notify player and exit loop
-        if (is_eof) {
+        if (sf->eof) {
             if (eof_cb_) eof_cb_();
             break;
         }
 
+        AVFrame* frame = sf->frame.get();
+        int frame_serial = sf->serial;
+
         // Discard stale frames from before seek (compare against packet queue serial)
         int current_serial = packet_queue_->serial();
         if (frame_serial != current_serial) {
-            av_frame_unref(frame);
             continue;
         }
 
@@ -175,11 +176,9 @@ void AudioRenderer::AudioLoop() {
         } else {
             SDL_PutAudioStreamData(sdl_stream_, frame->data[0], out_buffer_size);
         }
-
-        av_frame_unref(frame);
+        // sf goes out of scope here, AVFramePtr destructor handles cleanup
     }
 
-    av_frame_free(&frame);
     if (swr_ctx) swr_free(&swr_ctx);
 }
 

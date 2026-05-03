@@ -2,10 +2,6 @@
 
 #include <spdlog/spdlog.h>
 
-extern "C" {
-#include <libavcodec/avcodec.h>
-}
-
 namespace mvp {
 
 PacketQueue::PacketQueue(int64_t max_bytes)
@@ -16,34 +12,28 @@ PacketQueue::~PacketQueue() {
     ClearLocked();
 }
 
-void PacketQueue::Push(AVPacket* pkt, int serial) {
-    AVPacketPtr copy;
-    av_packet_move_ref(copy.get(), pkt);
-
+void PacketQueue::Push(SerialPacket sp) {
     std::unique_lock<std::mutex> lock(mutex_);
     cond_push_.wait(lock, [this] { return abort_ || total_bytes_ < max_bytes_; });
     if (abort_) {
         return;  // AVPacketPtr destructor handles cleanup
     }
-    total_bytes_ += copy->size;
-    queue_.push({std::move(copy), serial});
+    total_bytes_ += sp.pkt->size;
+    queue_.push(std::move(sp));
     cond_pop_.notify_one();
 }
 
-bool PacketQueue::Pop(AVPacket* pkt, int* out_serial) {
+std::optional<SerialPacket> PacketQueue::Pop() {
     std::unique_lock<std::mutex> lock(mutex_);
     cond_pop_.wait(lock, [this] { return abort_ || !queue_.empty(); });
     if (abort_ && queue_.empty()) {
-        return false;
+        return std::nullopt;
     }
     SerialPacket sp = std::move(queue_.front());
     queue_.pop();
     total_bytes_ -= sp.pkt->size;
-    av_packet_move_ref(pkt, sp.pkt.get());
-    *out_serial = sp.serial;
     cond_push_.notify_one();
-    return true;
-    // sp.pkt destructor frees the now-empty AVPacket shell
+    return sp;
 }
 
 void PacketQueue::Flush() {

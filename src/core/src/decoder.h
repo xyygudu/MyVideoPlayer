@@ -33,7 +33,6 @@ class Decoder {
 
   private:
     void DecodeLoop();
-    void EnqueueFrame(AVFrame* decoded, int serial);
 
     AVCodecContext* codec_ctx_;
     AVStream* stream_;

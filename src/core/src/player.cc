@@ -530,7 +530,6 @@ double PlayerImpl::ComputeDisplayDelay(double pts, double last_pts,
 // ---------------------------------------------------------------------------
 
 void PlayerImpl::VideoRenderLoop() {
-    AVFrame* frame = av_frame_alloc();
     AVStream* video_stream = nullptr;
     if (demuxer_.VideoStreamIndex() >= 0) {
         video_stream = demuxer_.FormatContext()->streams[demuxer_.VideoStreamIndex()];
@@ -551,21 +550,22 @@ void PlayerImpl::VideoRenderLoop() {
             stepping = frame_step_requested_;
         }
 
-        int frame_serial = 0;
-        bool is_eof = false;
-        if (!video_ctx_->frame_queue.Pop(frame, &frame_serial, &is_eof)) {
+        auto sf = video_ctx_->frame_queue.Pop();
+        if (!sf) {
             break;
         }
 
-        if (is_eof) {
+        if (sf->eof) {
             video_eof_.store(true, std::memory_order_release);
             CheckAllStreamsEof();
             break;
         }
 
+        int frame_serial = sf->serial;
+        AVFrame* frame = sf->frame.get();
+
         // Discard stale frames (serial mismatch)
         if (frame_serial != video_ctx_->packet_queue.serial()) {
-            av_frame_unref(frame);
             continue;
         }
 
@@ -578,7 +578,6 @@ void PlayerImpl::VideoRenderLoop() {
         // Frame-accurate seek: discard frames before seek target
         double target = seek_target_.load(std::memory_order_acquire);
         if (target > sync::kNoSeekTarget && pts < target - 0.001) {
-            av_frame_unref(frame);
             continue;
         }
         if (target > sync::kNoSeekTarget) {
@@ -589,7 +588,6 @@ void PlayerImpl::VideoRenderLoop() {
         if (!stepping) {
             double delay = ComputeDisplayDelay(pts, last_pts, last_display_time);
             if (delay < 0.0) {
-                av_frame_unref(frame);
                 continue;
             }
             if (delay > 0.0) {
@@ -618,10 +616,8 @@ void PlayerImpl::VideoRenderLoop() {
 
         video_pts_.store(pts, std::memory_order_relaxed);
         last_pts = pts;
-        av_frame_unref(frame);
+        // sf goes out of scope, AVFramePtr handles cleanup
     }
-
-    av_frame_free(&frame);
 }
 
 // ===========================================================================

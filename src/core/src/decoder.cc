@@ -76,14 +76,13 @@ void Decoder::Stop() {
 }
 
 void Decoder::DecodeLoop() {
-    AVPacketPtr pkt;
-    AVFramePtr frame;
-
     while (running_) {
-        int pkt_serial = 0;
-        if (!packet_queue_->Pop(pkt.get(), &pkt_serial)) {
+        auto sp = packet_queue_->Pop();
+        if (!sp) {
             break;  // Aborted
         }
+
+        int pkt_serial = sp->serial;
 
         // Serial changed → seek happened, flush codec internal buffers
         if (pkt_serial != last_serial_) {
@@ -93,20 +92,19 @@ void Decoder::DecodeLoop() {
 
         // Discard stale packets pushed between flush-increment and actual seek
         if (pkt_serial != packet_queue_->serial()) {
-            pkt.unref();
             continue;
         }
 
         // Null packet (data==NULL) signals EOF from demuxer → enter drain mode
-        if (!pkt->data) {
+        if (!sp->pkt->data) {
             avcodec_send_packet(codec_ctx_, nullptr);
 
             while (running_) {
+                AVFramePtr frame;
                 int drain_ret = avcodec_receive_frame(codec_ctx_, frame.get());
                 if (drain_ret == AVERROR_EOF || drain_ret == AVERROR(EAGAIN)) break;
                 if (drain_ret < 0) break;
-                EnqueueFrame(frame.get(), last_serial_);
-                frame.unref();
+                frame_queue_->Push(SerialFrame{std::move(frame), last_serial_, false});
             }
 
             frame_queue_->PushEof(last_serial_);
@@ -120,24 +118,17 @@ void Decoder::DecodeLoop() {
             continue;
         }
 
-        int ret = avcodec_send_packet(codec_ctx_, pkt.get());
-        pkt.unref();
+        int ret = avcodec_send_packet(codec_ctx_, sp->pkt.get());
         if (ret < 0) continue;
 
         while (ret >= 0 && running_) {
+            AVFramePtr frame;
             ret = avcodec_receive_frame(codec_ctx_, frame.get());
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
             if (ret < 0) break;
-            EnqueueFrame(frame.get(), last_serial_);
-            frame.unref();
+            frame_queue_->Push(SerialFrame{std::move(frame), pkt_serial, false});
         }
     }
-
-    // pkt and frame are automatically freed by AVPacketPtr/AVFramePtr destructors
-}
-
-void Decoder::EnqueueFrame(AVFrame* decoded, int serial) {
-    frame_queue_->Push(decoded, serial);
 }
 
 }  // namespace mvp

@@ -120,15 +120,14 @@ void Demuxer::DemuxLoop() {
             if (ret == AVERROR_EOF || avio_feof(format_ctx_->pb)) {
                 // Push null (flush) packets to signal EOF to decoders.
                 // A null packet triggers drain mode in avcodec_send_packet.
-                AVPacket* eof_pkt = av_packet_alloc();
                 if (audio_queue_) {
-                    audio_queue_->Push(eof_pkt, audio_serial);
+                    AVPacketPtr eof_pkt;
+                    audio_queue_->Push(SerialPacket{std::move(eof_pkt), audio_serial});
                 }
                 if (video_queue_) {
-                    av_packet_unref(eof_pkt);  // reset for reuse
-                    video_queue_->Push(eof_pkt, video_serial);
+                    AVPacketPtr eof_pkt;
+                    video_queue_->Push(SerialPacket{std::move(eof_pkt), video_serial});
                 }
-                av_packet_free(&eof_pkt);
             }
             // Wait for a seek request or stop signal
             while (running_ && !seek_requested_) {
@@ -138,9 +137,13 @@ void Demuxer::DemuxLoop() {
         }
 
         if (pkt->stream_index == audio_stream_index_ && audio_queue_) {
-            audio_queue_->Push(pkt, audio_serial);
+            AVPacketPtr owned;
+            av_packet_move_ref(owned.get(), pkt);
+            audio_queue_->Push(SerialPacket{std::move(owned), audio_serial});
         } else if (pkt->stream_index == video_stream_index_ && video_queue_) {
-            video_queue_->Push(pkt, video_serial);
+            AVPacketPtr owned;
+            av_packet_move_ref(owned.get(), pkt);
+            video_queue_->Push(SerialPacket{std::move(owned), video_serial});
         }
         av_packet_unref(pkt);
     }

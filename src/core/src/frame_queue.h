@@ -4,13 +4,19 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <queue>
 
 #include "ffmpeg_utils.h"
 
-struct AVFrame;
-
 namespace mvp {
+
+// Queue node: attaches serial and EOF flag during transit (same rationale as SerialPacket).
+struct SerialFrame {
+    AVFramePtr frame;  // empty (null) for EOF markers
+    int serial;
+    bool eof{false};
+};
 
 class FrameQueue {
   public:
@@ -20,22 +26,19 @@ class FrameQueue {
     FrameQueue(const FrameQueue&) = delete;
     FrameQueue& operator=(const FrameQueue&) = delete;
 
-    // Push a frame (blocks if queue is full). Tags frame with the given serial.
-    void Push(AVFrame* frame, int serial);
+    // Push a frame (blocks if queue is full). Takes ownership via move.
+    void Push(SerialFrame sf);
 
-    // Push an EOF marker (frame=nullptr, eof=true) into the queue.
+    // Push an EOF marker into the queue.
     void PushEof(int serial);
 
-    // Pop a frame (blocks if queue is empty). Writes frame's serial to *out_serial.
-    // Returns false if aborted. Check out_eof to detect end-of-stream markers.
-    bool Pop(AVFrame* frame, int* out_serial, bool* out_eof = nullptr);
+    // Pop a frame (blocks if queue is empty). Returns nullopt if aborted.
+    std::optional<SerialFrame> Pop();
 
     // Flush all frames and increment serial. Does NOT change abort state.
-    // Use for Seek.
     void Flush();
 
     // Signal all waiting threads to wake up and abort. Does NOT clear data.
-    // Use for Stop/Close.
     void Abort();
 
     // Reset to initial state (abort=false, serial=0, data cleared).
@@ -45,13 +48,6 @@ class FrameQueue {
     int Size() const;
 
   private:
-    // Queue node: attaches serial and EOF flag during transit (same rationale as SerialPacket).
-    struct SerialFrame {
-        AVFramePtr frame;  // empty (null) for EOF markers
-        int serial;
-        bool eof{false};
-    };
-
     void ClearLocked();  // Internal: free all frames (must hold mutex_)
 
     std::queue<SerialFrame> queue_;

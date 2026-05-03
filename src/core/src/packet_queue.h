@@ -5,14 +5,21 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <queue>
 
 #include "ffmpeg_utils.h"
 #include "sync_constants.h"
 
-struct AVPacket;
-
 namespace mvp {
+
+// Queue node: attaches routing metadata (serial) to a packet during transit.
+// serial is a property of "where in the pipeline" not of the data itself,
+// so it lives here rather than inside AVPacketPtr.
+struct SerialPacket {
+    AVPacketPtr pkt;
+    int serial;
+};
 
 class PacketQueue {
   public:
@@ -22,13 +29,11 @@ class PacketQueue {
     PacketQueue(const PacketQueue&) = delete;
     PacketQueue& operator=(const PacketQueue&) = delete;
 
-    // Push a packet (blocks if byte limit reached). Takes ownership of pkt data.
-    // Caller passes the serial to tag this packet with.
-    void Push(AVPacket* pkt, int serial);
+    // Push a packet (blocks if byte limit reached). Takes ownership via move.
+    void Push(SerialPacket sp);
 
-    // Pop a packet (blocks if queue is empty). Caller owns the returned packet.
-    // Returns false if aborted. Writes the packet's serial to *out_serial.
-    bool Pop(AVPacket* pkt, int* out_serial);
+    // Pop a packet (blocks if queue is empty). Returns nullopt if aborted.
+    std::optional<SerialPacket> Pop();
 
     // Flush all packets and increment serial. Does NOT change abort state.
     // Use for Seek — clears stale data while keeping the queue operational.
@@ -47,14 +52,6 @@ class PacketQueue {
     int64_t ByteSize() const;
 
   private:
-    // Queue node: attaches routing metadata (serial) to a packet during transit.
-    // serial is a property of "where in the pipeline" not of the data itself,
-    // so it lives here rather than inside AVPacketPtr.
-    struct SerialPacket {
-        AVPacketPtr pkt;
-        int serial;
-    };
-
     void ClearLocked();  // Internal: free all packets (must hold mutex_)
 
     std::queue<SerialPacket> queue_;
