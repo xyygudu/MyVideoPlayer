@@ -1,0 +1,74 @@
+# 项目技术难点 Q&A
+
+## 队列/缓冲设计
+
+### Q: 你的播放器在高码率视频下出现过内存暴涨吗？怎么解决的？
+
+**简要描述：** PacketQueue 按帧数限流，高码率场景下 I 帧体积大导致内存不可控。改为按字节数限制后内存可预测。
+
+**详细解析：**
+
+- **问题现象**：播放 4K 高码率视频时进程内存飙升至数百 MB，远超预期
+- **根因分析**：压缩包（AVPacket）大小差异极大——I 帧可能几百 KB，B 帧仅几 KB。用帧数（256帧）做队列上限时，若队列中 I 帧占比高，实际内存占用完全不可预测。Video FrameQueue 16 帧 × 8.3MB/帧（1080p RGB32）= 133MB 也过大
+- **解决方案**：PacketQueue 改为按字节数限制（15MB），对齐 FFplay 的 `MAX_QUEUE_SIZE`；Video FrameQueue 从 16 帧降到 3 帧（1帧显示中 + 1帧解码完等待 + 1帧缓冲），对齐 FFplay `VIDEO_PICTURE_QUEUE_SIZE`
+- **效果/验证**：内存占用从不可预测降为稳定可控（PacketQueue ≤15MB，Video FrameQueue ≈25MB），无播放流畅度损失
+
+---
+
+## 音视频同步
+
+### Q: 如果媒体文件没有音频轨，你的播放器怎么驱动视频播放？
+
+**简要描述：** 最初时钟依赖音频回调驱动，无音频时时钟不走。重构为 wall-time 外推模型，支持 AudioMaster / VideoMaster 双模式。
+
+**详细解析：**
+
+- **问题现象**：打开无音频轨的视频文件时，画面完全不动或速度不均匀
+- **根因分析**：Clock 最初设计为被动存储 PTS 值，依赖音频渲染回调周期性更新。没有音频时无人更新时钟，视频同步判定中 `master_time` 永远为 0，帧被判定为"超前"而无限等待
+- **解决方案**：Clock 重构为 wall-time 外推模型——记录锚点 `(pts, last_updated_time)`，Get() 时返回 `pts + (now - last_updated) × speed`。播放器在 Open 时根据是否存在音频轨选择 AudioMaster 或 VideoMaster 模式。线程安全通过 SeqLock 保证（单写多读场景，参考 Linux kernel `struct timekeeper` 和 MPV）
+- **效果/验证**：纯视频文件可正常匀速播放，且 Clock 设计为未来变速播放预留了 speed 字段
+
+---
+
+## 多线程架构
+
+### Q: Seek 操作后偶尔看到旧画面闪一帧，这种竞态问题你是怎么处理的？
+
+**简要描述：** Flush 队列与新数据 Push 之间存在竞态窗口，旧 packet 可能漏入。引入 serial（generation number）机制，下游按 serial 匹配自动丢弃过期数据。
+
+**详细解析：**
+
+- **问题现象**：快速连续 Seek 时偶现画面闪到旧位置的帧，或短暂卡顿后恢复
+- **根因分析**：多线程 Pipeline 中，Seek 时 Player 线程 Flush 队列，但 Demuxer 线程可能正好在 Flush 之后、serial 递增之前往队列 Push 了一个旧 packet。最初用三层分散的 Flush + 多个 bool flag + 等待机制修补，越补越复杂且仍有窗口
+- **解决方案**：引入 serial 机制（对标 FFplay `packet_queue_flush`）——每次 Seek 时 `FlushAndIncrementSerial()` 在 mutex 内原子完成。Push 时打上当前 serial 标记，Decoder/Renderer Pop 出数据后对比 serial，不匹配则静默丢弃。双保险：Flush 主动释放内存 + serial 兜底清除竞态窗口中的漏网数据
+- **效果/验证**：连续快速 Seek 不再出现旧帧闪现，代码从三处分散 Flush + 多个 flag 简化为统一的 serial 匹配逻辑
+
+---
+
+## 状态管理
+
+### Q: 播放结束（EOF）后用户点重播或 Seek，你的播放器是怎么处理的？
+
+**简要描述：** 线程在 EOF 时已退出，后续操作需要完整重建 Pipeline。通过正式状态机覆盖所有合法转换路径解决。
+
+**详细解析：**
+
+- **问题现象**：视频播放到结尾后，点击播放按钮或拖动进度条无反应，界面"死了"
+- **根因分析**：Demuxer/Decoder/Render 线程在检测到 EOF 后直接退出。此时 Player 仍处于旧状态，没有处理 Finished → Playing 或 Finished → Seeking 的转换路径，调用 Play()/Seek() 时前置条件不满足直接 return
+- **解决方案**：建立完整状态机（Idle → Ready → Playing ⇄ Paused → Finished），显式定义所有合法转换。Finished 状态下 Play/Seek 时：StopPipeline（join 已退出的线程）→ ResetPipeline（重置队列和标志）→ StartPipeline（重新启动线程）。三个生命周期方法复用于 Close/Play/Seek，消除重复代码
+- **效果/验证**：EOF 后可正常重播、Seek 到任意位置、循环播放均工作正常
+
+---
+
+## 资源生命周期
+
+### Q: FFmpeg 的 AVPacket/AVFrame 在多线程 Pipeline 中怎么安全传递？遇到过什么问题？
+
+**简要描述：** FFmpeg 数据结构是"壳 + 引用计数缓冲区"两层设计，跨线程传递必须通过 ref/move_ref 管理所有权，否则导致 double-free 或泄漏。
+
+**详细解析：**
+
+- **问题现象**：早期出现随机崩溃（double-free）或播放一段时间后内存持续增长（泄漏）
+- **根因分析**：`av_packet_alloc()` 只分配结构体壳（~80字节），实际压缩数据通过内部 `AVBufferRef` 引用计数管理。直接在线程间传递指针时：生产者 unref 后消费者访问已释放内存（dangling）；或消费者忘记 unref 导致引用计数永远不归零（泄漏）
+- **解决方案**：确立严格的所有权协议——Push 到队列时用 `av_packet_move_ref`（零拷贝转移所有权），Pop 出后消费方负责 `av_packet_unref`。对于需要共享的 AVFrame（如 RGB 转换后的帧），使用 `av_frame_ref`（引用计数 +1）创建独立引用后再 Push，原始帧立即 unref
+- **效果/验证**：消除了所有内存相关崩溃，长时间播放内存稳定不增长
