@@ -45,6 +45,7 @@ class FrameQueue {
     int Size() const;
 
   private:
+    // Queue node: attaches serial and EOF flag during transit (same rationale as SerialPacket).
     struct SerialFrame {
         AVFramePtr frame;  // empty (null) for EOF markers
         int serial;

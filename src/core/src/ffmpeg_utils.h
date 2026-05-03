@@ -8,7 +8,9 @@ extern "C" {
 
 namespace mvp {
 
-// RAII wrapper for AVFrame. Move-only.
+// RAII wrapper for AVFrame.
+// Move-only: AVFrame* has unique ownership (like unique_ptr).
+// Copying would cause double av_frame_free; use av_frame_ref for data sharing.
 class AVFramePtr {
   public:
     AVFramePtr() : frame_(av_frame_alloc()) {}
@@ -40,7 +42,8 @@ class AVFramePtr {
     AVFrame* frame_;
 };
 
-// RAII wrapper for AVPacket. Move-only.
+// RAII wrapper for AVPacket.
+// Move-only: same rationale as AVFramePtr — unique ownership of the shell.
 class AVPacketPtr {
   public:
     AVPacketPtr() : pkt_(av_packet_alloc()) {}

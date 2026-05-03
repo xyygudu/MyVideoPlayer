@@ -47,6 +47,9 @@ class PacketQueue {
     int64_t ByteSize() const;
 
   private:
+    // Queue node: attaches routing metadata (serial) to a packet during transit.
+    // serial is a property of "where in the pipeline" not of the data itself,
+    // so it lives here rather than inside AVPacketPtr.
     struct SerialPacket {
         AVPacketPtr pkt;
         int serial;
