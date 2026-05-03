@@ -235,11 +235,35 @@ void PlayerImpl::Play() {
     if (s == PlayerState::Playing) return;
 
     if (s == PlayerState::Finished) {
-        // Restart from beginning
-        Seek(0.0);
+        // Tear down old pipeline (threads already exited on EOF)
+        if (video_render_thread_.joinable()) video_render_thread_.join();
+        demuxer_.Stop();
+        if (audio_renderer_) audio_renderer_->Stop();
+        if (audio_ctx_) audio_ctx_->Abort();
+        if (video_ctx_) video_ctx_->Abort();
+
+        // Reset queues to usable state (clears abort flag + data)
+        if (audio_ctx_) {
+            audio_ctx_->packet_queue.Reset();
+            audio_ctx_->frame_queue.Reset();
+        }
+        if (video_ctx_) {
+            video_ctx_->packet_queue.Reset();
+            video_ctx_->frame_queue.Reset();
+        }
+        if (audio_renderer_) audio_renderer_->FlushSdlBuffer();
+        audio_clock_.Set(0.0);
+        video_clock_.Set(0.0);
+        audio_clock_.SetPaused(false);
+        video_clock_.SetPaused(false);
+        seek_target_.store(sync::kNoSeekTarget, std::memory_order_relaxed);
+        demuxer_.RequestSeek(0.0);
+
+        // Treat as fresh start
+        s = PlayerState::Ready;
     }
 
-    if (s == PlayerState::Ready || s == PlayerState::Finished) {
+    if (s == PlayerState::Ready) {
         TransitionTo(PlayerState::Playing);
         SPDLOG_INFO("Player: play (starting threads)");
 
@@ -304,9 +328,64 @@ void PlayerImpl::Seek(double position_seconds) {
 
     SPDLOG_INFO("Player: seek to {:.2f}s", position_seconds);
 
-    // If finished, transition to paused to allow seeking
+    // If finished, restart pipeline in paused state at the new position
     if (s == PlayerState::Finished) {
+        // Tear down old pipeline
+        if (video_render_thread_.joinable()) video_render_thread_.join();
+        demuxer_.Stop();
+        if (audio_renderer_) audio_renderer_->Stop();
+        if (audio_ctx_) audio_ctx_->Abort();
+        if (video_ctx_) video_ctx_->Abort();
+
+        // Reset queues
+        if (audio_ctx_) {
+            audio_ctx_->packet_queue.Reset();
+            audio_ctx_->frame_queue.Reset();
+        }
+        if (video_ctx_) {
+            video_ctx_->packet_queue.Reset();
+            video_ctx_->frame_queue.Reset();
+        }
+        if (audio_renderer_) audio_renderer_->FlushSdlBuffer();
+
+        // Set clocks to target position, paused
+        audio_clock_.Set(position_seconds);
+        video_clock_.Set(position_seconds);
+        audio_clock_.SetPaused(true);
+        video_clock_.SetPaused(true);
+        audio_eof_.store(false, std::memory_order_relaxed);
+        video_eof_.store(false, std::memory_order_relaxed);
+        seek_target_.store(position_seconds, std::memory_order_release);
+
+        // Transition to Paused
         TransitionTo(PlayerState::Paused);
+
+        // Restart pipeline
+        demuxer_.RequestSeek(position_seconds);
+        PacketQueue* audio_q = audio_ctx_ ? &audio_ctx_->packet_queue : nullptr;
+        PacketQueue* video_q = video_ctx_ ? &video_ctx_->packet_queue : nullptr;
+        demuxer_.Start(audio_q, video_q);
+
+        if (audio_ctx_) {
+            audio_ctx_->Start(false);
+            if (audio_renderer_) {
+                audio_renderer_->Start(&audio_ctx_->frame_queue,
+                                       &audio_ctx_->packet_queue, &audio_clock_);
+                audio_renderer_->SetPaused(true);
+            }
+        }
+        if (video_ctx_) {
+            video_ctx_->Start(true);
+        }
+
+        // Start video render loop (will immediately enter WaitIfPaused, then show one frame)
+        video_render_thread_ = std::thread(&PlayerImpl::VideoRenderLoop, this);
+        {
+            std::lock_guard<std::mutex> lock(step_mutex_);
+            frame_step_requested_ = true;
+        }
+        step_cond_.notify_one();
+        return;
     }
 
     // Flush all stream contexts
@@ -400,6 +479,8 @@ void PlayerImpl::OnStreamEof() {
     if (all_done) {
         if (TransitionTo(PlayerState::Finished)) {
             SPDLOG_INFO("Player: playback finished (EOF)");
+            audio_clock_.SetPaused(true);
+            video_clock_.SetPaused(true);
             if (playback_finished_cb_) playback_finished_cb_();
         }
     }
@@ -460,6 +541,8 @@ void PlayerImpl::VideoRenderLoop() {
             if (all_done) {
                 if (TransitionTo(PlayerState::Finished)) {
                     SPDLOG_INFO("Player: playback finished (EOF)");
+                    audio_clock_.SetPaused(true);
+                    video_clock_.SetPaused(true);
                     if (playback_finished_cb_) playback_finished_cb_();
                 }
             }

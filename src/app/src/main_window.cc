@@ -76,13 +76,9 @@ void MainWindow::SetupUi() {
     connect(progress_slider_, &QSlider::sliderMoved, this, &MainWindow::OnSliderMoved);
     control_layout->addWidget(progress_slider_, 1);
 
-    time_label_ = new QLabel("00:00:00 / 00:00:00", control_widget);
-    time_label_->setFixedWidth(140);
+    time_label_ = new QLabel("00:00:00.00 / 00:00:00", control_widget);
+    time_label_->setFixedWidth(180);
     control_layout->addWidget(time_label_);
-
-    frame_label_ = new QLabel("", control_widget);
-    frame_label_->setFixedWidth(120);
-    control_layout->addWidget(frame_label_);
 
     main_layout->addWidget(control_widget);
 }
@@ -125,6 +121,12 @@ void MainWindow::OnTimerTick() {
     double position = player_->CurrentPosition();
     double video_pos = player_->CurrentVideoPosition();
     double fps = player_->VideoFps();
+    auto state = player_->State();
+
+    // When finished, update button and stop advancing
+    if (state == mvp::PlayerState::Finished) {
+        play_pause_btn_->setText(QStringLiteral("\u25B6"));  // "▶"
+    }
 
     // slider_pressed_ stays true after release until video catches up
     if (slider_pressed_ && !progress_slider_->isSliderDown() && duration > 0) {
@@ -138,21 +140,13 @@ void MainWindow::OnTimerTick() {
         progress_slider_->setValue(slider_pos);
     }
 
-    time_label_->setText(FormatTime(position) + " / " + FormatTime(duration));
-
+    // Time label: "HH:MM:SS.FF / HH:MM:SS" where FF is frame-in-second
     if (fps > 0 && duration > 0) {
-        int total_seconds = static_cast<int>(video_pos);
-        int h = total_seconds / 3600;
-        int m = (total_seconds % 3600) / 60;
-        int s = total_seconds % 60;
-        int frame_in_second = static_cast<int>((video_pos - total_seconds) * fps);
-        frame_label_->setText(QString("%1:%2:%3.%4")
-                                  .arg(h, 2, 10, QChar('0'))
-                                  .arg(m, 2, 10, QChar('0'))
-                                  .arg(s, 2, 10, QChar('0'))
-                                  .arg(frame_in_second, 2, 10, QChar('0')));
+        int frame_in_second = static_cast<int>((video_pos - static_cast<int>(video_pos)) * fps);
+        QString pos_str = FormatTime(video_pos) + QString(".%1").arg(frame_in_second, 2, 10, QChar('0'));
+        time_label_->setText(pos_str + " / " + FormatTime(duration));
     } else {
-        frame_label_->setText("");
+        time_label_->setText(FormatTime(position) + " / " + FormatTime(duration));
     }
 }
 
