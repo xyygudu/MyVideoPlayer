@@ -96,7 +96,7 @@ double Clock::Get() const {
         // Step 3: re-read sequence — if still the same even value, snapshot is
         // consistent. acquire fence pairs with the writer's release in EndWrite.
         std::atomic_thread_fence(std::memory_order_acquire);
-    } while (seq_.load(std::memory_order_acquire) != s);
+    } while ((s & 1u) || seq_.load(std::memory_order_acquire) != s);
 
     // Step 4: extrapolate
     if (paused) {
