@@ -7,8 +7,8 @@ StreamContext::StreamContext(int frame_queue_size, int64_t max_packet_bytes)
 
 bool StreamContext::OpenDecoder(AVStream* stream) { return decoder.Open(stream); }
 
-void StreamContext::Start(bool convert_to_rgb) {
-    decoder.Start(&packet_queue, &frame_queue, convert_to_rgb);
+void StreamContext::Start() {
+    decoder.Start(&packet_queue, &frame_queue);
 }
 
 void StreamContext::Stop() { decoder.Stop(); }

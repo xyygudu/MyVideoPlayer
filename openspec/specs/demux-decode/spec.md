@@ -34,11 +34,11 @@
 - **THEN** 系统将其送入 `avcodec_send_packet` / `avcodec_receive_frame` 解码为 AVFrame
 
 ### Requirement: Video decoder produces frames
-系统 SHALL 从 video PacketQueue 取出 packet，使用 FFmpeg 解码为视频帧，并经 `sws_scale` 转为 RGB32 格式存入 FrameQueue。
+系统 SHALL 从 video PacketQueue 取出 packet，使用 FFmpeg 解码为原始 YUV 视频帧（保持解码器输出格式），直接存入 FrameQueue。格式转换由下游 VideoRenderer 在 GPU 上传时处理。
 
-#### Scenario: Decode video packet to RGB frame
+#### Scenario: Decode video packet to native-format frame
 - **WHEN** video PacketQueue 中有可用的 video packet
-- **THEN** 系统解码为 AVFrame 并转换为 RGB32 格式放入 FrameQueue
+- **THEN** 系统解码为 AVFrame（保持原始像素格式，如 YUV420P）放入 FrameQueue
 
 #### Scenario: Video FrameQueue blocks when full
 - **WHEN** FrameQueue 达到最大容量

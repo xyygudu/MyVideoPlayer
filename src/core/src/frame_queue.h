@@ -6,6 +6,8 @@
 #include <mutex>
 #include <queue>
 
+#include "ffmpeg_utils.h"
+
 struct AVFrame;
 
 namespace mvp {
@@ -44,7 +46,7 @@ class FrameQueue {
 
   private:
     struct SerialFrame {
-        AVFrame* frame;  // nullptr for EOF markers
+        AVFramePtr frame;  // empty (null) for EOF markers
         int serial;
         bool eof{false};
     };

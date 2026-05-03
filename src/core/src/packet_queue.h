@@ -7,6 +7,7 @@
 #include <mutex>
 #include <queue>
 
+#include "ffmpeg_utils.h"
 #include "sync_constants.h"
 
 struct AVPacket;
@@ -47,7 +48,7 @@ class PacketQueue {
 
   private:
     struct SerialPacket {
-        AVPacket* pkt;
+        AVPacketPtr pkt;
         int serial;
     };
 

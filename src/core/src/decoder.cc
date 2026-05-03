@@ -5,11 +5,10 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
-#include <libavutil/imgutils.h>
-#include <libswscale/swscale.h>
 }
 #include <spdlog/spdlog.h>
 
+#include "ffmpeg_utils.h"
 #include "frame_queue.h"
 #include "packet_queue.h"
 
@@ -20,10 +19,6 @@ Decoder::Decoder()
       stream_(nullptr),
       packet_queue_(nullptr),
       frame_queue_(nullptr),
-      sws_ctx_(nullptr),
-      convert_to_rgb_(false),
-      dst_width_(0),
-      dst_height_(0),
       running_(false) {}
 
 Decoder::~Decoder() { Close(); }
@@ -58,29 +53,16 @@ bool Decoder::Open(AVStream* stream) {
 
 void Decoder::Close() {
     Stop();
-    if (sws_ctx_) {
-        sws_freeContext(sws_ctx_);
-        sws_ctx_ = nullptr;
-    }
     if (codec_ctx_) {
         avcodec_free_context(&codec_ctx_);
     }
     stream_ = nullptr;
 }
 
-void Decoder::Start(PacketQueue* packet_queue, FrameQueue* frame_queue, bool convert_to_rgb) {
+void Decoder::Start(PacketQueue* packet_queue, FrameQueue* frame_queue) {
     if (running_) return;
     packet_queue_ = packet_queue;
     frame_queue_ = frame_queue;
-    convert_to_rgb_ = convert_to_rgb;
-
-    if (convert_to_rgb_ && codec_ctx_) {
-        dst_width_ = codec_ctx_->width;
-        dst_height_ = codec_ctx_->height;
-        sws_ctx_ =
-            sws_getContext(dst_width_, dst_height_, codec_ctx_->pix_fmt, dst_width_, dst_height_,
-                           AV_PIX_FMT_RGB32, SWS_BILINEAR, nullptr, nullptr, nullptr);
-    }
 
     running_ = true;
     decode_thread_ = std::thread(&Decoder::DecodeLoop, this);
@@ -94,25 +76,12 @@ void Decoder::Stop() {
 }
 
 void Decoder::DecodeLoop() {
-    AVPacket* pkt = av_packet_alloc();
-    AVFrame* frame = av_frame_alloc();
-    AVFrame* rgb_frame = nullptr;
-    uint8_t* rgb_buffer = nullptr;
-
-    if (convert_to_rgb_ && sws_ctx_) {
-        rgb_frame = av_frame_alloc();
-        int buffer_size = av_image_get_buffer_size(AV_PIX_FMT_RGB32, dst_width_, dst_height_, 1);
-        rgb_buffer = static_cast<uint8_t*>(av_malloc(buffer_size));
-        av_image_fill_arrays(rgb_frame->data, rgb_frame->linesize, rgb_buffer, AV_PIX_FMT_RGB32,
-                             dst_width_, dst_height_, 1);
-        rgb_frame->width = dst_width_;
-        rgb_frame->height = dst_height_;
-        rgb_frame->format = AV_PIX_FMT_RGB32;
-    }
+    AVPacketPtr pkt;
+    AVFramePtr frame;
 
     while (running_) {
         int pkt_serial = 0;
-        if (!packet_queue_->Pop(pkt, &pkt_serial)) {
+        if (!packet_queue_->Pop(pkt.get(), &pkt_serial)) {
             break;  // Aborted
         }
 
@@ -124,7 +93,7 @@ void Decoder::DecodeLoop() {
 
         // Discard stale packets pushed between flush-increment and actual seek
         if (pkt_serial != packet_queue_->serial()) {
-            av_packet_unref(pkt);
+            pkt.unref();
             continue;
         }
 
@@ -133,11 +102,11 @@ void Decoder::DecodeLoop() {
             avcodec_send_packet(codec_ctx_, nullptr);
 
             while (running_) {
-                int drain_ret = avcodec_receive_frame(codec_ctx_, frame);
+                int drain_ret = avcodec_receive_frame(codec_ctx_, frame.get());
                 if (drain_ret == AVERROR_EOF || drain_ret == AVERROR(EAGAIN)) break;
                 if (drain_ret < 0) break;
-                EnqueueFrame(frame, rgb_frame, last_serial_);
-                av_frame_unref(frame);
+                EnqueueFrame(frame.get(), last_serial_);
+                frame.unref();
             }
 
             frame_queue_->PushEof(last_serial_);
@@ -151,39 +120,24 @@ void Decoder::DecodeLoop() {
             continue;
         }
 
-        int ret = avcodec_send_packet(codec_ctx_, pkt);
-        av_packet_unref(pkt);
+        int ret = avcodec_send_packet(codec_ctx_, pkt.get());
+        pkt.unref();
         if (ret < 0) continue;
 
         while (ret >= 0 && running_) {
-            ret = avcodec_receive_frame(codec_ctx_, frame);
+            ret = avcodec_receive_frame(codec_ctx_, frame.get());
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
             if (ret < 0) break;
-            EnqueueFrame(frame, rgb_frame, last_serial_);
-            av_frame_unref(frame);
+            EnqueueFrame(frame.get(), last_serial_);
+            frame.unref();
         }
     }
 
-    av_packet_free(&pkt);
-    av_frame_free(&frame);
-    if (rgb_frame) av_frame_free(&rgb_frame);
-    if (rgb_buffer) av_free(rgb_buffer);
+    // pkt and frame are automatically freed by AVPacketPtr/AVFramePtr destructors
 }
 
-void Decoder::EnqueueFrame(AVFrame* decoded, AVFrame* rgb_frame, int serial) {
-    if (convert_to_rgb_ && sws_ctx_ && rgb_frame) {
-        sws_scale(sws_ctx_, decoded->data, decoded->linesize, 0, decoded->height,
-                  rgb_frame->data, rgb_frame->linesize);
-        rgb_frame->pts = decoded->pts;
-
-        AVFrame* out = av_frame_alloc();
-        av_frame_ref(out, rgb_frame);
-        out->pts = decoded->pts;
-        frame_queue_->Push(out, serial);
-        av_frame_free(&out);
-    } else {
-        frame_queue_->Push(decoded, serial);
-    }
+void Decoder::EnqueueFrame(AVFrame* decoded, int serial) {
+    frame_queue_->Push(decoded, serial);
 }
 
 }  // namespace mvp

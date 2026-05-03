@@ -17,12 +17,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), slider_pressed_(f
     player_ = std::make_unique<mvp::Player>();
     SetupUi();
 
-    // Set up video frame callback
-    player_->SetVideoFrameCallback([this](const uint8_t* data, int width, int height, int stride) {
-        QImage image(data, width, height, stride, QImage::Format_RGB32);
-        // Use queued connection to update from render thread to UI thread
-        QMetaObject::invokeMethod(video_widget_, "UpdateFrame", Qt::QueuedConnection,
-                                  Q_ARG(QImage, image.copy()));
+    // Wire native window handle to player for SDL3 rendering
+    player_->SetWindowHandle(reinterpret_cast<void*>(video_widget_->winId()));
+
+    // Forward resize events to player/renderer
+    video_widget_->SetResizeCallback([this](int w, int h) {
+        player_->NotifyWindowResized(w, h);
     });
 
     // Timer for updating progress

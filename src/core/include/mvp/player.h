@@ -8,6 +8,7 @@
 
 #include "mvp/export.h"
 #include "mvp/player_state.h"
+#include "mvp/video_frame.h"
 
 namespace mvp {
 
@@ -39,8 +40,12 @@ class MVP_CORE_EXPORT Player {
     bool IsPlaying() const;
     PlayerState State() const;
 
+    // Window handle for video rendering (pass native window handle for SDL embed)
+    void SetWindowHandle(void* native_handle);
+    void NotifyWindowResized(int width, int height);
+
     // Callback registration
-    using VideoFrameCallback = std::function<void(const uint8_t* data, int width, int height, int stride)>;
+    using VideoFrameCallback = std::function<void(const VideoFrame& frame)>;
     void SetVideoFrameCallback(VideoFrameCallback cb);
     void SetPlaybackFinishedCallback(std::function<void()> cb);
 

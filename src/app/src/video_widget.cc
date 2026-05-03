@@ -1,30 +1,23 @@
 #include "video_widget.h"
 
-#include <QPainter>
+#include <QResizeEvent>
 
 VideoWidget::VideoWidget(QWidget* parent) : QWidget(parent) {
     setMinimumSize(320, 240);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+    // Critical: tell Qt not to paint this widget — SDL owns the surface
+    setAttribute(Qt::WA_PaintOnScreen, true);
+    setAttribute(Qt::WA_NativeWindow, true);
+    setAttribute(Qt::WA_OpaquePaintEvent, true);
     setStyleSheet("background-color: black;");
 }
 
-void VideoWidget::UpdateFrame(const QImage& image) {
-    QMutexLocker locker(&mutex_);
-    current_frame_ = image.copy();
-    update();
-}
+void VideoWidget::SetResizeCallback(ResizeCallback cb) { resize_cb_ = std::move(cb); }
 
-void VideoWidget::paintEvent(QPaintEvent* /*event*/) {
-    QPainter painter(this);
-    painter.fillRect(rect(), Qt::black);
-
-    QMutexLocker locker(&mutex_);
-    if (current_frame_.isNull()) return;
-
-    // Scale keeping aspect ratio, centered
-    QSize scaled_size = current_frame_.size().scaled(size(), Qt::KeepAspectRatio);
-    int x = (width() - scaled_size.width()) / 2;
-    int y = (height() - scaled_size.height()) / 2;
-
-    painter.drawImage(QRect(x, y, scaled_size.width(), scaled_size.height()), current_frame_);
+void VideoWidget::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    if (resize_cb_) {
+        resize_cb_(event->size().width(), event->size().height());
+    }
 }

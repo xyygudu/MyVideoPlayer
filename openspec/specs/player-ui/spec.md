@@ -8,15 +8,15 @@ Qt 主窗口 SHALL 分为上下两部分：上部为视频渲染区域，下部�
 - **THEN** 显示主窗口，上部为黑色视频区域，下部为控制栏
 
 ### Requirement: Video display widget
-视频渲染区域 SHALL 接收核心库通过回调传来的 RGB 帧数据，使用 `QImage` + `paintEvent` 显示。
+视频渲染区域 SHALL 作为纯原生窗口容器（`WA_PaintOnScreen`），将 `winId()` 传递给核心库。核心库通过 SDL3 VideoRenderer 直接在该窗口上进行 GPU 加速 YUV 纹理渲染，无需 CPU 格式转换。
 
 #### Scenario: Display video frames during playback
-- **WHEN** 核心库回调传来新的视频帧
-- **THEN** 视频区域更新显示该帧，画面随视频内容变化
+- **WHEN** 核心库 VideoRenderLoop 获取到新的视频帧
+- **THEN** SDL3 renderer 将 YUV 纹理上传到 GPU 并渲染到 VideoWidget 的原生窗口
 
 #### Scenario: Maintain aspect ratio
 - **WHEN** 窗口大小改变
-- **THEN** 视频画面保持原始宽高比，居中显示，空余部分填黑
+- **THEN** VideoWidget 通过 resizeEvent 通知核心库，VideoRenderer 保持原始宽高比居中显示，空余部分填黑
 
 ### Requirement: Play/Pause button
 控制栏 SHALL 包含播放/暂停按钮，切换播放状态。

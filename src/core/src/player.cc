@@ -17,9 +17,11 @@ extern "C" {
 #include "audio_renderer.h"
 #include "clock.h"
 #include "demuxer.h"
+#include "frame_converter.h"
 #include "mvp/player_state.h"
 #include "stream_context.h"
 #include "sync_constants.h"
+#include "video_renderer.h"
 
 namespace mvp {
 
@@ -42,6 +44,8 @@ class PlayerImpl {
     PlayerState State() const;
     void SetVideoFrameCallback(Player::VideoFrameCallback cb);
     void SetPlaybackFinishedCallback(std::function<void()> cb);
+    void SetWindowHandle(void* native_handle);
+    void NotifyWindowResized(int width, int height);
 
   private:
     void VideoRenderLoop();
@@ -86,6 +90,11 @@ class PlayerImpl {
 
     Player::VideoFrameCallback video_frame_cb_;
     std::function<void()> playback_finished_cb_;
+
+    void* window_handle_{nullptr};
+    int window_width_{0};
+    int window_height_{0};
+    VideoRenderer video_renderer_;
 
     std::thread video_render_thread_;
 };
@@ -356,6 +365,16 @@ void PlayerImpl::SetPlaybackFinishedCallback(std::function<void()> cb) {
     playback_finished_cb_ = std::move(cb);
 }
 
+void PlayerImpl::SetWindowHandle(void* native_handle) {
+    window_handle_ = native_handle;
+}
+
+void PlayerImpl::NotifyWindowResized(int width, int height) {
+    window_width_ = width;
+    window_height_ = height;
+    video_renderer_.Resize(width, height);
+}
+
 // ---------------------------------------------------------------------------
 // MasterClock
 // ---------------------------------------------------------------------------
@@ -417,6 +436,8 @@ void PlayerImpl::StopPipeline() {
     if (video_render_thread_.joinable()) {
         video_render_thread_.join();
     }
+
+    video_renderer_.Close();
 }
 
 void PlayerImpl::ResetPipeline() {
@@ -439,7 +460,7 @@ void PlayerImpl::StartPipeline(bool audio_paused) {
     demuxer_.Start(audio_q, video_q);
 
     if (audio_ctx_) {
-        audio_ctx_->Start(false);
+        audio_ctx_->Start();
         if (audio_renderer_) {
             audio_renderer_->Start(&audio_ctx_->frame_queue,
                                    &audio_ctx_->packet_queue, &audio_clock_);
@@ -447,7 +468,14 @@ void PlayerImpl::StartPipeline(bool audio_paused) {
         }
     }
     if (video_ctx_) {
-        video_ctx_->Start(true);
+        video_ctx_->Start();
+
+        // Open SDL video renderer if window handle was provided
+        if (window_handle_ && !video_renderer_.IsOpen()) {
+            int w = window_width_ > 0 ? window_width_ : 640;
+            int h = window_height_ > 0 ? window_height_ : 480;
+            video_renderer_.Open(window_handle_, w, h);
+        }
     }
 
     video_render_thread_ = std::thread(&PlayerImpl::VideoRenderLoop, this);
@@ -580,7 +608,12 @@ void PlayerImpl::VideoRenderLoop() {
         }
 
         if (video_frame_cb_ && frame->data[0]) {
-            video_frame_cb_(frame->data[0], frame->width, frame->height, frame->linesize[0]);
+            VideoFrame vf = FrameConverter::ToVideoFrame(frame, video_stream);
+            video_renderer_.Render(vf);
+            video_frame_cb_(vf);
+        } else if (frame->data[0]) {
+            VideoFrame vf = FrameConverter::ToVideoFrame(frame, video_stream);
+            video_renderer_.Render(vf);
         }
 
         video_pts_.store(pts, std::memory_order_relaxed);
@@ -615,6 +648,12 @@ void Player::SetVideoFrameCallback(VideoFrameCallback cb) {
 }
 void Player::SetPlaybackFinishedCallback(std::function<void()> cb) {
     impl_->SetPlaybackFinishedCallback(std::move(cb));
+}
+void Player::SetWindowHandle(void* native_handle) {
+    impl_->SetWindowHandle(native_handle);
+}
+void Player::NotifyWindowResized(int width, int height) {
+    impl_->NotifyWindowResized(width, height);
 }
 
 }  // namespace mvp

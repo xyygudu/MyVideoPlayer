@@ -25,8 +25,8 @@ struct StreamContext {
     /// Open the decoder for the given stream.
     bool OpenDecoder(AVStream* stream);
 
-    /// Start the decoder thread. For video, set convert_to_rgb=true.
-    void Start(bool convert_to_rgb = false);
+    /// Start the decoder thread.
+    void Start();
 
     /// Stop the decoder thread (blocks until joined).
     void Stop();
