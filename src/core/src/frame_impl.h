@@ -2,39 +2,24 @@
 #define MVP_FRAME_IMPL_H_
 
 // Internal header: defines Impl structs for VideoFrame/AudioFrame.
-// Only to be included by frame_converter.cc and the respective .cc files.
+// Only to be included by frame_converter.cc, decoder, and the respective .cc files.
 
-extern "C" {
-#include <libavutil/frame.h>
-}
-
+#include "ffmpeg_utils.h"
 #include "mvp/audio_frame.h"
 #include "mvp/video_frame.h"
 
 namespace mvp {
 
 struct VideoFrame::Impl {
-    AVFrame* frame = nullptr;
+    AVFramePtr frame;
     PixelFormat format = PixelFormat::kUnknown;
     double pts = 0.0;
-
-    ~Impl() {
-        if (frame) {
-            av_frame_free(&frame);
-        }
-    }
 };
 
 struct AudioFrame::Impl {
-    AVFrame* frame = nullptr;
+    AVFramePtr frame;
     SampleFormat format = SampleFormat::kUnknown;
     double pts = 0.0;
-
-    ~Impl() {
-        if (frame) {
-            av_frame_free(&frame);
-        }
-    }
 };
 
 }  // namespace mvp

@@ -41,6 +41,9 @@ class MVP_CORE_EXPORT AudioFrame {
 
   private:
     friend class FrameConverter;
+    friend class AudioRenderer;
+    template <typename>
+    friend struct StreamContext;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

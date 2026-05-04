@@ -42,6 +42,8 @@ class MVP_CORE_EXPORT VideoFrame {
   private:
     friend class FrameConverter;
     friend class VideoRenderer;
+    template <typename>
+    friend struct StreamContext;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

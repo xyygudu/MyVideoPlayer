@@ -98,7 +98,7 @@ void VideoRenderer::Render(const VideoFrame& frame) {
         // Fallback: convert to YUV420P via sws_scale, then upload
         // Access internal AVFrame through Impl
         const auto* impl = frame.impl_.get();
-        AVFrame* src_frame = impl->frame;
+        AVFrame* src_frame = impl->frame.get();
         if (!src_frame) return;
 
         // Lazily create/update sws context

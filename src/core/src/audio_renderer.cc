@@ -1,7 +1,9 @@
 #include "audio_renderer.h"
 
 #include "clock.h"
+#include "frame_impl.h"
 #include "frame_queue.h"
+#include "mvp/audio_frame.h"
 #include "packet_queue.h"
 
 #include <spdlog/spdlog.h>
@@ -21,7 +23,6 @@ AudioRenderer::AudioRenderer()
     : frame_queue_(nullptr),
       packet_queue_(nullptr),
       audio_clock_(nullptr),
-      stream_(nullptr),
       sdl_stream_(nullptr),
       running_(false),
       paused_(false) {}
@@ -30,7 +31,10 @@ AudioRenderer::~AudioRenderer() { Close(); }
 
 bool AudioRenderer::Open(AVStream* stream) {
     Close();
-    stream_ = stream;
+
+    // Cache stream parameters as value types
+    sample_rate_ = stream->codecpar->sample_rate;
+    channels_ = stream->codecpar->ch_layout.nb_channels;
 
     // Initialize SDL audio subsystem
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
@@ -40,8 +44,8 @@ bool AudioRenderer::Open(AVStream* stream) {
 
     // Set up audio spec based on codec parameters
     SDL_AudioSpec src_spec;
-    src_spec.freq = stream->codecpar->sample_rate;
-    src_spec.channels = stream->codecpar->ch_layout.nb_channels;
+    src_spec.freq = sample_rate_;
+    src_spec.channels = channels_;
     src_spec.format = SDL_AUDIO_S16;
 
     sdl_stream_ =
@@ -51,8 +55,7 @@ bool AudioRenderer::Open(AVStream* stream) {
         return false;
     }
 
-    SPDLOG_INFO("AudioRenderer: opened (rate={}, channels={})", stream->codecpar->sample_rate,
-                stream->codecpar->ch_layout.nb_channels);
+    SPDLOG_INFO("AudioRenderer: opened (rate={}, channels={})", sample_rate_, channels_);
     return true;
 }
 
@@ -66,7 +69,8 @@ void AudioRenderer::Close() {
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }
 
-void AudioRenderer::Start(FrameQueue* frame_queue, PacketQueue* packet_queue, Clock* audio_clock) {
+void AudioRenderer::Start(FrameQueue<AudioFrame>* frame_queue, PacketQueue* packet_queue,
+                           Clock* audio_clock) {
     if (running_) return;
     frame_queue_ = frame_queue;
     packet_queue_ = packet_queue;
@@ -116,51 +120,48 @@ void AudioRenderer::AudioLoop() {
         // Check if SDL needs more data
         int queued = SDL_GetAudioStreamQueued(sdl_stream_);
         // Keep ~100ms of audio buffered in SDL
-        int target_bytes =
-            stream_->codecpar->sample_rate * stream_->codecpar->ch_layout.nb_channels * 2 / 10;
+        int target_bytes = sample_rate_ * channels_ * 2 / 10;
         if (queued > target_bytes) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
 
-        bool is_eof = false;
-        auto sf = frame_queue_->Pop();
-        if (!sf) {
+        auto entry = frame_queue_->Pop();
+        if (!entry) {
             break;  // Aborted
         }
 
         // EOF marker received — notify player and exit loop
-        if (sf->eof) {
+        if (entry->eof) {
             if (eof_cb_) eof_cb_();
             break;
         }
 
-        AVFrame* frame = sf->frame.get();
-        int frame_serial = sf->serial;
+        int frame_serial = entry->serial;
 
-        // Discard stale frames from before seek (compare against packet queue serial)
+        // Discard stale frames from before seek
         int current_serial = packet_queue_->serial();
         if (frame_serial != current_serial) {
             continue;
         }
 
-        // Update audio clock
-        if (frame->pts != AV_NOPTS_VALUE) {
-            double pts = static_cast<double>(frame->pts) * av_q2d(stream_->time_base);
-            audio_clock_->Set(pts);
-        }
+        // Update audio clock with pre-computed PTS (already in seconds)
+        AudioFrame& af = entry->frame;
+        audio_clock_->Set(af.pts());
+
+        // Access internal AVFrame for resampling
+        AVFrame* frame = af.impl_->frame.get();
 
         // Convert to S16 format if needed
         int out_samples = frame->nb_samples;
-        int out_channels = stream_->codecpar->ch_layout.nb_channels;
-        int out_buffer_size = out_samples * out_channels * 2;  // S16 = 2 bytes
+        int out_buffer_size = out_samples * channels_ * 2;  // S16 = 2 bytes
 
         if (frame->format != AV_SAMPLE_FMT_S16) {
             if (!swr_ctx) {
                 AVChannelLayout out_layout;
-                av_channel_layout_default(&out_layout, out_channels);
+                av_channel_layout_default(&out_layout, channels_);
                 swr_alloc_set_opts2(&swr_ctx, &out_layout, AV_SAMPLE_FMT_S16,
-                                    stream_->codecpar->sample_rate, &frame->ch_layout,
+                                    sample_rate_, &frame->ch_layout,
                                     static_cast<AVSampleFormat>(frame->format), frame->sample_rate,
                                     0, nullptr);
                 swr_init(swr_ctx);
@@ -176,7 +177,6 @@ void AudioRenderer::AudioLoop() {
         } else {
             SDL_PutAudioStreamData(sdl_stream_, frame->data[0], out_buffer_size);
         }
-        // sf goes out of scope here, AVFramePtr destructor handles cleanup
     }
 
     if (swr_ctx) swr_free(&swr_ctx);

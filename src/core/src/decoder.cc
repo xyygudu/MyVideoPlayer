@@ -9,23 +9,23 @@ extern "C" {
 #include <spdlog/spdlog.h>
 
 #include "ffmpeg_utils.h"
-#include "frame_queue.h"
 #include "packet_queue.h"
 
 namespace mvp {
 
 Decoder::Decoder()
     : codec_ctx_(nullptr),
-      stream_(nullptr),
       packet_queue_(nullptr),
-      frame_queue_(nullptr),
       running_(false) {}
 
 Decoder::~Decoder() { Close(); }
 
 bool Decoder::Open(AVStream* stream) {
     Close();
-    stream_ = stream;
+
+    // Extract value-type params before we discard the stream pointer
+    params_.time_base = stream->time_base;
+    params_.frame_rate = stream->avg_frame_rate;
 
     const AVCodec* codec = avcodec_find_decoder(stream->codecpar->codec_id);
     if (!codec) {
@@ -56,13 +56,15 @@ void Decoder::Close() {
     if (codec_ctx_) {
         avcodec_free_context(&codec_ctx_);
     }
-    stream_ = nullptr;
+    params_ = {};
 }
 
-void Decoder::Start(PacketQueue* packet_queue, FrameQueue* frame_queue) {
+void Decoder::Start(PacketQueue* packet_queue, FrameOutputCallback on_frame,
+                    EofOutputCallback on_eof) {
     if (running_) return;
     packet_queue_ = packet_queue;
-    frame_queue_ = frame_queue;
+    on_frame_ = std::move(on_frame);
+    on_eof_ = std::move(on_eof);
 
     running_ = true;
     decode_thread_ = std::thread(&Decoder::DecodeLoop, this);
@@ -87,11 +89,10 @@ void Decoder::DrainFrames(int serial) {
         if (ret < 0) break;
 
         // 计算帧 pts（秒），用于 seek 快速丢帧判断
-        double frame_pts = frame.get()->pts * av_q2d(stream_->time_base);
+        double frame_pts = frame.get()->pts * av_q2d(params_.time_base);
         double target = drop_until_pts_.load(std::memory_order_acquire);
 
         if (target > 0 && frame_pts < target) {
-            // Seek 期间：目标帧之前的帧直接丢弃，不入队
             continue;
         }
 
@@ -101,7 +102,7 @@ void Decoder::DrainFrames(int serial) {
             drop_until_pts_.store(0, std::memory_order_release);
         }
 
-        frame_queue_->Push(SerialFrame{std::move(frame), serial, false});
+        on_frame_(frame.get(), frame_pts, serial);
     }
 }
 
@@ -119,22 +120,21 @@ void Decoder::DecodeLoop() {
             avcodec_flush_buffers(codec_ctx_);
             last_serial_ = pkt_serial;
 
-            // Seek 优化：跳过非参考帧解码以减少 GOP 内解码量
             if (drop_until_pts_.load(std::memory_order_acquire) > 0) {
                 codec_ctx_->skip_frame = AVDISCARD_NONREF;
             }
         }
 
-        // Discard stale packets pushed between flush-increment and actual seek
+        // Discard stale packets
         if (pkt_serial != packet_queue_->serial()) {
             continue;
         }
 
-        // Null packet (data==NULL) signals EOF from demuxer → enter drain mode
+        // Null packet signals EOF → drain mode
         if (!sp->pkt->data) {
             avcodec_send_packet(codec_ctx_, nullptr);
             DrainFrames(last_serial_);
-            frame_queue_->PushEof(last_serial_);
+            on_eof_(last_serial_);
 
             // Wait for either abort or a new serial (indicating seek)
             while (running_) {

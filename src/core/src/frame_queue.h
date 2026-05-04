@@ -7,17 +7,19 @@
 #include <optional>
 #include <queue>
 
-#include "ffmpeg_utils.h"
-
 namespace mvp {
 
-// Queue node: attaches serial and EOF flag during transit (same rationale as SerialPacket).
-struct SerialFrame {
-    AVFramePtr frame;  // empty (null) for EOF markers
+// Transport wrapper: attaches serial and EOF flag to a frame in transit.
+template<typename T>
+struct QueueEntry {
+    T frame;        // VideoFrame or AudioFrame (move-only); default-constructed for EOF
     int serial;
     bool eof{false};
 };
 
+// Thread-safe bounded queue for decoded frames.
+// Template parameter T is the frame type (VideoFrame or AudioFrame).
+template<typename T>
 class FrameQueue {
   public:
     explicit FrameQueue(int max_size = 4);
@@ -27,13 +29,13 @@ class FrameQueue {
     FrameQueue& operator=(const FrameQueue&) = delete;
 
     // Push a frame (blocks if queue is full). Takes ownership via move.
-    void Push(SerialFrame sf);
+    void Push(QueueEntry<T> entry);
 
     // Push an EOF marker into the queue.
     void PushEof(int serial);
 
     // Pop a frame (blocks if queue is empty). Returns nullopt if aborted.
-    std::optional<SerialFrame> Pop();
+    std::optional<QueueEntry<T>> Pop();
 
     // Flush all frames and increment serial. Does NOT change abort state.
     void Flush();
@@ -48,9 +50,9 @@ class FrameQueue {
     int Size() const;
 
   private:
-    void ClearLocked();  // Internal: free all frames (must hold mutex_)
+    void ClearLocked();
 
-    std::queue<SerialFrame> queue_;
+    std::queue<QueueEntry<T>> queue_;
     mutable std::mutex mutex_;
     std::condition_variable cond_push_;
     std::condition_variable cond_pop_;

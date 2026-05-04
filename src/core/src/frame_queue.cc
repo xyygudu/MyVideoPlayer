@@ -2,49 +2,59 @@
 
 #include <spdlog/spdlog.h>
 
+#include "mvp/audio_frame.h"
+#include "mvp/video_frame.h"
+
 namespace mvp {
 
-FrameQueue::FrameQueue(int max_size) : max_size_(max_size), abort_(false) {}
+template<typename T>
+FrameQueue<T>::FrameQueue(int max_size) : max_size_(max_size), abort_(false) {}
 
-FrameQueue::~FrameQueue() {
+template<typename T>
+FrameQueue<T>::~FrameQueue() {
     std::lock_guard<std::mutex> lock(mutex_);
     ClearLocked();
 }
 
-void FrameQueue::Push(SerialFrame sf) {
+template<typename T>
+void FrameQueue<T>::Push(QueueEntry<T> entry) {
     std::unique_lock<std::mutex> lock(mutex_);
     cond_push_.wait(lock, [this] { return abort_ || static_cast<int>(queue_.size()) < max_size_; });
     if (abort_) {
-        return;  // AVFramePtr destructor handles cleanup
+        return;
     }
-    queue_.push(std::move(sf));
+    queue_.push(std::move(entry));
     cond_pop_.notify_one();
 }
 
-void FrameQueue::PushEof(int serial) {
-    Push(SerialFrame{AVFramePtr{}, serial, true});
+template<typename T>
+void FrameQueue<T>::PushEof(int serial) {
+    Push(QueueEntry<T>{T{}, serial, true});
 }
 
-std::optional<SerialFrame> FrameQueue::Pop() {
+template<typename T>
+std::optional<QueueEntry<T>> FrameQueue<T>::Pop() {
     std::unique_lock<std::mutex> lock(mutex_);
     cond_pop_.wait(lock, [this] { return abort_ || !queue_.empty(); });
     if (abort_ && queue_.empty()) {
         return std::nullopt;
     }
-    SerialFrame sf = std::move(queue_.front());
+    QueueEntry<T> entry = std::move(queue_.front());
     queue_.pop();
     cond_push_.notify_one();
-    return sf;
+    return entry;
 }
 
-void FrameQueue::Flush() {
+template<typename T>
+void FrameQueue<T>::Flush() {
     std::lock_guard<std::mutex> lock(mutex_);
     ClearLocked();
     serial_.fetch_add(1, std::memory_order_release);
     cond_push_.notify_all();
 }
 
-void FrameQueue::Abort() {
+template<typename T>
+void FrameQueue<T>::Abort() {
     std::lock_guard<std::mutex> lock(mutex_);
     SPDLOG_INFO("FrameQueue: abort (size={})", queue_.size());
     abort_ = true;
@@ -52,7 +62,8 @@ void FrameQueue::Abort() {
     cond_pop_.notify_all();
 }
 
-void FrameQueue::Reset() {
+template<typename T>
+void FrameQueue<T>::Reset() {
     std::lock_guard<std::mutex> lock(mutex_);
     ClearLocked();
     serial_.store(0, std::memory_order_release);
@@ -60,14 +71,20 @@ void FrameQueue::Reset() {
     cond_push_.notify_all();
 }
 
-void FrameQueue::ClearLocked() {
-    std::queue<SerialFrame> empty;
-    queue_.swap(empty);  // AVFramePtr destructors free all frames
+template<typename T>
+void FrameQueue<T>::ClearLocked() {
+    std::queue<QueueEntry<T>> empty;
+    queue_.swap(empty);
 }
 
-int FrameQueue::Size() const {
+template<typename T>
+int FrameQueue<T>::Size() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return static_cast<int>(queue_.size());
 }
+
+// Explicit instantiations
+template class FrameQueue<VideoFrame>;
+template class FrameQueue<AudioFrame>;
 
 }  // namespace mvp

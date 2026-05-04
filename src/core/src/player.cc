@@ -11,15 +11,15 @@
 
 extern "C" {
 #include <libavformat/avformat.h>
-#include <libavutil/frame.h>
 }
 #include <spdlog/spdlog.h>
 
 #include "audio_renderer.h"
 #include "clock.h"
 #include "demuxer.h"
-#include "frame_converter.h"
+#include "mvp/audio_frame.h"
 #include "mvp/player_state.h"
+#include "mvp/video_frame.h"
 #include "stream_context.h"
 #include "sync_constants.h"
 #include "video_renderer.h"
@@ -67,8 +67,8 @@ class PlayerImpl {
     void CheckAllStreamsEof();
 
     Demuxer demuxer_;
-    std::unique_ptr<StreamContext> audio_ctx_;
-    std::unique_ptr<StreamContext> video_ctx_;
+    std::unique_ptr<StreamContext<AudioFrame>> audio_ctx_;
+    std::unique_ptr<StreamContext<VideoFrame>> video_ctx_;
     std::unique_ptr<AudioRenderer> audio_renderer_;
 
     Clock audio_clock_;
@@ -171,7 +171,7 @@ bool PlayerImpl::Open(const std::string& filepath) {
 
     // Create audio stream context
     if (demuxer_.AudioStreamIndex() >= 0) {
-        audio_ctx_ = std::make_unique<StreamContext>(sync::kDefaultAudioQueueSize);
+        audio_ctx_ = std::make_unique<StreamContext<AudioFrame>>(sync::kDefaultAudioQueueSize);
         AVStream* audio_stream = demuxer_.FormatContext()->streams[demuxer_.AudioStreamIndex()];
         if (!audio_ctx_->OpenDecoder(audio_stream)) {
             audio_ctx_.reset();
@@ -188,7 +188,7 @@ bool PlayerImpl::Open(const std::string& filepath) {
 
     // Create video stream context
     if (demuxer_.VideoStreamIndex() >= 0) {
-        video_ctx_ = std::make_unique<StreamContext>(sync::kDefaultVideoQueueSize);
+        video_ctx_ = std::make_unique<StreamContext<VideoFrame>>(sync::kDefaultVideoQueueSize);
         AVStream* video_stream = demuxer_.FormatContext()->streams[demuxer_.VideoStreamIndex()];
         if (!video_ctx_->OpenDecoder(video_stream)) {
             video_ctx_.reset();
@@ -575,11 +575,6 @@ double PlayerImpl::ComputeDisplayDelay(double pts, double last_pts,
 // ---------------------------------------------------------------------------
 
 void PlayerImpl::VideoRenderLoop() {
-    AVStream* video_stream = nullptr;
-    if (demuxer_.VideoStreamIndex() >= 0) {
-        video_stream = demuxer_.FormatContext()->streams[demuxer_.VideoStreamIndex()];
-    }
-
     double last_pts = 0.0;
     double last_display_time = Clock::Now();
     frame_timer_ = Clock::Now();
@@ -596,30 +591,26 @@ void PlayerImpl::VideoRenderLoop() {
             stepping = frame_step_requested_;
         }
 
-        auto sf = video_ctx_->frame_queue.Pop();
-        if (!sf) {
+        auto entry = video_ctx_->frame_queue.Pop();
+        if (!entry) {
             break;
         }
 
-        if (sf->eof) {
+        if (entry->eof) {
             video_eof_.store(true, std::memory_order_release);
             CheckAllStreamsEof();
             break;
         }
 
-        int frame_serial = sf->serial;
-        AVFrame* frame = sf->frame.get();
+        int frame_serial = entry->serial;
 
         // Discard stale frames (serial mismatch)
         if (frame_serial != video_ctx_->packet_queue.serial()) {
             continue;
         }
 
-        // Calculate PTS
-        double pts = 0.0;
-        if (frame->pts != AV_NOPTS_VALUE && video_stream) {
-            pts = static_cast<double>(frame->pts) * av_q2d(video_stream->time_base);
-        }
+        // PTS already computed in seconds by Decoder
+        double pts = entry->frame.pts();
 
         // Frame-accurate seek: discard frames before seek target
         double target = seek_target_.load(std::memory_order_acquire);
@@ -648,18 +639,15 @@ void PlayerImpl::VideoRenderLoop() {
             frame_step_requested_ = false;
         }
 
-        if (video_frame_cb_ && frame->data[0]) {
-            VideoFrame vf = FrameConverter::ToVideoFrame(frame, video_stream);
-            video_renderer_.Render(vf);
-            video_frame_cb_(vf);
-        } else if (frame->data[0]) {
-            VideoFrame vf = FrameConverter::ToVideoFrame(frame, video_stream);
-            video_renderer_.Render(vf);
+        if (entry->frame.IsValid()) {
+            video_renderer_.Render(entry->frame);
+            if (video_frame_cb_) {
+                video_frame_cb_(entry->frame);
+            }
         }
 
         video_pts_.store(pts, std::memory_order_relaxed);
         last_pts = pts;
-        // sf goes out of scope, AVFramePtr handles cleanup
     }
 }
 

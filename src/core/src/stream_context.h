@@ -11,12 +11,12 @@ struct AVStream;
 namespace mvp {
 
 /// Symmetric pipeline container for one media stream (audio or video).
-/// Aggregates PacketQueue → Decoder → FrameQueue and provides unified
-/// lifecycle operations so that audio and video paths are managed identically.
+/// Template parameter FrameType is VideoFrame or AudioFrame.
+template<typename FrameType>
 struct StreamContext {
     PacketQueue packet_queue;
     Decoder decoder;
-    FrameQueue frame_queue;
+    FrameQueue<FrameType> frame_queue;
 
     /// Construct with explicit queue sizes.
     explicit StreamContext(int frame_queue_size,
