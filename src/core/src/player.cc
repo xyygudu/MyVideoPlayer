@@ -62,7 +62,7 @@ class PlayerImpl {
 
     // Video render helpers
     double ComputeDisplayDelay(double pts, double last_pts,
-                               double last_display_time) const;
+                               double last_display_time);
     void CheckAllStreamsEof();
 
     Demuxer demuxer_;
@@ -83,6 +83,9 @@ class PlayerImpl {
     std::mutex step_mutex_;
     std::condition_variable step_cond_;
     bool frame_step_requested_{false};
+
+    // frame_timer: absolute wall-clock anchor for cumulative sync correction
+    double frame_timer_{0.0};
 
     // EOF tracking
     std::atomic<bool> audio_eof_{false};
@@ -493,20 +496,48 @@ void PlayerImpl::WaitIfPaused() {
 }
 
 // ---------------------------------------------------------------------------
-// ComputeDisplayDelay — pure timing calculation for A/V sync
-// Returns: seconds to wait (>=0), or negative if frame should be dropped.
+// ComputeDisplayDelay — timing calculation for A/V sync
+// Returns: seconds to wait (>=0). No longer returns negative (frame_timer
+// reset replaces the old drop-frame logic in AudioMaster mode).
 // ---------------------------------------------------------------------------
 
 double PlayerImpl::ComputeDisplayDelay(double pts, double last_pts,
-                                       double last_display_time) const {
+                                       double last_display_time) {
     if (sync_mode_ == SyncMode::AudioMaster) {
-        double master_time = audio_clock_.Get();
-        double diff = pts - master_time;
-        if (diff > sync::kSyncThreshold) {
-            return std::min(diff, sync::kMaxSleepSeconds);
+        // 1. Frame interval
+        double delay = pts - last_pts;
+        if (delay <= sync::kFrameDelayMin || delay > sync::kFrameDelayMax) {
+            delay = (video_fps_ > 0) ? (1.0 / video_fps_) : 0.04;
         }
-        if (diff < -sync::kDropThreshold) {
-            return -1.0;  // Drop
+
+        // 2. Audio diff
+        double diff = pts - audio_clock_.Get();
+
+        // 3. Adaptive sync threshold
+        double sync_threshold = std::max(delay, sync::kSyncThreshold);
+
+        // 4. Correct delay based on diff
+        if (diff > sync_threshold) {
+            delay += diff;  // Video ahead → wait longer
+        } else if (diff < -sync_threshold) {
+            delay = 0.0;    // Video behind → display immediately
+        }
+
+        // 5. Accumulate to absolute timeline
+        frame_timer_ += delay;
+
+        // 6. Compute actual wait from wall-clock
+        double now = Clock::Now();
+        double actual_wait = frame_timer_ - now;
+
+        // 7. Reset on large discontinuity (seek/pause recovery)
+        if (actual_wait < -sync::kMaxSleepSeconds) {
+            frame_timer_ = now;
+            return 0.0;
+        }
+
+        if (actual_wait > 0.0) {
+            return std::min(actual_wait, sync::kMaxSleepSeconds);
         }
         return 0.0;
     }
@@ -537,6 +568,7 @@ void PlayerImpl::VideoRenderLoop() {
 
     double last_pts = 0.0;
     double last_display_time = Clock::Now();
+    frame_timer_ = Clock::Now();
 
     while (state_.load() != PlayerState::Idle) {
         if (state_.load() == PlayerState::Paused && !frame_step_requested_) {
@@ -587,9 +619,6 @@ void PlayerImpl::VideoRenderLoop() {
         // A/V synchronization
         if (!stepping) {
             double delay = ComputeDisplayDelay(pts, last_pts, last_display_time);
-            if (delay < 0.0) {
-                continue;
-            }
             if (delay > 0.0) {
                 std::this_thread::sleep_for(
                     std::chrono::microseconds(static_cast<int64_t>(delay * 1e6)));
