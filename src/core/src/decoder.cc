@@ -75,6 +75,36 @@ void Decoder::Stop() {
     }
 }
 
+void Decoder::SetDropUntilPts(double pts) {
+    drop_until_pts_.store(pts, std::memory_order_release);
+}
+
+void Decoder::DrainFrames(int serial) {
+    while (running_) {
+        AVFramePtr frame;
+        int ret = avcodec_receive_frame(codec_ctx_, frame.get());
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
+        if (ret < 0) break;
+
+        // 计算帧 pts（秒），用于 seek 快速丢帧判断
+        double frame_pts = frame.get()->pts * av_q2d(stream_->time_base);
+        double target = drop_until_pts_.load(std::memory_order_acquire);
+
+        if (target > 0 && frame_pts < target) {
+            // Seek 期间：目标帧之前的帧直接丢弃，不入队
+            continue;
+        }
+
+        // 到达目标帧，恢复正常解码状态
+        if (target > 0) {
+            codec_ctx_->skip_frame = AVDISCARD_DEFAULT;
+            drop_until_pts_.store(0, std::memory_order_release);
+        }
+
+        frame_queue_->Push(SerialFrame{std::move(frame), serial, false});
+    }
+}
+
 void Decoder::DecodeLoop() {
     while (running_) {
         auto sp = packet_queue_->Pop();
@@ -88,6 +118,11 @@ void Decoder::DecodeLoop() {
         if (pkt_serial != last_serial_) {
             avcodec_flush_buffers(codec_ctx_);
             last_serial_ = pkt_serial;
+
+            // Seek 优化：跳过非参考帧解码以减少 GOP 内解码量
+            if (drop_until_pts_.load(std::memory_order_acquire) > 0) {
+                codec_ctx_->skip_frame = AVDISCARD_NONREF;
+            }
         }
 
         // Discard stale packets pushed between flush-increment and actual seek
@@ -98,15 +133,7 @@ void Decoder::DecodeLoop() {
         // Null packet (data==NULL) signals EOF from demuxer → enter drain mode
         if (!sp->pkt->data) {
             avcodec_send_packet(codec_ctx_, nullptr);
-
-            while (running_) {
-                AVFramePtr frame;
-                int drain_ret = avcodec_receive_frame(codec_ctx_, frame.get());
-                if (drain_ret == AVERROR_EOF || drain_ret == AVERROR(EAGAIN)) break;
-                if (drain_ret < 0) break;
-                frame_queue_->Push(SerialFrame{std::move(frame), last_serial_, false});
-            }
-
+            DrainFrames(last_serial_);
             frame_queue_->PushEof(last_serial_);
 
             // Wait for either abort or a new serial (indicating seek)
@@ -121,13 +148,7 @@ void Decoder::DecodeLoop() {
         int ret = avcodec_send_packet(codec_ctx_, sp->pkt.get());
         if (ret < 0) continue;
 
-        while (ret >= 0 && running_) {
-            AVFramePtr frame;
-            ret = avcodec_receive_frame(codec_ctx_, frame.get());
-            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
-            if (ret < 0) break;
-            frame_queue_->Push(SerialFrame{std::move(frame), pkt_serial, false});
-        }
+        DrainFrames(pkt_serial);
     }
 }
 

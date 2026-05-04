@@ -213,3 +213,98 @@
 - **根因分析**：`av_packet_alloc()` 只分配结构体壳（~80字节），实际压缩数据通过内部 `AVBufferRef` 引用计数管理。直接在线程间传递指针时：生产者 unref 后消费者访问已释放内存（dangling）；或消费者忘记 unref 导致引用计数永远不归零（泄漏）
 - **解决方案**：确立严格的所有权协议——Push 到队列时用 `av_packet_move_ref`（零拷贝转移所有权），Pop 出后消费方负责 `av_packet_unref`。对于需要共享的 AVFrame（如 RGB 转换后的帧），使用 `av_frame_ref`（引用计数 +1）创建独立引用后再 Push，原始帧立即 unref
 - **效果/验证**：消除了所有内存相关崩溃，长时间播放内存稳定不增长
+
+---
+
+## 性能优化
+
+### Q: 你的播放器 Seek 2K 60fps 视频时有明显卡顿，你是怎么定位和优化的？
+
+**简要描述：** 用 VS 诊断工具采样发现 78% CPU 时间在 H.264 软解码（avcodec），瓶颈是 GOP 内参考帧的逐帧软解。通过 `skip_frame` 跳过非参考帧 + 解码器层帧丢弃两阶段优化，解码量减少 50-70%。
+
+**详细解析：**
+
+- **问题现象**：Seek 2K 60fps H.264 视频时有 0.3~0.5s 的可感知延迟，而 MPV 播放同一文件几乎瞬间完成
+
+- **根因分析**：
+
+  初始怀疑是队列流转/锁开销，但 VS CPU 采样（诊断工具 → CPU 使用率 → 热路径）明确显示：
+
+  ```
+  Decoder::DecodeLoop     — 78.74% CPU
+    └── avcodec-61.dll    — 78.16% CPU (FFmpeg H.264 软解码)
+  ```
+
+  队列 push/pop、条件变量、I/O 在 profile 中几乎不可见（<1%）。
+
+  **真正瓶颈**：`av_seek_frame(AVSEEK_FLAG_BACKWARD)` 只能定位到目标前的关键帧（I帧），之后必须逐帧解码整个 GOP 前部才能得到目标帧。2K 60fps H.264 典型 GOP = 2~5 秒（120~300 帧），每帧软解 ~5ms → 最坏情况 600ms~1500ms。
+
+  这就是"精确 Seek"的代价——`av_seek_frame` 本身只做关键帧级 seek，精确到任意帧需要额外解码 GOP 内的参考帧链。
+
+- **解决方案**（参考 MPV `hrseek_framedrop` + `mp_decoder_wrapper_set_start_pts`）：
+
+  **方案一：`skip_frame` 跳过非参考帧（已验证，两行代码）**
+
+  H.264 的 B 帧不被后续帧引用，seek 期间解码它们纯属浪费。设置 `codec_ctx->skip_frame = AVDISCARD_NONREF` 让 FFmpeg 内部跳过 B 帧解码，到达目标后恢复 `AVDISCARD_DEFAULT`。典型 H.264 结构中 B 帧占 50~70%，直接砍掉一半以上的解码量。
+
+  **方案二：Decoder 层帧丢弃（不入队）**
+
+  在 Decoder 内部设置 `drop_until_pts_`，解码出帧后如果 pts < 目标直接 continue，不走 FrameQueue push/pop 路径。减少了 queue 满时 decoder 阻塞等待 render loop 消费的延迟。
+
+  **方案三（长期）：硬件解码**
+
+  D3D11VA 硬解 2K H.264 每帧 <0.1ms（vs 软解 ~5ms），从根本上消除解码瓶颈。MPV 默认 `--hwdec=auto` 就是这个策略。
+
+- **关于精确性的保证**：
+
+  `skip_frame` 不影响 seek 精确度——跳过的 B 帧本来就在 target 之前会被丢弃。目标帧所在的 I/P 帧仍然正常解码。Video render loop 中的 `seek_target_` 过滤作为最终兜底，保证只有 `pts >= target` 的帧才被显示。
+
+- **效果/验证**：
+
+  测试视频：`bbb_sunflower_2160p_60fps_normal.mp4`（4K H.264 60fps）
+
+  | 指标 | 优化前 | 优化后 | 改善 |
+  |------|--------|--------|------|
+  | 样本数 | 24 次 | 21 次 | — |
+  | 平均耗时 | 696.6 ms | 384.4 ms | **↓ 44.8%** |
+  | 中位数 | 625.2 ms | 270.9 ms | **↓ 56.7%** |
+  | 最小值 | 63.1 ms | 94.0 ms | — |
+  | 最大值 | 1731.9 ms | 1432.5 ms | ↓ 17.3% |
+
+  结论：`skip_frame + decoder drop` 对典型 seek 耗时（中位数）优化超过 50%。极端长 GOP 场景（最大值 ~1.4s）仍需硬解才能根本解决。MPV 的"瞬间 seek"主要靠硬解（D3D11VA 每帧 <0.1ms），是下一步优化目标。
+
+---
+
+### Q: 你提到 `av_seek_frame` 只能 seek 到关键帧，能具体说说它的几个 flag 和精确 seek 的两阶段原理吗？
+
+**简要描述：** `av_seek_frame` 是 demuxer 级操作，精度受限于容器索引。精确 seek 由"关键帧定位 + 解码跳帧"两阶段实现，和 MPV 的 hr-seek 原理相同。
+
+**详细解析：**
+
+- **`av_seek_frame` 的 flags**：
+
+  | Flag | 语义 |
+  |------|------|
+  | `AVSEEK_FLAG_BACKWARD` | seek 到 timestamp 之前最近的关键帧 |
+  | `0`（无 flag） | seek 到 timestamp 之后最近的关键帧 |
+  | `AVSEEK_FLAG_ANY` | 允许 seek 到非关键帧（不保证可解码） |
+  | `AVSEEK_FLAG_BYTE` | timestamp 解释为字节偏移 |
+  | `AVSEEK_FLAG_FRAME` | timestamp 解释为帧号 |
+
+  实际使用中选 `AVSEEK_FLAG_BACKWARD`：保证 seek 到目标之前的 I 帧，这样后续解码不会丢失参考帧。
+
+- **精确 Seek 的两阶段实现**：
+
+  ```
+  阶段1（Demuxer 层）: av_seek_frame(ctx, -1, target_ts, AVSEEK_FLAG_BACKWARD)
+         → 定位到 target 之前最近的 I 帧
+
+  阶段2（Decoder + Render 层）: 逐帧解码 I帧→...→target帧
+         → Decoder: skip_frame 跳过 B 帧加速
+         → Decoder: drop_until_pts 不入队
+         → Render loop: seek_target_ 过滤，只显示 pts >= target 的帧
+  ```
+
+  MPV 将此称为 **hr-seek（high-resolution seek）**，原理完全一致，区别在于 MPV 用硬解加速了阶段2。
+
+- **效果/验证**：能精确定位到任意帧（精度取决于 PTS 粒度），代价是 seek 延迟正比于 GOP 大小 × 单帧解码时间

@@ -303,6 +303,8 @@ void PlayerImpl::Seek(double position_seconds) {
         video_clock_.SetPaused(true);
         seek_target_.store(position_seconds, std::memory_order_release);
         TransitionTo(PlayerState::Paused);
+        if (video_ctx_) video_ctx_->decoder.SetDropUntilPts(position_seconds);
+        if (audio_ctx_) audio_ctx_->decoder.SetDropUntilPts(position_seconds);
         demuxer_.RequestSeek(position_seconds);
         StartPipeline(true);
         {
@@ -317,6 +319,10 @@ void PlayerImpl::Seek(double position_seconds) {
     if (audio_ctx_) audio_ctx_->Flush();
     if (video_ctx_) video_ctx_->Flush();
     if (audio_renderer_) audio_renderer_->FlushSdlBuffer();
+
+    // 通知 decoder 快速跳帧：跳过 target 之前的非参考帧解码 + 丢弃已解码帧
+    if (video_ctx_) video_ctx_->decoder.SetDropUntilPts(position_seconds);
+    if (audio_ctx_) audio_ctx_->decoder.SetDropUntilPts(position_seconds);
 
     seek_target_.store(position_seconds, std::memory_order_release);
     audio_eof_.store(false, std::memory_order_relaxed);
