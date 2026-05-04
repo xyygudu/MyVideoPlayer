@@ -5,21 +5,24 @@
 
 namespace mvp::sync {
 
-// A/V sync: if video is ahead of audio by more than this, sleep to wait.
-// ~40ms ≈ 1 frame at 25fps.
-inline constexpr double kSyncThreshold = 0.04;
+// A/V sync threshold lower bound (aligned with FFplay AV_SYNC_THRESHOLD_MIN).
+// ~40ms ≈ 1 frame at 25fps. Below this, diff is imperceptible.
+inline constexpr double kSyncThresholdMin = 0.04;
 
-// A/V sync: if video is behind audio by more than this, drop the frame.
-// 100ms — perceptible lip-sync boundary.
-inline constexpr double kDropThreshold = 0.1;
+// A/V sync threshold upper bound & frame-dup boundary (aligned with FFplay
+// AV_SYNC_THRESHOLD_MAX / AV_SYNC_FRAMEDUP_THRESHOLD).
+// 100ms — perceptible lip-sync boundary (ITU-R BT.1359).
+// Used as: (1) clamp ceiling for adaptive sync_threshold,
+//          (2) frame-interval boundary separating 2*delay vs delay+diff.
+inline constexpr double kSyncThresholdMax = 0.1;
 
 // Maximum sleep duration per iteration to remain responsive to seek/stop.
 inline constexpr double kMaxSleepSeconds = 0.1;
 
-// VideoMaster mode: minimum valid frame interval (below this, use fallback).
+// Minimum valid frame interval (below this, use fallback). All sync modes.
 inline constexpr double kFrameDelayMin = 0.001;
 
-// VideoMaster mode: maximum valid frame interval (above this, use fallback).
+// Maximum valid frame interval (above this, use fallback). All sync modes.
 inline constexpr double kFrameDelayMax = 1.0;
 
 // Default maximum frame count for the video FrameQueue.

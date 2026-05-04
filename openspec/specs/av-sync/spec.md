@@ -49,7 +49,7 @@ PlayerImpl SHALL 提供 `MasterClock()` 方法，AudioMaster 时返回 audio_clo
 3. 累积 delay 到 frame_timer_
 4. 用 frame_timer_ 与 wall-clock 的差值决定 sleep/display/reset
 
-不再直接用 diff 值作为 sleep 时长。丢帧判定改为 frame_timer 重置机制自然覆盖（而非独立的 kDropThreshold 比较）。
+不再直接用 diff 值作为 sleep 时长。丢帧判定改为 frame_timer 重置机制自然覆盖（而非独立的 kSyncThresholdMax 比较）。
 
 #### Scenario: Video frame within sync tolerance
 - **WHEN** AudioMaster 模式，video_pts 与 audio_clock 差值在 [-sync_threshold, sync_threshold] 范围内

@@ -1,5 +1,6 @@
 #include "mvp/player.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -513,12 +514,19 @@ double PlayerImpl::ComputeDisplayDelay(double pts, double last_pts,
         // 2. Audio diff
         double diff = pts - audio_clock_.Get();
 
-        // 3. Adaptive sync threshold
-        double sync_threshold = std::max(delay, sync::kSyncThreshold);
+        // 3. Adaptive sync threshold (clamped to perceptible range)
+        double sync_threshold = std::clamp(delay, sync::kSyncThresholdMin,
+                                           sync::kSyncThresholdMax);
 
         // 4. Correct delay based on diff
         if (diff > sync_threshold) {
-            delay += diff;  // Video ahead → wait longer
+            // Video ahead: low framerate (long interval) corrects in one step,
+            // high framerate spreads correction across multiple frames.
+            if (delay > sync::kSyncThresholdMax) {
+                delay += diff;
+            } else {
+                delay = 2 * delay;
+            }
         } else if (diff < -sync_threshold) {
             delay = 0.0;    // Video behind → display immediately
         }
