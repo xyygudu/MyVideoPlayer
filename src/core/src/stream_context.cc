@@ -50,6 +50,8 @@ bool StreamContext<VideoFrame>::OpenDecoder(AVStream* stream) {
 
 template<>
 void StreamContext<VideoFrame>::Start() {
+    // StreamContext 作为管线管理者，负责将 Decoder 输出的原始 AVFrame 封装为公共帧类型。
+    // 这里的 lambda 就是 Decoder 的 FrameOutputCallback：接收原始数据，构建 VideoFrame 并入队。
     auto on_frame = [this](AVFrame* raw, double pts, int serial) {
         VideoFrame vf;
         auto impl = std::make_unique<VideoFrame::Impl>();
@@ -94,6 +96,7 @@ bool StreamContext<AudioFrame>::OpenDecoder(AVStream* stream) {
 
 template<>
 void StreamContext<AudioFrame>::Start() {
+    // 同 VideoFrame 的 Start()，将原始 AVFrame 封装为 AudioFrame 并入队。
     auto on_frame = [this](AVFrame* raw, double pts, int serial) {
         AudioFrame af;
         auto impl = std::make_unique<AudioFrame::Impl>();

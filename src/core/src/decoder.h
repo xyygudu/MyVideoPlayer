@@ -24,9 +24,10 @@ struct DecoderParams {
     AVRational frame_rate{0, 1};
 };
 
-// Callback invoked by Decoder for each decoded frame.
-// Arguments: raw AVFrame* (valid only during call), pts in seconds, serial.
-// The callback is responsible for constructing the public frame type and pushing to queue.
+/// Decoder 解码后通过此回调输出原始帧数据。
+/// 设计意图：Decoder 只负责"解码"这一单一职责，不感知下游帧类型（VideoFrame/AudioFrame）。
+/// 帧的封装（av_frame_ref + 格式映射 + 入队）由 StreamContext::Start() 提供的 lambda 完成。
+/// 参数：raw AVFrame*（仅在回调期间有效），pts（秒），serial（用于丢弃过期帧）。
 using FrameOutputCallback = std::function<void(AVFrame* frame, double pts, int serial)>;
 
 // Callback invoked by Decoder when EOF is reached.
