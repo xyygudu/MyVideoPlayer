@@ -30,6 +30,147 @@
 
 ---
 
+### Q: 你的视频渲染循环是怎么做音视频同步的？为什么不直接 sleep(diff) 而要引入 frame_timer？
+
+**简要描述：** 直接 `sleep(pts - audio_clock)` 存在累积误差和 Seek 后连续丢帧问题。引入 frame_timer 绝对时间锚点 + audio diff 修正，实现累积校正和 discontinuity 自恢复。
+
+**详细解析：**
+
+- **问题现象**：
+  1. 正常播放时高帧率视频（60fps）画面存在轻微抖动（judder）
+  2. Seek 后约 0.5~1s 内音视频明显不同步——视频连续丢帧后才追上音频
+
+- **根因分析**：
+
+  原始实现（简单 diff 比较）：
+  ```
+  diff = video_pts - audio_clock
+  if diff > threshold: sleep(diff)
+  if diff < -threshold: drop frame
+  else: display immediately
+  ```
+
+  **问题 1（累积误差）**：每帧独立计算 sleep，sleep 系统调度误差（Windows 典型 ±1.5ms）逐帧累积无法补偿。
+
+  **问题 2（Seek 后丢帧）**：Seek 时 audio_clock 立刻跳到目标位置并开始推进，但视频 decoder 需要从 GOP 关键帧逐帧解码到目标（200~800ms）。等第一帧视频出来时 audio_clock 已经远超 video_pts → diff 为大负值 → 连续被判定"过期"丢弃。
+
+  数轴示意（Seek 到 30s，视频 decoder 恢复用了 500ms）：
+  ```
+  PTS 时间轴 (秒):
+       video_pts                     audio_clock
+           ↓                              ↓
+  ─────── 30.0 ─────────────────────── 30.5 ──────→
+           ←──── diff = -0.5s ────────→
+                  (远超 -0.1s threshold → 丢帧!)
+  ```
+
+- **解决方案**（参考 FFplay `video_refresh` / `compute_target_delay`）：
+
+  引入 `frame_timer_`——绝对时间轴上的虚拟指针，表示"当前帧理应在何时显示"。
+
+  **核心算法**：
+  ```
+  1. delay = pts - last_pts              // 帧间隔
+  2. diff = pts - audio_clock            // 与音频的偏差
+  3. sync_threshold = max(delay, 0.04s)  // 容忍度不小于一帧间隔
+  4. if diff > sync_threshold:  delay += diff   // 视频超前 → 多等
+     if diff < -sync_threshold: delay = 0       // 视频落后 → 立即显示
+  5. frame_timer_ += delay               // 累积到绝对时间轴
+  6. actual_wait = frame_timer_ - Clock::Now()
+  7. if actual_wait < -threshold: frame_timer_ = Clock::Now()  // 重置（seek恢复）
+  ```
+
+  **正常播放的数轴**（25fps，视频超前 30ms，在容忍范围内不修正）：
+  ```
+  wall-clock 时间轴 (ms):
+       frame_timer              Clock::Now()
+           ↓                        ↓
+  ─────── 1000 ──────────────────── 1000 ──────────→
+
+  计算:
+    delay = 40ms (帧间隔)
+    diff = +30ms (视频超前)
+    sync_threshold = max(40, 40) = 40ms
+    30ms < 40ms → 在容忍范围内，delay 不修正
+
+    frame_timer_ += 40ms → 1040ms
+    actual_wait = 1040 - 1000 = 40ms → sleep(40ms)
+
+  下一帧（假设 sleep 实际耗了 42ms，即 Clock::Now()=1042）:
+    frame_timer_ += 40ms → 1080ms
+    actual_wait = 1080 - 1042 = 38ms → 自动补偿了上次多睡的 2ms ✓
+  ```
+
+  **视频超前的数轴**（video 比 audio 快 80ms，25fps）：
+  ```
+  PTS 时间轴:
+       audio_clock        video_pts
+           ↓                  ↓
+  ─────── 5.00 ────────── 5.08 ──────→
+                    diff = +80ms
+
+  计算:
+    delay = 40ms (帧间隔)
+    diff = +80ms > sync_threshold(40ms) → delay = 40 + 80 = 120ms
+    frame_timer_ += 120ms
+    actual_wait = frame_timer_ - now ≈ 120ms → 多等以让音频追上来
+
+  为什么 delay + diff 而不是只等 diff：
+       |← delay=40ms →|←── diff=80ms ──→|
+       last_display    正常下一帧时刻     实际等到这里才显示
+                                         (保持帧间隔稳定性)
+  ```
+
+  **视频落后的数轴**（video 比 audio 慢 200ms）：
+  ```
+  PTS 时间轴:
+       video_pts                     audio_clock
+           ↓                              ↓
+  ─────── 5.00 ─────────────────────── 5.20 ──────→
+           ←──── diff = -200ms ──────→
+
+  计算:
+    delay = 40ms, diff = -200ms < -sync_threshold(-40ms)
+    delay = 0 (立即显示，因为 delay+diff = 40+(-200) = -160 ≤ 0)
+    frame_timer_ += 0 → 不推进，维持当前时刻
+    actual_wait = 0 → 立即渲染，不丢帧
+  ```
+
+  **Seek 后的数轴**（frame_timer 自动重置）：
+  ```
+  wall-clock 时间轴 (ms):
+       frame_timer         Clock::Now()
+           ↓                     ↓
+  ─────── 500 ────────────────── 1200 ──────────→
+           ←─── 差距 700ms ───→
+           (seek 期间 frame_timer 没更新)
+
+  actual_wait = 500 - 1200 = -700ms
+  -700ms < -threshold(-100ms) → 重置: frame_timer_ = 1200
+  → 第一帧无条件立即显示 ✓ (不丢帧)
+  → 后续帧基于 1200ms 新锚点正常累积
+  ```
+
+- **效果/验证**：
+  - 正常播放：累积误差被逐帧自动补偿，60fps 视频不再 judder
+  - Seek 后：第一帧立即显示（不再连续丢帧），1~2 帧内恢复同步
+  - 不需要额外的 `post_seek` 标志，frame_timer 重置机制天然覆盖 discontinuity
+
+---
+
+### Q: sync_threshold 为什么取 max(delay, kSyncThreshold) 而不用固定值？
+
+**简要描述：** 同步容忍度必须适配帧率——低帧率视频（如 10fps）一帧间隔本身就有 100ms，用固定 40ms 阈值会导致正常帧间隔被误判为"需要修正"。
+
+**详细解析：**
+
+- **问题现象**：10fps 视频在 AudioMaster 模式下画面不流畅，帧间隔忽长忽短
+- **根因分析**：10fps → delay=100ms。正常播放时 video_pts 天然比 audio_clock 超前半帧（~50ms）。若 threshold 固定为 40ms，50ms > 40ms 就触发 `delay += diff`，帧被人为延后。下一帧又欠了时间 → 补偿 → 形成锯齿形抖动
+- **解决方案**：`sync_threshold = max(delay, kSyncThreshold)`，确保在一个帧间隔内的偏差视为正常波动，不触发修正。帧率越低容忍度越高，帧率越高容忍度至少为 kSyncThreshold（40ms）
+- **效果/验证**：10fps / 25fps / 60fps 视频均匀速播放，无帧间隔抖动
+
+---
+
 ## 多线程架构
 
 ### Q: Seek 操作后偶尔看到旧画面闪一帧，这种竞态问题你是怎么处理的？
