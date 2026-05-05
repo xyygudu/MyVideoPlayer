@@ -13,6 +13,7 @@ namespace mvp {
 /// GPU-accelerated video renderer using SDL3.
 /// Creates an SDL renderer attached to a parent window (embedded mode)
 /// and uploads YUV textures for hardware-composited display.
+/// Supports zero-copy rendering of D3D11VA hardware frames.
 class VideoRenderer {
   public:
     VideoRenderer();
@@ -27,8 +28,7 @@ class VideoRenderer {
     /// Shut down SDL renderer and release all resources.
     void Close();
 
-    /// Render a video frame. Handles YUV420P directly; other formats
-    /// are converted via sws_scale fallback before upload.
+    /// Render a video frame. Dispatches to hw/nv12/yuv420p/fallback paths.
     void Render(const VideoFrame& frame);
 
     /// Notify that the parent window was resized.
@@ -37,7 +37,17 @@ class VideoRenderer {
     bool IsOpen() const { return renderer_ != nullptr; }
 
   private:
-    void EnsureTexture(int frame_width, int frame_height);
+    // Software path: YUV420P direct upload
+    void RenderYUV420P(const VideoFrame& frame);
+    // Software path: format conversion fallback
+    void RenderFallback(const VideoFrame& frame);
+    // NV12 direct upload (used for hw_transfer or native NV12)
+    void RenderNV12(const VideoFrame& frame);
+    // D3D11VA zero-copy path
+    void RenderHWFrame(const VideoFrame& frame);
+
+    void Present(int frame_width, int frame_height);
+    void EnsureTexture(int frame_width, int frame_height, int sdl_format);
     void RenderClear();
     void ComputeDestRect(int frame_width, int frame_height,
                          float* x, float* y, float* w, float* h) const;
@@ -48,6 +58,7 @@ class VideoRenderer {
 
     int texture_width_ = 0;
     int texture_height_ = 0;
+    int texture_format_ = 0;
     int window_width_ = 0;
     int window_height_ = 0;
 

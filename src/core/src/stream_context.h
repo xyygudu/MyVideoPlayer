@@ -10,6 +10,8 @@ struct AVStream;
 
 namespace mvp {
 
+class HWAccelContext;
+
 /// Symmetric pipeline container for one media stream (audio or video).
 /// Template parameter FrameType is VideoFrame or AudioFrame.
 template<typename FrameType>
@@ -23,7 +25,7 @@ struct StreamContext {
                            int64_t max_packet_bytes = sync::kDefaultMaxQueueBytes);
 
     /// Open the decoder for the given stream.
-    bool OpenDecoder(AVStream* stream);
+    bool OpenDecoder(AVStream* stream, HWAccelContext* hw_ctx = nullptr);
 
     /// Start the decoder thread.
     void Start();

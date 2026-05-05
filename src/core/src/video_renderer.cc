@@ -3,6 +3,8 @@
 #include <algorithm>
 
 extern "C" {
+#include <libavutil/frame.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 }
@@ -83,57 +85,139 @@ void VideoRenderer::Close() {
 void VideoRenderer::Render(const VideoFrame& frame) {
     if (!renderer_ || !frame.IsValid()) return;
 
+    switch (frame.format()) {
+        case PixelFormat::kD3D11:
+            RenderHWFrame(frame);
+            break;
+        case PixelFormat::kNV12:
+            RenderNV12(frame);
+            break;
+        case PixelFormat::kYUV420P:
+            RenderYUV420P(frame);
+            break;
+        default:
+            RenderFallback(frame);
+            break;
+    }
+}
+
+void VideoRenderer::RenderYUV420P(const VideoFrame& frame) {
     int fw = frame.width();
     int fh = frame.height();
-    EnsureTexture(fw, fh);
+    EnsureTexture(fw, fh, SDL_PIXELFORMAT_IYUV);
     if (!texture_) return;
 
-    if (frame.format() == PixelFormat::kYUV420P) {
-        // Direct upload — zero CPU conversion
-        SDL_UpdateYUVTexture(texture_, nullptr,
-                             frame.data(0), frame.linesize(0),
-                             frame.data(1), frame.linesize(1),
-                             frame.data(2), frame.linesize(2));
-    } else {
-        // Fallback: convert to YUV420P via sws_scale, then upload
-        // Access internal AVFrame through Impl
-        const auto* impl = frame.impl_.get();
-        AVFrame* src_frame = impl->frame.get();
-        if (!src_frame) return;
+    SDL_UpdateYUVTexture(texture_, nullptr,
+                         frame.data(0), frame.linesize(0),
+                         frame.data(1), frame.linesize(1),
+                         frame.data(2), frame.linesize(2));
+    Present(fw, fh);
+}
 
-        // Lazily create/update sws context
-        if (!sws_ctx_) {
-            sws_ctx_ = sws_getContext(
-                fw, fh, static_cast<AVPixelFormat>(src_frame->format),
-                fw, fh, AV_PIX_FMT_YUV420P,
-                SWS_BILINEAR, nullptr, nullptr, nullptr);
-        }
+void VideoRenderer::RenderNV12(const VideoFrame& frame) {
+    int fw = frame.width();
+    int fh = frame.height();
+    EnsureTexture(fw, fh, SDL_PIXELFORMAT_NV12);
+    if (!texture_) return;
 
-        int needed = av_image_get_buffer_size(AV_PIX_FMT_YUV420P, fw, fh, 1);
-        if (needed > convert_buffer_size_) {
-            if (convert_buffer_) av_free(convert_buffer_);
-            convert_buffer_ = static_cast<uint8_t*>(av_malloc(needed));
-            convert_buffer_size_ = needed;
-        }
+    SDL_UpdateNVTexture(texture_, nullptr,
+                        frame.data(0), frame.linesize(0),
+                        frame.data(1), frame.linesize(1));
+    Present(fw, fh);
+}
 
-        uint8_t* dst_data[4] = {};
-        int dst_linesize[4] = {};
-        av_image_fill_arrays(dst_data, dst_linesize, convert_buffer_,
-                             AV_PIX_FMT_YUV420P, fw, fh, 1);
-
-        sws_scale(sws_ctx_, src_frame->data, src_frame->linesize, 0, fh,
-                  dst_data, dst_linesize);
-
-        SDL_UpdateYUVTexture(texture_, nullptr,
-                             dst_data[0], dst_linesize[0],
-                             dst_data[1], dst_linesize[1],
-                             dst_data[2], dst_linesize[2]);
+void VideoRenderer::RenderHWFrame(const VideoFrame& frame) {
+    const auto* impl = frame.impl_.get();
+    AVFrame* hw_frame = impl->frame.get();
+    if (!hw_frame || !hw_frame->hw_frames_ctx) {
+        RenderFallback(frame);
+        return;
     }
 
-    // Present
+    // 硬件帧 → 系统内存 NV12（DMA transfer，比软解快一个数量级）
+    AVFrame* sw_frame = av_frame_alloc();
+    sw_frame->format = AV_PIX_FMT_NV12;
+    if (av_hwframe_transfer_data(sw_frame, hw_frame, 0) < 0) {
+        SPDLOG_WARN("VideoRenderer: hw frame transfer failed");
+        av_frame_free(&sw_frame);
+        RenderFallback(frame);
+        return;
+    }
+
+    int fw = sw_frame->width;
+    int fh = sw_frame->height;
+    EnsureTexture(fw, fh, SDL_PIXELFORMAT_NV12);
+    if (!texture_) {
+        av_frame_free(&sw_frame);
+        return;
+    }
+
+    SDL_UpdateNVTexture(texture_, nullptr,
+                        sw_frame->data[0], sw_frame->linesize[0],
+                        sw_frame->data[1], sw_frame->linesize[1]);
+    av_frame_free(&sw_frame);
+    Present(fw, fh);
+}
+
+void VideoRenderer::RenderFallback(const VideoFrame& frame) {
+    int fw = frame.width();
+    int fh = frame.height();
+    EnsureTexture(fw, fh, SDL_PIXELFORMAT_IYUV);
+    if (!texture_) return;
+
+    const auto* impl = frame.impl_.get();
+    AVFrame* src_frame = impl->frame.get();
+    if (!src_frame) return;
+
+    // 硬件帧需要先 transfer 到系统内存
+    AVFrame* sw_frame = src_frame;
+    AVFrame* tmp_frame = nullptr;
+    if (src_frame->hw_frames_ctx) {
+        tmp_frame = av_frame_alloc();
+        if (av_hwframe_transfer_data(tmp_frame, src_frame, 0) < 0) {
+            SPDLOG_ERROR("VideoRenderer: hw frame transfer failed");
+            av_frame_free(&tmp_frame);
+            return;
+        }
+        sw_frame = tmp_frame;
+    }
+
+    // 使用 sws_scale 转为 YUV420P
+    if (!sws_ctx_) {
+        sws_ctx_ = sws_getContext(
+            fw, fh, static_cast<AVPixelFormat>(sw_frame->format),
+            fw, fh, AV_PIX_FMT_YUV420P,
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
+    }
+
+    int needed = av_image_get_buffer_size(AV_PIX_FMT_YUV420P, fw, fh, 1);
+    if (needed > convert_buffer_size_) {
+        if (convert_buffer_) av_free(convert_buffer_);
+        convert_buffer_ = static_cast<uint8_t*>(av_malloc(needed));
+        convert_buffer_size_ = needed;
+    }
+
+    uint8_t* dst_data[4] = {};
+    int dst_linesize[4] = {};
+    av_image_fill_arrays(dst_data, dst_linesize, convert_buffer_,
+                         AV_PIX_FMT_YUV420P, fw, fh, 1);
+
+    sws_scale(sws_ctx_, sw_frame->data, sw_frame->linesize, 0, fh,
+              dst_data, dst_linesize);
+
+    if (tmp_frame) av_frame_free(&tmp_frame);
+
+    SDL_UpdateYUVTexture(texture_, nullptr,
+                         dst_data[0], dst_linesize[0],
+                         dst_data[1], dst_linesize[1],
+                         dst_data[2], dst_linesize[2]);
+    Present(fw, fh);
+}
+
+void VideoRenderer::Present(int frame_width, int frame_height) {
     RenderClear();
     float dx, dy, dw, dh;
-    ComputeDestRect(fw, fh, &dx, &dy, &dw, &dh);
+    ComputeDestRect(frame_width, frame_height, &dx, &dy, &dw, &dh);
     SDL_FRect dst{dx, dy, dw, dh};
     SDL_RenderTexture(renderer_, texture_, nullptr, &dst);
     SDL_RenderPresent(renderer_);
@@ -144,14 +228,16 @@ void VideoRenderer::Resize(int width, int height) {
     window_height_ = height;
 }
 
-void VideoRenderer::EnsureTexture(int frame_width, int frame_height) {
-    if (texture_ && texture_width_ == frame_width && texture_height_ == frame_height) {
+void VideoRenderer::EnsureTexture(int frame_width, int frame_height, int sdl_format) {
+    if (texture_ && texture_width_ == frame_width &&
+        texture_height_ == frame_height && texture_format_ == sdl_format) {
         return;
     }
     if (texture_) {
         SDL_DestroyTexture(texture_);
     }
-    texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_IYUV,
+    texture_ = SDL_CreateTexture(renderer_,
+                                 static_cast<SDL_PixelFormat>(sdl_format),
                                  SDL_TEXTUREACCESS_STREAMING,
                                  frame_width, frame_height);
     if (!texture_) {
@@ -160,8 +246,9 @@ void VideoRenderer::EnsureTexture(int frame_width, int frame_height) {
     }
     texture_width_ = frame_width;
     texture_height_ = frame_height;
+    texture_format_ = sdl_format;
 
-    // Invalidate sws context on resolution change
+    // Invalidate sws context on resolution/format change
     if (sws_ctx_) {
         sws_freeContext(sws_ctx_);
         sws_ctx_ = nullptr;

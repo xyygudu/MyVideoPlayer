@@ -15,6 +15,7 @@ enum class PixelFormat {
     kYUV444P,
     kNV12,
     kRGB32,
+    kD3D11,  // 硬件帧（D3D11VA 输出），data[0] 为 ID3D11Texture2D*
 };
 
 class MVP_CORE_EXPORT VideoFrame {

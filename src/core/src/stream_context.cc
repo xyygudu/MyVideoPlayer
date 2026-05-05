@@ -4,10 +4,12 @@
 
 extern "C" {
 #include <libavutil/frame.h>
+#include <libavutil/pixfmt.h>
 }
 
 #include "ffmpeg_utils.h"
 #include "frame_impl.h"
+#include "hw_accel_context.h"
 #include "mvp/audio_frame.h"
 #include "mvp/video_frame.h"
 
@@ -22,7 +24,11 @@ static PixelFormat MapPixelFormat(int av_pix_fmt) {
         case 5:  return PixelFormat::kYUV444P;
         case 23: return PixelFormat::kNV12;
         case 26: return PixelFormat::kRGB32;
-        default: return PixelFormat::kUnknown;
+        default:
+            // D3D11VA 硬件帧格式
+            if (av_pix_fmt == AV_PIX_FMT_D3D11)
+                return PixelFormat::kD3D11;
+            return PixelFormat::kUnknown;
     }
 }
 
@@ -44,8 +50,8 @@ StreamContext<VideoFrame>::StreamContext(int frame_queue_size, int64_t max_packe
     : packet_queue(max_packet_bytes), frame_queue(frame_queue_size) {}
 
 template<>
-bool StreamContext<VideoFrame>::OpenDecoder(AVStream* stream) {
-    return decoder.Open(stream);
+bool StreamContext<VideoFrame>::OpenDecoder(AVStream* stream, HWAccelContext* hw_ctx) {
+    return decoder.Open(stream, hw_ctx);
 }
 
 template<>
@@ -90,7 +96,7 @@ StreamContext<AudioFrame>::StreamContext(int frame_queue_size, int64_t max_packe
     : packet_queue(max_packet_bytes), frame_queue(frame_queue_size) {}
 
 template<>
-bool StreamContext<AudioFrame>::OpenDecoder(AVStream* stream) {
+bool StreamContext<AudioFrame>::OpenDecoder(AVStream* stream, HWAccelContext* /*hw_ctx*/) {
     return decoder.Open(stream);
 }
 

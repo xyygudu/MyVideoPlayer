@@ -9,6 +9,7 @@ extern "C" {
 #include <spdlog/spdlog.h>
 
 #include "ffmpeg_utils.h"
+#include "hw_accel_context.h"
 #include "packet_queue.h"
 
 namespace mvp {
@@ -20,7 +21,7 @@ Decoder::Decoder()
 
 Decoder::~Decoder() { Close(); }
 
-bool Decoder::Open(AVStream* stream) {
+bool Decoder::Open(AVStream* stream, HWAccelContext* hw_ctx) {
     Close();
 
     // Extract value-type params before we discard the stream pointer
@@ -41,13 +42,21 @@ bool Decoder::Open(AVStream* stream) {
         return false;
     }
 
+    // 注册硬件加速：设置 get_format 回调 + 绑定 hw_device_ctx
+    if (hw_ctx && hw_ctx->DeviceRef()) {
+        codec_ctx_->opaque = hw_ctx;
+        codec_ctx_->get_format = HWAccelContext::GetFormat;
+        codec_ctx_->hw_device_ctx = av_buffer_ref(hw_ctx->DeviceRef());
+    }
+
     if (avcodec_open2(codec_ctx_, codec, nullptr) < 0) {
         SPDLOG_ERROR("Decoder: failed to open codec '{}'", codec->name);
         avcodec_free_context(&codec_ctx_);
         return false;
     }
 
-    SPDLOG_INFO("Decoder: opened codec '{}'", codec->name);
+    SPDLOG_INFO("Decoder: opened codec '{}'{}", codec->name,
+                hw_ctx ? " (hw accel)" : "");
     return true;
 }
 

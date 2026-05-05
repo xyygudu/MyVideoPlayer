@@ -11,12 +11,14 @@
 
 extern "C" {
 #include <libavformat/avformat.h>
+#include <libavutil/hwcontext.h>
 }
 #include <spdlog/spdlog.h>
 
 #include "audio_renderer.h"
 #include "clock.h"
 #include "demuxer.h"
+#include "hw_accel_context.h"
 #include "mvp/audio_frame.h"
 #include "mvp/player_state.h"
 #include "mvp/video_frame.h"
@@ -99,6 +101,7 @@ class PlayerImpl {
     int window_width_{0};
     int window_height_{0};
     VideoRenderer video_renderer_;
+    std::unique_ptr<HWAccelContext> hw_accel_ctx_;
 
     std::thread video_render_thread_;
 };
@@ -188,10 +191,14 @@ bool PlayerImpl::Open(const std::string& filepath) {
 
     // Create video stream context
     if (demuxer_.VideoStreamIndex() >= 0) {
+        // 尝试创建硬件加速上下文（失败则静默降级为软解）
+        hw_accel_ctx_ = HWAccelContext::Create(AV_HWDEVICE_TYPE_D3D11VA);
+
         video_ctx_ = std::make_unique<StreamContext<VideoFrame>>(sync::kDefaultVideoQueueSize);
         AVStream* video_stream = demuxer_.FormatContext()->streams[demuxer_.VideoStreamIndex()];
-        if (!video_ctx_->OpenDecoder(video_stream)) {
+        if (!video_ctx_->OpenDecoder(video_stream, hw_accel_ctx_.get())) {
             video_ctx_.reset();
+            hw_accel_ctx_.reset();
         }
     }
 
@@ -222,6 +229,7 @@ void PlayerImpl::Close() {
     audio_renderer_.reset();
     audio_ctx_.reset();
     video_ctx_.reset();
+    hw_accel_ctx_.reset();
     demuxer_.Close();
 
     audio_clock_.Reset();

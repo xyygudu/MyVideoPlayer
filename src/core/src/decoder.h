@@ -15,6 +15,7 @@ struct AVStream;
 
 namespace mvp {
 
+class HWAccelContext;
 class PacketQueue;
 
 // Value-type parameters extracted from AVStream at init time.
@@ -42,7 +43,7 @@ class Decoder {
     Decoder& operator=(const Decoder&) = delete;
 
     // Initialize decoder from a stream. Extracts DecoderParams internally.
-    bool Open(AVStream* stream);
+    bool Open(AVStream* stream, HWAccelContext* hw_ctx = nullptr);
     void Close();
 
     // Start the decode thread. Reads from packet_queue, outputs via callbacks.
