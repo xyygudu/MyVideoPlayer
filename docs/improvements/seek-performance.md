@@ -246,3 +246,80 @@ class VideoRenderer {
     }
 };
 ```
+
+---
+
+## 8. 渲染管线缺少全链路 GPU 零拷贝架构
+
+### 问题
+
+当前视频帧从 Decoder 到显示经历：AVFrame (CPU YUV) → FrameConverter → SDL_UpdateYUVTexture (CPU→GPU 上传) → SDL_RenderTexture。即使未来启用硬解，若简单做 `av_hwframe_transfer_data`（GPU→CPU 拷贝再上传），4K NV12 帧 ~12MB，GPU→CPU→GPU 往返 2-3ms/帧，60fps 下占 12-18% 帧预算，抵消硬解收益。
+
+### 影响场景
+
+- **硬解启用后若用 transfer**：GPU 解码 → CPU 拷贝 → SDL_UpdateTexture 再上传 GPU = 两次跨总线传输
+- **4K 60fps**：帧预算仅 16.6ms，2-3ms 的拷贝不可接受
+- **未来多路视频/滤镜**：每一步额外拷贝都是性能瓶颈
+
+### 改进建议（参考 MPV `vo_gpu` / VLC `d3d11_vout_display`）
+
+保持 SDL3 作为视频渲染后端，利用 SDL3 D3D11 后端原生支持 texture 直接导入实现零拷贝：
+
+```
+GPU 模式（零拷贝）：
+  Decoder (D3D11VA) → AVFrame(D3D11 texture) → FrameQueue
+    → VideoRenderer: SDL_CreateTextureWithProperties 直接绑定 D3D11 texture
+    → SDL_RenderTexture（全程 GPU，无跨总线拷贝）
+
+CPU 模式（当前，1 次拷贝）：
+  Decoder (soft) → AVFrame(YUV420P) → FrameQueue
+    → VideoRenderer: SDL_UpdateYUVTexture 上传（唯一一次 CPU→GPU 拷贝）
+    → SDL_RenderTexture
+```
+
+**SDL3 零拷贝关键 API：**
+
+```cpp
+// D3D11VA 解码帧直接作为 SDL texture 渲染
+SDL_PropertiesID props = SDL_CreateProperties();
+SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, width);
+SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, height);
+SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, SDL_PIXELFORMAT_NV12);
+SDL_SetPointerProperty(props, SDL_PROP_TEXTURE_CREATE_D3D11_TEXTURE_POINTER,
+                       (ID3D11Texture2D*)frame->data[0]);
+SDL_Texture* tex = SDL_CreateTextureWithProperties(renderer, props);
+SDL_RenderTexture(renderer, tex, nullptr, nullptr);
+```
+
+**架构分层：**
+
+```cpp
+// 硬件加速设备管理（单一职责）
+class HWAccelContext {
+public:
+    static std::unique_ptr<HWAccelContext> Create(AVHWDeviceType type);
+    AVBufferRef* DeviceRef() const;
+    AVPixelFormat HWPixelFormat() const;
+};
+
+// Decoder 不变 — Open 时可选注入 HWAccelContext
+bool Decoder::Open(AVStream* stream, HWAccelContext* hw_ctx = nullptr);
+
+// VideoRenderer（已有）— 内部根据帧格式自适应渲染路径
+class VideoRenderer {
+    void Render(AVFrame* frame) {
+        if (frame->format == AV_PIX_FMT_D3D11) {
+            RenderHWFrame(frame);   // 零拷贝：D3D11 texture → SDL texture
+        } else {
+            RenderSWFrame(frame);   // 当前路径：SDL_UpdateYUVTexture
+        }
+    }
+};
+```
+
+**模式切换**：Player 初始化时根据配置创建 HWAccelContext 注入 Decoder，VideoRenderer 根据 `frame->format` 自适应选择渲染路径。对外接口不变。
+
+**预期收益**：
+- GPU 模式：解码+渲染全程零拷贝，4K 60fps 无压力
+- CPU 模式：维持现状，仅 SDL_UpdateYUVTexture 一次上传（已是最优）
+- 无需引入 OpenGL —— SDL3 D3D11 后端原生覆盖零拷贝需求
