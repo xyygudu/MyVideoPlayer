@@ -11,6 +11,7 @@ extern "C" {
 #include <SDL3/SDL.h>
 #include <spdlog/spdlog.h>
 
+#include "ffmpeg_utils.h"
 #include "frame_impl.h"
 
 namespace mvp {
@@ -127,19 +128,17 @@ void VideoRenderer::RenderNV12(const VideoFrame& frame) {
 }
 
 void VideoRenderer::RenderHWFrame(const VideoFrame& frame) {
-    const auto* impl = frame.impl_.get();
-    AVFrame* hw_frame = impl->frame.get();
+    AVFrame* hw_frame = GetInternalFrame(frame);
     if (!hw_frame || !hw_frame->hw_frames_ctx) {
         RenderFallback(frame);
         return;
     }
 
     // 硬件帧 → 系统内存 NV12（DMA transfer，比软解快一个数量级）
-    AVFrame* sw_frame = av_frame_alloc();
+    AVFramePtr sw_frame;
     sw_frame->format = AV_PIX_FMT_NV12;
-    if (av_hwframe_transfer_data(sw_frame, hw_frame, 0) < 0) {
+    if (av_hwframe_transfer_data(sw_frame.get(), hw_frame, 0) < 0) {
         SPDLOG_WARN("VideoRenderer: hw frame transfer failed");
-        av_frame_free(&sw_frame);
         RenderFallback(frame);
         return;
     }
@@ -147,15 +146,11 @@ void VideoRenderer::RenderHWFrame(const VideoFrame& frame) {
     int fw = sw_frame->width;
     int fh = sw_frame->height;
     EnsureTexture(fw, fh, SDL_PIXELFORMAT_NV12);
-    if (!texture_) {
-        av_frame_free(&sw_frame);
-        return;
-    }
+    if (!texture_) return;
 
     SDL_UpdateNVTexture(texture_, nullptr,
                         sw_frame->data[0], sw_frame->linesize[0],
                         sw_frame->data[1], sw_frame->linesize[1]);
-    av_frame_free(&sw_frame);
     Present(fw, fh);
 }
 
@@ -165,21 +160,20 @@ void VideoRenderer::RenderFallback(const VideoFrame& frame) {
     EnsureTexture(fw, fh, SDL_PIXELFORMAT_IYUV);
     if (!texture_) return;
 
-    const auto* impl = frame.impl_.get();
-    AVFrame* src_frame = impl->frame.get();
+    AVFrame* src_frame = GetInternalFrame(frame);
     if (!src_frame) return;
 
     // 硬件帧需要先 transfer 到系统内存
     AVFrame* sw_frame = src_frame;
-    AVFrame* tmp_frame = nullptr;
+    AVFramePtr tmp_frame;
+    bool transferred = false;
     if (src_frame->hw_frames_ctx) {
-        tmp_frame = av_frame_alloc();
-        if (av_hwframe_transfer_data(tmp_frame, src_frame, 0) < 0) {
+        if (av_hwframe_transfer_data(tmp_frame.get(), src_frame, 0) < 0) {
             SPDLOG_ERROR("VideoRenderer: hw frame transfer failed");
-            av_frame_free(&tmp_frame);
             return;
         }
-        sw_frame = tmp_frame;
+        sw_frame = tmp_frame.get();
+        transferred = true;
     }
 
     // 使用 sws_scale 转为 YUV420P
@@ -204,8 +198,6 @@ void VideoRenderer::RenderFallback(const VideoFrame& frame) {
 
     sws_scale(sws_ctx_, sw_frame->data, sw_frame->linesize, 0, fh,
               dst_data, dst_linesize);
-
-    if (tmp_frame) av_frame_free(&tmp_frame);
 
     SDL_UpdateYUVTexture(texture_, nullptr,
                          dst_data[0], dst_linesize[0],

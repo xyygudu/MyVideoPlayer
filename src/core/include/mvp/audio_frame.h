@@ -6,6 +6,8 @@
 
 #include "mvp/export.h"
 
+struct AVFrame;
+
 namespace mvp {
 
 enum class SampleFormat {
@@ -41,7 +43,7 @@ class MVP_CORE_EXPORT AudioFrame {
 
   private:
     friend class FrameConverter;
-    friend class AudioRenderer;
+    friend AVFrame* GetInternalFrame(const AudioFrame&);
     template <typename>
     friend struct StreamContext;
     struct Impl;

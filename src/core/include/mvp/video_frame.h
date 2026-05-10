@@ -6,6 +6,8 @@
 
 #include "mvp/export.h"
 
+struct AVFrame;
+
 namespace mvp {
 
 enum class PixelFormat {
@@ -42,7 +44,7 @@ class MVP_CORE_EXPORT VideoFrame {
 
   private:
     friend class FrameConverter;
-    friend class VideoRenderer;
+    friend AVFrame* GetInternalFrame(const VideoFrame&);
     template <typename>
     friend struct StreamContext;
     struct Impl;

@@ -149,8 +149,7 @@ void AudioRenderer::AudioLoop() {
         AudioFrame& af = entry->frame;
         audio_clock_->Set(af.pts());
 
-        // Access internal AVFrame for resampling
-        AVFrame* frame = af.impl_->frame.get();
+        AVFrame* frame = GetInternalFrame(af);
 
         // Convert to S16 format if needed
         int out_samples = frame->nb_samples;
