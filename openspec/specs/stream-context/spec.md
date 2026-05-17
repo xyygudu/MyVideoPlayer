@@ -56,9 +56,7 @@ StreamContext SHALL 提供 `Reset()` 方法，依次调用 `packet_queue_.Reset(
 ### Requirement: StreamContext provides Start and Stop
 StreamContext SHALL 提供 `Start()` 和 `Stop()` 方法。
 
-`Start()` SHALL：
-1. 创建将 MediaFrame 入队的回调 lambda
-2. 调用 `decoder_->Start(&packet_queue_, on_frame_callback, on_eof_callback)`
+`Start()` SHALL 调用 `decoder_->Start(&packet_queue_)` 启动解码线程。回调已在 OpenDecoder 阶段注入，Start() 不再涉及回调配置。
 
 `Stop()` SHALL 调用 `decoder_->Stop()`。
 
@@ -104,8 +102,17 @@ StreamContext SHALL 提供 `PacketQueue* GetPacketQueue()` 和 `FrameQueue<Media
 - **THEN** 通过 StreamContext::GetFrameQueue() 获取
 
 ### Requirement: StreamContext provides OpenDecoder
-StreamContext SHALL 提供 `bool OpenDecoder(AVStream* stream, HWAccelContext* hw_ctx = nullptr)` 方法，委托给内部 `decoder_->Open(stream, hw_ctx)`。
+StreamContext SHALL 提供 `bool OpenDecoder(AVStream* stream, HWAccelContext* hw_ctx = nullptr)` 方法。OpenDecoder SHALL：
+1. 调用 `decoder_->Open(stream, hw_ctx)` 初始化解码器
+2. 调用 `decoder_->SetFrameCallback(...)` 注入帧入队回调
+3. 调用 `decoder_->SetEofCallback(...)` 注入 EOF 入队回调
 
-#### Scenario: OpenDecoder initializes the injected decoder
+配置在 Open 阶段一次性完成，后续 Start/Stop 不再重复设置。
+
+#### Scenario: OpenDecoder initializes and configures the decoder
 - **WHEN** 调用 StreamContext::OpenDecoder(video_stream, hw_ctx)
-- **THEN** 内部 IDecoder 被初始化，返回 true 表示成功
+- **THEN** 内部 IDecoder 被初始化且回调已注入，返回 true 表示成功
+
+#### Scenario: OpenDecoder failure does not set callbacks
+- **WHEN** decoder_->Open() 返回 false
+- **THEN** OpenDecoder 返回 false，不调用 SetFrameCallback/SetEofCallback
