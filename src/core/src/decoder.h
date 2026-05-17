@@ -9,6 +9,8 @@ extern "C" {
 #include <libavutil/rational.h>
 }
 
+#include "i_decoder.h"
+
 struct AVCodecContext;
 struct AVFrame;
 struct AVStream;
@@ -25,48 +27,38 @@ struct DecoderParams {
     AVRational frame_rate{0, 1};
 };
 
-/// Decoder 解码后通过此回调输出原始帧数据。
-/// 设计意图：Decoder 只负责"解码"这一单一职责，不感知下游帧类型（VideoFrame/AudioFrame）。
-/// 帧的封装（av_frame_ref + 格式映射 + 入队）由 StreamContext::Start() 提供的 lambda 完成。
-/// 参数：raw AVFrame*（仅在回调期间有效），pts（秒），serial（用于丢弃过期帧）。
-using FrameOutputCallback = std::function<void(AVFrame* frame, double pts, int serial)>;
-
-// Callback invoked by Decoder when EOF is reached.
-using EofOutputCallback = std::function<void(int serial)>;
-
-class Decoder {
+/// AVFrameDecoder: decodes audio/video streams using FFmpeg's send/receive API.
+/// Implements IDecoder interface. Outputs MediaFrame via callback.
+class AVFrameDecoder : public IDecoder {
   public:
-    Decoder();
-    ~Decoder();
+    AVFrameDecoder();
+    ~AVFrameDecoder() override;
 
-    Decoder(const Decoder&) = delete;
-    Decoder& operator=(const Decoder&) = delete;
+    AVFrameDecoder(const AVFrameDecoder&) = delete;
+    AVFrameDecoder& operator=(const AVFrameDecoder&) = delete;
 
-    // Initialize decoder from a stream. Extracts DecoderParams internally.
-    bool Open(AVStream* stream, HWAccelContext* hw_ctx = nullptr);
-    void Close();
+    // IDecoder interface
+    bool Open(AVStream* stream, HWAccelContext* hw_ctx = nullptr) override;
+    void Start(PacketQueue* packet_queue, MediaFrameCallback on_frame,
+               EofOutputCallback on_eof) override;
+    void Stop() override;
+    void SetDropUntilPts(double pts) override;
 
-    // Start the decode thread. Reads from packet_queue, outputs via callbacks.
-    void Start(PacketQueue* packet_queue, FrameOutputCallback on_frame,
-               EofOutputCallback on_eof);
-    void Stop();
-
-    // Seek 优化：设置目标 pts，解码线程会跳过 pts < target 的帧，
-    // 并启用 skip_frame 跳过非参考帧解码。到达目标后自动清除。
-    void SetDropUntilPts(double pts);
-
+    // Non-interface accessors (internal use)
     AVCodecContext* CodecContext() const { return codec_ctx_; }
     const DecoderParams& Params() const { return params_; }
 
   private:
+    void Close();
     void DecodeLoop();
     void DrainFrames(int serial);
 
     AVCodecContext* codec_ctx_;
     DecoderParams params_;
+    MediaType media_type_{MediaType::kUnknown};
 
     PacketQueue* packet_queue_;
-    FrameOutputCallback on_frame_;
+    MediaFrameCallback on_frame_;
     EofOutputCallback on_eof_;
 
     std::thread decode_thread_;

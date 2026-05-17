@@ -10,23 +10,31 @@ extern "C" {
 
 #include "ffmpeg_utils.h"
 #include "hw_accel_context.h"
+#include "media_frame.h"
 #include "packet_queue.h"
 
 namespace mvp {
 
-Decoder::Decoder()
+AVFrameDecoder::AVFrameDecoder()
     : codec_ctx_(nullptr),
       packet_queue_(nullptr),
       running_(false) {}
 
-Decoder::~Decoder() { Close(); }
+AVFrameDecoder::~AVFrameDecoder() { Close(); }
 
-bool Decoder::Open(AVStream* stream, HWAccelContext* hw_ctx) {
+bool AVFrameDecoder::Open(AVStream* stream, HWAccelContext* hw_ctx) {
     Close();
 
     // Extract value-type params before we discard the stream pointer
     params_.time_base = stream->time_base;
     params_.frame_rate = stream->avg_frame_rate;
+
+    // Determine MediaType from codec type
+    switch (stream->codecpar->codec_type) {
+        case AVMEDIA_TYPE_AUDIO: media_type_ = MediaType::kAudio; break;
+        case AVMEDIA_TYPE_VIDEO: media_type_ = MediaType::kVideo; break;
+        default: media_type_ = MediaType::kUnknown; break;
+    }
 
     const AVCodec* codec = avcodec_find_decoder(stream->codecpar->codec_id);
     if (!codec) {
@@ -60,37 +68,38 @@ bool Decoder::Open(AVStream* stream, HWAccelContext* hw_ctx) {
     return true;
 }
 
-void Decoder::Close() {
+void AVFrameDecoder::Close() {
     Stop();
     if (codec_ctx_) {
         avcodec_free_context(&codec_ctx_);
     }
     params_ = {};
+    media_type_ = MediaType::kUnknown;
 }
 
-void Decoder::Start(PacketQueue* packet_queue, FrameOutputCallback on_frame,
-                    EofOutputCallback on_eof) {
+void AVFrameDecoder::Start(PacketQueue* packet_queue, MediaFrameCallback on_frame,
+                           EofOutputCallback on_eof) {
     if (running_) return;
     packet_queue_ = packet_queue;
     on_frame_ = std::move(on_frame);
     on_eof_ = std::move(on_eof);
 
     running_ = true;
-    decode_thread_ = std::thread(&Decoder::DecodeLoop, this);
+    decode_thread_ = std::thread(&AVFrameDecoder::DecodeLoop, this);
 }
 
-void Decoder::Stop() {
+void AVFrameDecoder::Stop() {
     running_ = false;
     if (decode_thread_.joinable()) {
         decode_thread_.join();
     }
 }
 
-void Decoder::SetDropUntilPts(double pts) {
+void AVFrameDecoder::SetDropUntilPts(double pts) {
     drop_until_pts_.store(pts, std::memory_order_release);
 }
 
-void Decoder::DrainFrames(int serial) {
+void AVFrameDecoder::DrainFrames(int serial) {
     while (running_) {
         AVFramePtr frame;
         int ret = avcodec_receive_frame(codec_ctx_, frame.get());
@@ -111,11 +120,12 @@ void Decoder::DrainFrames(int serial) {
             drop_until_pts_.store(0, std::memory_order_release);
         }
 
-        on_frame_(frame.get(), frame_pts, serial);
+        MediaFrame mf(frame.get(), frame_pts, media_type_);
+        on_frame_(std::move(mf), serial);
     }
 }
 
-void Decoder::DecodeLoop() {
+void AVFrameDecoder::DecodeLoop() {
     while (running_) {
         auto sp = packet_queue_->Pop();
         if (!sp) {

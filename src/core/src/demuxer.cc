@@ -97,6 +97,16 @@ double Demuxer::Duration() const {
     return static_cast<double>(format_ctx_->duration) / AV_TIME_BASE;
 }
 
+AVStream* Demuxer::AudioStream() const {
+    if (!format_ctx_ || audio_stream_index_ < 0) return nullptr;
+    return format_ctx_->streams[audio_stream_index_];
+}
+
+AVStream* Demuxer::VideoStream() const {
+    if (!format_ctx_ || video_stream_index_ < 0) return nullptr;
+    return format_ctx_->streams[video_stream_index_];
+}
+
 void Demuxer::DemuxLoop() {
     // Local serial copies: only updated after seek, so pre-seek packets keep old serial
     int audio_serial = audio_queue_ ? audio_queue_->serial() : 0;

@@ -17,7 +17,9 @@ extern "C" {
 
 #include "audio_renderer.h"
 #include "clock.h"
+#include "decoder.h"
 #include "demuxer.h"
+#include "frame_impl.h"
 #include "hw_accel_context.h"
 #include "mvp/audio_frame.h"
 #include "mvp/player_state.h"
@@ -69,8 +71,8 @@ class PlayerImpl {
     void CheckAllStreamsEof();
 
     Demuxer demuxer_;
-    std::unique_ptr<StreamContext<AudioFrame>> audio_ctx_;
-    std::unique_ptr<StreamContext<VideoFrame>> video_ctx_;
+    std::unique_ptr<StreamContext> audio_ctx_;
+    std::unique_ptr<StreamContext> video_ctx_;
     std::unique_ptr<AudioRenderer> audio_renderer_;
 
     Clock audio_clock_;
@@ -174,8 +176,9 @@ bool PlayerImpl::Open(const std::string& filepath) {
 
     // Create audio stream context
     if (demuxer_.AudioStreamIndex() >= 0) {
-        audio_ctx_ = std::make_unique<StreamContext<AudioFrame>>(sync::kDefaultAudioQueueSize);
-        AVStream* audio_stream = demuxer_.FormatContext()->streams[demuxer_.AudioStreamIndex()];
+        audio_ctx_ = std::make_unique<StreamContext>(
+            std::make_unique<AVFrameDecoder>(), sync::kDefaultAudioQueueSize);
+        AVStream* audio_stream = demuxer_.AudioStream();
         if (!audio_ctx_->OpenDecoder(audio_stream)) {
             audio_ctx_.reset();
         } else {
@@ -194,8 +197,9 @@ bool PlayerImpl::Open(const std::string& filepath) {
         // 尝试创建硬件加速上下文（失败则静默降级为软解）
         hw_accel_ctx_ = HWAccelContext::Create(AV_HWDEVICE_TYPE_D3D11VA);
 
-        video_ctx_ = std::make_unique<StreamContext<VideoFrame>>(sync::kDefaultVideoQueueSize);
-        AVStream* video_stream = demuxer_.FormatContext()->streams[demuxer_.VideoStreamIndex()];
+        video_ctx_ = std::make_unique<StreamContext>(
+            std::make_unique<AVFrameDecoder>(), sync::kDefaultVideoQueueSize);
+        AVStream* video_stream = demuxer_.VideoStream();
         if (!video_ctx_->OpenDecoder(video_stream, hw_accel_ctx_.get())) {
             video_ctx_.reset();
             hw_accel_ctx_.reset();
@@ -204,7 +208,7 @@ bool PlayerImpl::Open(const std::string& filepath) {
 
     // Cache video FPS
     if (demuxer_.VideoStreamIndex() >= 0) {
-        AVStream* vs = demuxer_.FormatContext()->streams[demuxer_.VideoStreamIndex()];
+        AVStream* vs = demuxer_.VideoStream();
         if (vs->avg_frame_rate.den > 0) {
             video_fps_ = av_q2d(vs->avg_frame_rate);
         }
@@ -311,8 +315,8 @@ void PlayerImpl::Seek(double position_seconds) {
         video_clock_.SetPaused(true);
         seek_target_.store(position_seconds, std::memory_order_release);
         TransitionTo(PlayerState::Paused);
-        if (video_ctx_) video_ctx_->decoder.SetDropUntilPts(position_seconds);
-        if (audio_ctx_) audio_ctx_->decoder.SetDropUntilPts(position_seconds);
+        if (video_ctx_) video_ctx_->SetDropUntilPts(position_seconds);
+        if (audio_ctx_) audio_ctx_->SetDropUntilPts(position_seconds);
         demuxer_.RequestSeek(position_seconds);
         StartPipeline(true);
         {
@@ -329,8 +333,8 @@ void PlayerImpl::Seek(double position_seconds) {
     if (audio_renderer_) audio_renderer_->FlushSdlBuffer();
 
     // 通知 decoder 快速跳帧：跳过 target 之前的非参考帧解码 + 丢弃已解码帧
-    if (video_ctx_) video_ctx_->decoder.SetDropUntilPts(position_seconds);
-    if (audio_ctx_) audio_ctx_->decoder.SetDropUntilPts(position_seconds);
+    if (video_ctx_) video_ctx_->SetDropUntilPts(position_seconds);
+    if (audio_ctx_) audio_ctx_->SetDropUntilPts(position_seconds);
 
     seek_target_.store(position_seconds, std::memory_order_release);
     audio_eof_.store(false, std::memory_order_relaxed);
@@ -459,29 +463,23 @@ void PlayerImpl::StopPipeline() {
 }
 
 void PlayerImpl::ResetPipeline() {
-    if (audio_ctx_) {
-        audio_ctx_->packet_queue.Reset();
-        audio_ctx_->frame_queue.Reset();
-    }
-    if (video_ctx_) {
-        video_ctx_->packet_queue.Reset();
-        video_ctx_->frame_queue.Reset();
-    }
+    if (audio_ctx_) audio_ctx_->Reset();
+    if (video_ctx_) video_ctx_->Reset();
     if (audio_renderer_) audio_renderer_->FlushSdlBuffer();
     audio_eof_.store(false, std::memory_order_relaxed);
     video_eof_.store(false, std::memory_order_relaxed);
 }
 
 void PlayerImpl::StartPipeline(bool audio_paused) {
-    PacketQueue* audio_q = audio_ctx_ ? &audio_ctx_->packet_queue : nullptr;
-    PacketQueue* video_q = video_ctx_ ? &video_ctx_->packet_queue : nullptr;
+    PacketQueue* audio_q = audio_ctx_ ? audio_ctx_->GetPacketQueue() : nullptr;
+    PacketQueue* video_q = video_ctx_ ? video_ctx_->GetPacketQueue() : nullptr;
     demuxer_.Start(audio_q, video_q);
 
     if (audio_ctx_) {
         audio_ctx_->Start();
         if (audio_renderer_) {
-            audio_renderer_->Start(&audio_ctx_->frame_queue,
-                                   &audio_ctx_->packet_queue, &audio_clock_);
+            audio_renderer_->Start(audio_ctx_->GetFrameQueue(),
+                                   audio_ctx_->GetPacketQueue(), &audio_clock_);
             if (audio_paused) audio_renderer_->SetPaused(true);
         }
     }
@@ -599,7 +597,7 @@ void PlayerImpl::VideoRenderLoop() {
             stepping = frame_step_requested_;
         }
 
-        auto entry = video_ctx_->frame_queue.Pop();
+        auto entry = video_ctx_->GetFrameQueue()->Pop();
         if (!entry) {
             break;
         }
@@ -613,7 +611,7 @@ void PlayerImpl::VideoRenderLoop() {
         int frame_serial = entry->serial;
 
         // Discard stale frames (serial mismatch)
-        if (frame_serial != video_ctx_->packet_queue.serial()) {
+        if (frame_serial != video_ctx_->GetPacketQueue()->serial()) {
             continue;
         }
 
@@ -648,9 +646,10 @@ void PlayerImpl::VideoRenderLoop() {
         }
 
         if (entry->frame.IsValid()) {
-            video_renderer_.Render(entry->frame);
+            VideoFrame vf = MakeVideoFrame(entry->frame);
+            video_renderer_.Render(vf);
             if (video_frame_cb_) {
-                video_frame_cb_(entry->frame);
+                video_frame_cb_(vf);
             }
         }
 

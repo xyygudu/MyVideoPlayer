@@ -6,6 +6,7 @@
 #include <thread>
 
 struct AVFormatContext;
+struct AVStream;
 
 namespace mvp {
 
@@ -30,8 +31,11 @@ class Demuxer {
 
     int AudioStreamIndex() const { return audio_stream_index_; }
     int VideoStreamIndex() const { return video_stream_index_; }
-    AVFormatContext* FormatContext() const { return format_ctx_; }
     double Duration() const;
+
+    /// Access the underlying AVStream pointers (valid after Open).
+    AVStream* AudioStream() const;
+    AVStream* VideoStream() const;
 
   private:
     void DemuxLoop();

@@ -10,6 +10,8 @@ struct AVFrame;
 
 namespace mvp {
 
+class MediaFrame;
+
 enum class SampleFormat {
     kUnknown = 0,
     kS16,
@@ -44,8 +46,7 @@ class MVP_CORE_EXPORT AudioFrame {
   private:
     friend class FrameConverter;
     friend AVFrame* GetInternalFrame(const AudioFrame&);
-    template <typename>
-    friend struct StreamContext;
+    friend AudioFrame MakeAudioFrame(const MediaFrame&);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

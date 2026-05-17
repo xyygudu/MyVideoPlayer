@@ -1,9 +1,8 @@
 #include "audio_renderer.h"
 
 #include "clock.h"
-#include "frame_impl.h"
 #include "frame_queue.h"
-#include "mvp/audio_frame.h"
+#include "media_frame.h"
 #include "packet_queue.h"
 
 #include <spdlog/spdlog.h>
@@ -69,7 +68,7 @@ void AudioRenderer::Close() {
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }
 
-void AudioRenderer::Start(FrameQueue<AudioFrame>* frame_queue, PacketQueue* packet_queue,
+void AudioRenderer::Start(FrameQueue<MediaFrame>* frame_queue, PacketQueue* packet_queue,
                            Clock* audio_clock) {
     if (running_) return;
     frame_queue_ = frame_queue;
@@ -146,10 +145,9 @@ void AudioRenderer::AudioLoop() {
         }
 
         // Update audio clock with pre-computed PTS (already in seconds)
-        AudioFrame& af = entry->frame;
-        audio_clock_->Set(af.pts());
+        audio_clock_->Set(entry->frame.pts());
 
-        AVFrame* frame = GetInternalFrame(af);
+        AVFrame* frame = entry->frame.RawFrame();
 
         // Convert to S16 format if needed
         int out_samples = frame->nb_samples;

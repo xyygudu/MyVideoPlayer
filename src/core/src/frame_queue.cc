@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "media_frame.h"
 #include "mvp/audio_frame.h"
 #include "mvp/video_frame.h"
 
@@ -86,5 +87,6 @@ int FrameQueue<T>::Size() const {
 // Explicit instantiations
 template class FrameQueue<VideoFrame>;
 template class FrameQueue<AudioFrame>;
+template class FrameQueue<MediaFrame>;
 
 }  // namespace mvp

@@ -10,7 +10,7 @@ struct AVStream;
 
 namespace mvp {
 
-class AudioFrame;
+class MediaFrame;
 template<typename T> class FrameQueue;
 class PacketQueue;
 class Clock;
@@ -38,7 +38,7 @@ class AudioRenderer {
     /// frame_queue: source of decoded audio frames (owned externally)
     /// packet_queue: used to check serial for stale frame discard
     /// audio_clock: updated with PTS of each consumed frame
-    void Start(FrameQueue<AudioFrame>* frame_queue, PacketQueue* packet_queue,
+    void Start(FrameQueue<MediaFrame>* frame_queue, PacketQueue* packet_queue,
                Clock* audio_clock);
     void Stop();
 
@@ -51,7 +51,7 @@ class AudioRenderer {
   private:
     void AudioLoop();
 
-    FrameQueue<AudioFrame>* frame_queue_;
+    FrameQueue<MediaFrame>* frame_queue_;
     PacketQueue* packet_queue_;
     Clock* audio_clock_;
 

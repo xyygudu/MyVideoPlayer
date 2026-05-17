@@ -10,6 +10,8 @@ struct AVFrame;
 
 namespace mvp {
 
+class MediaFrame;
+
 enum class PixelFormat {
     kUnknown = 0,
     kYUV420P,
@@ -45,8 +47,7 @@ class MVP_CORE_EXPORT VideoFrame {
   private:
     friend class FrameConverter;
     friend AVFrame* GetInternalFrame(const VideoFrame&);
-    template <typename>
-    friend struct StreamContext;
+    friend VideoFrame MakeVideoFrame(const MediaFrame&);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
