@@ -52,7 +52,7 @@
 ## 8. 构建与集成验证
 
 - [x] 8.1 全量编译通过（cmake --build）
-- [ ] 8.2 运行播放器，验证音视频正常播放、A/V 同步正常
-- [ ] 8.3 验证 Seek 功能正常（前进/后退）
-- [ ] 8.4 验证 Pause/Resume/StepFrame 功能正常
-- [ ] 8.5 验证 EOF 到 Finished 状态转换正常
+- [x] 8.2 运行播放器，验证音视频正常播放、A/V 同步正常
+- [x] 8.3 验证 Seek 功能正常（前进/后退）
+- [x] 8.4 验证 Pause/Resume/StepFrame 功能正常
+- [x] 8.5 验证 EOF 到 Finished 状态转换正常
