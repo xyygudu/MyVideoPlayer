@@ -1,5 +1,6 @@
 #include "decoder.h"
 
+#include <cassert>
 #include <chrono>
 
 extern "C" {
@@ -77,12 +78,19 @@ void AVFrameDecoder::Close() {
     media_type_ = MediaType::kUnknown;
 }
 
-void AVFrameDecoder::Start(PacketQueue* packet_queue, MediaFrameCallback on_frame,
-                           EofOutputCallback on_eof) {
+void AVFrameDecoder::SetFrameCallback(MediaFrameCallback cb) {
+    on_frame_ = std::move(cb);
+}
+
+void AVFrameDecoder::SetEofCallback(EofOutputCallback cb) {
+    on_eof_ = std::move(cb);
+}
+
+void AVFrameDecoder::Start(PacketQueue* packet_queue) {
     if (running_) return;
+    assert(on_frame_ && "Must call SetFrameCallback before Start");
+    assert(on_eof_ && "Must call SetEofCallback before Start");
     packet_queue_ = packet_queue;
-    on_frame_ = std::move(on_frame);
-    on_eof_ = std::move(on_eof);
 
     running_ = true;
     decode_thread_ = std::thread(&AVFrameDecoder::DecodeLoop, this);

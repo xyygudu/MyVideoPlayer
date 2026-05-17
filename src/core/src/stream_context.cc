@@ -13,16 +13,19 @@ StreamContext::StreamContext(std::unique_ptr<IDecoder> decoder,
 StreamContext::~StreamContext() { Stop(); }
 
 bool StreamContext::OpenDecoder(AVStream* stream, HWAccelContext* hw_ctx) {
-    return decoder_->Open(stream, hw_ctx);
+    if (!decoder_->Open(stream, hw_ctx)) return false;
+
+    decoder_->SetFrameCallback([this](MediaFrame frame, int serial) {
+        frame_queue_.Push(
+            QueueEntry<MediaFrame>{std::move(frame), serial, false});
+    });
+    decoder_->SetEofCallback(
+        [this](int serial) { frame_queue_.PushEof(serial); });
+    return true;
 }
 
 void StreamContext::Start() {
-    auto on_frame = [this](MediaFrame frame, int serial) {
-        frame_queue_.Push(
-            QueueEntry<MediaFrame>{std::move(frame), serial, false});
-    };
-    auto on_eof = [this](int serial) { frame_queue_.PushEof(serial); };
-    decoder_->Start(&packet_queue_, std::move(on_frame), std::move(on_eof));
+    decoder_->Start(&packet_queue_);
 }
 
 void StreamContext::Stop() { decoder_->Stop(); }

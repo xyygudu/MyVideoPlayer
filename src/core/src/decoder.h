@@ -39,8 +39,9 @@ class AVFrameDecoder : public IDecoder {
 
     // IDecoder interface
     bool Open(AVStream* stream, HWAccelContext* hw_ctx = nullptr) override;
-    void Start(PacketQueue* packet_queue, MediaFrameCallback on_frame,
-               EofOutputCallback on_eof) override;
+    void SetFrameCallback(MediaFrameCallback cb) override;
+    void SetEofCallback(EofOutputCallback cb) override;
+    void Start(PacketQueue* packet_queue) override;
     void Stop() override;
     void SetDropUntilPts(double pts) override;
 
