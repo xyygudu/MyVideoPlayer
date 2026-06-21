@@ -1,0 +1,187 @@
+#include "graph/media_graph.h"
+
+#include <algorithm>
+#include <queue>
+#include <unordered_map>
+#include <unordered_set>
+
+#include <spdlog/spdlog.h>
+
+namespace mvp::graph {
+
+MediaGraph::MediaGraph() = default;
+MediaGraph::~MediaGraph() { Stop(); }
+
+INode* MediaGraph::AddNode(std::unique_ptr<INode> node) {
+    INode* ptr = node.get();
+    nodes_.push_back(std::move(node));
+    node_ptrs_.push_back(ptr);
+    return ptr;
+}
+
+bool MediaGraph::Connect(OutputPort* src, InputPort* dst, int link_capacity) {
+    if (!src || !dst) {
+        SPDLOG_ERROR("MediaGraph::Connect: null port");
+        return false;
+    }
+    return src->Connect(dst, link_capacity);
+}
+
+bool MediaGraph::TopologicalSort() {
+    // Kahn's algorithm for DAG topological sort.
+    // Build adjacency from port connections.
+    std::unordered_map<INode*, int> in_degree;
+    std::unordered_map<INode*, std::vector<INode*>> adjacency;
+
+    for (auto* node : node_ptrs_) {
+        in_degree[node] = 0;
+    }
+
+    for (auto* node : node_ptrs_) {
+        for (auto* out_port : node->Outputs()) {
+            if (out_port->IsConnected()) {
+                INode* downstream = out_port->Peer()->Owner();
+                adjacency[node].push_back(downstream);
+                in_degree[downstream]++;
+            }
+        }
+    }
+
+    std::queue<INode*> zero_in;
+    for (auto& [node, degree] : in_degree) {
+        if (degree == 0) {
+            zero_in.push(node);
+        }
+    }
+
+    topo_order_.clear();
+    while (!zero_in.empty()) {
+        INode* current = zero_in.front();
+        zero_in.pop();
+        topo_order_.push_back(current);
+
+        for (auto* neighbor : adjacency[current]) {
+            if (--in_degree[neighbor] == 0) {
+                zero_in.push(neighbor);
+            }
+        }
+    }
+
+    if (topo_order_.size() != node_ptrs_.size()) {
+        SPDLOG_ERROR(
+            "MediaGraph::TopologicalSort: cycle detected! "
+            "Sorted {} of {} nodes",
+            topo_order_.size(), node_ptrs_.size());
+        return false;
+    }
+
+    return true;
+}
+
+bool MediaGraph::Negotiate() {
+    if (!TopologicalSort()) {
+        state_ = GraphState::kError;
+        return false;
+    }
+
+    for (auto* node : topo_order_) {
+        if (!node->Negotiate()) {
+            SPDLOG_ERROR("MediaGraph::Negotiate: node '{}' failed",
+                         node->Name());
+            state_ = GraphState::kError;
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool MediaGraph::Prepare() {
+    for (auto* node : topo_order_) {
+        if (!node->Prepare()) {
+            SPDLOG_ERROR("MediaGraph::Prepare: node '{}' failed",
+                         node->Name());
+            state_ = GraphState::kError;
+            return false;
+        }
+    }
+
+    state_ = GraphState::kReady;
+    return true;
+}
+
+bool MediaGraph::Start() {
+    if (state_ != GraphState::kReady && state_ != GraphState::kPaused) {
+        SPDLOG_WARN("MediaGraph::Start: invalid state transition from {}",
+                    static_cast<int>(state_));
+        return false;
+    }
+
+    for (auto* node : topo_order_) {
+        if (node->Threading() == ThreadingMode::kActive) {
+            if (!node->Start()) {
+                SPDLOG_ERROR("MediaGraph::Start: node '{}' failed to start",
+                             node->Name());
+                state_ = GraphState::kError;
+                return false;
+            }
+        }
+    }
+
+    state_ = GraphState::kPlaying;
+    if (event_cb_) {
+        event_cb_(GraphEvent::kStateChanged);
+    }
+    return true;
+}
+
+void MediaGraph::Stop() {
+    if (state_ == GraphState::kIdle) {
+        return;
+    }
+
+    // Abort all links first to unblock waiting threads.
+    for (auto* node : node_ptrs_) {
+        for (auto* out_port : node->Outputs()) {
+            out_port->AbortLink();
+        }
+    }
+
+    // Stop nodes in reverse topological order (Sinks first).
+    for (auto it = topo_order_.rbegin(); it != topo_order_.rend(); ++it) {
+        (*it)->Stop();
+    }
+
+    state_ = GraphState::kIdle;
+    if (event_cb_) {
+        event_cb_(GraphEvent::kStateChanged);
+    }
+}
+
+void MediaGraph::Flush() {
+    // Flush all links.
+    for (auto* node : node_ptrs_) {
+        for (auto* out_port : node->Outputs()) {
+            out_port->FlushLink();
+        }
+    }
+
+    // Flush all nodes in topological order.
+    for (auto* node : topo_order_) {
+        node->Flush();
+    }
+}
+
+void MediaGraph::ReportEvent(GraphEvent event) {
+    if (event == GraphEvent::kEos) {
+        state_ = GraphState::kFinished;
+    } else if (event == GraphEvent::kError) {
+        state_ = GraphState::kError;
+    }
+
+    if (event_cb_) {
+        event_cb_(event);
+    }
+}
+
+}  // namespace mvp::graph

@@ -14,7 +14,7 @@
 #include "video_widget.h"
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), slider_pressed_(false) {
-    player_ = std::make_unique<mvp::Player>();
+    player_ = std::make_unique<mvp::MediaPlayer>();
     SetupUi();
 
     // Wire native window handle to player for SDL3 rendering
@@ -119,12 +119,12 @@ void MainWindow::OnSliderMoved(int value) {
 void MainWindow::OnTimerTick() {
     double duration = player_->Duration();
     double position = player_->CurrentPosition();
-    double video_pos = player_->CurrentVideoPosition();
+    double video_pos = position;  // MediaPlayer uses unified clock
     double fps = player_->VideoFps();
     auto state = player_->State();
 
     // When finished, update button and stop advancing
-    if (state == mvp::PlayerState::Finished) {
+    if (state == mvp::PlaybackState::kFinished) {
         play_pause_btn_->setText(QStringLiteral("\u25B6"));  // "▶"
     }
 

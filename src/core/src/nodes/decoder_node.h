@@ -1,0 +1,111 @@
+#ifndef MVP_NODES_DECODER_NODE_H_
+#define MVP_NODES_DECODER_NODE_H_
+
+#include <atomic>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "graph/media_buffer.h"
+#include "graph/node.h"
+#include "graph/port.h"
+
+extern "C" {
+#include <libavutil/rational.h>
+}
+
+struct AVCodecContext;
+struct AVStream;
+
+namespace mvp {
+class HWAccelContext;
+}
+
+namespace mvp::graph {
+
+/// Transform node: decodes compressed packets (AVPacket) into frames
+/// (MediaFrame).
+///
+/// - NodeType: kTransform (1 input, 1 output)
+/// - ThreadingMode: kActive (owns decode thread)
+/// - Configure: optional HW acceleration device type via NodeConfig
+/// - Prepare: requires connected input port with Packet format;
+///            creates AVCodecContext from upstream codec_id
+/// - Flush: flushes codec internal buffers (avcodec_flush_buffers)
+///
+/// Lifecycle notes:
+/// - codec_ctx_ allocated in Prepare(), freed in Stop()
+/// - Worker thread pulls from input Link, sends to output port
+/// - Supports SetDropUntilPts() for seek optimization (skip non-ref frames)
+/// - EOF handling: null packet → drain → push EOS downstream
+class DecoderNode : public INode {
+  public:
+    DecoderNode();
+    ~DecoderNode() override;
+
+    // --- INode interface ---
+    bool Configure(const NodeConfig& config) override;
+    bool Negotiate() override;
+    bool Prepare() override;
+    bool Start() override;
+    void Stop() override;
+    void Flush() override;
+
+    void Process(MediaBuffer /*input*/, OutputCallback /*emit*/) override {
+        // Active node: no-op (uses own thread)
+    }
+
+    std::vector<InputPort*> Inputs() override;
+    std::vector<OutputPort*> Outputs() override;
+
+    NodeType Type() const override { return NodeType::kTransform; }
+    ThreadingMode Threading() const override { return ThreadingMode::kActive; }
+    NodeState State() const override { return state_; }
+    std::string Name() const override { return name_; }
+
+    // --- DecoderNode-specific ---
+
+    /// Skip decoded frames until PTS >= target. Thread-safe.
+    /// Used for seek optimization.
+    void SetDropUntilPts(double pts);
+
+    /// Set the AVStream* to configure the decoder from.
+    /// Must be called before Prepare(). This is needed because the codec
+    /// params come from the upstream DemuxNode's AVFormatContext.
+    void SetStream(AVStream* stream);
+
+    /// Set optional hardware acceleration context.
+    void SetHWAccel(mvp::HWAccelContext* hw_ctx);
+
+  private:
+    void DecodeLoop();
+    void DrainFrames();
+    void CloseCodec();
+
+    NodeState state_{NodeState::kIdle};
+    std::string name_{"DecoderNode"};
+
+    // Configuration (set before Prepare)
+    AVStream* stream_{nullptr};          // Non-owning, from DemuxNode's format_ctx
+    mvp::HWAccelContext* hw_ctx_{nullptr}; // Non-owning, from external
+
+    // FFmpeg codec state (owned, allocated in Prepare)
+    AVCodecContext* codec_ctx_{nullptr};
+    MediaType media_type_{MediaType::kUnknown};
+    AVRational time_base_{0, 1};
+
+    // Ports
+    std::unique_ptr<InputPort> input_port_;
+    std::unique_ptr<OutputPort> output_port_;
+
+    // Worker thread
+    std::thread decode_thread_;
+    std::atomic<bool> running_{false};
+    std::atomic<double> drop_until_pts_{0.0};
+    int last_serial_{0};  // Tracks Link serial for flush-on-seek detection
+};
+
+}  // namespace mvp::graph
+
+#endif  // MVP_NODES_DECODER_NODE_H_

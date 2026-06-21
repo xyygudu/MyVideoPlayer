@@ -8,8 +8,7 @@
 #include <QTimer>
 #include <memory>
 
-#include "mvp/player.h"
-#include "mvp/player_state.h"
+#include "mvp/media_player.h"
 
 class VideoWidget;
 
@@ -40,7 +39,7 @@ class MainWindow : public QMainWindow {
     QLabel* time_label_;
     QTimer* timer_;
 
-    std::unique_ptr<mvp::Player> player_;
+    std::unique_ptr<mvp::MediaPlayer> player_;
     bool slider_pressed_;
 };
 
