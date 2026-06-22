@@ -18,11 +18,6 @@ VideoSinkNode::VideoSinkNode() {
 
 VideoSinkNode::~VideoSinkNode() { Stop(); }
 
-bool VideoSinkNode::Configure(const NodeConfig& /*config*/) {
-    state_ = NodeState::kConfigured;
-    return true;
-}
-
 bool VideoSinkNode::Negotiate() {
     return true;
 }
@@ -31,7 +26,7 @@ bool VideoSinkNode::Prepare() {
     if (state_ == NodeState::kPrepared || state_ == NodeState::kRunning) {
         return true;
     }
-    if (state_ != NodeState::kConfigured) {
+    if (state_ != NodeState::kIdle && state_ != NodeState::kConfigured) {
         SPDLOG_ERROR("VideoSinkNode: Prepare in invalid state");
         return false;
     }

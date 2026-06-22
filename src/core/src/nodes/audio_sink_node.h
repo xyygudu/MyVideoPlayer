@@ -12,7 +12,6 @@
 #include "graph/node.h"
 #include "graph/port.h"
 
-struct AVStream;
 struct SwrContext;
 struct SDL_AudioStream;
 
@@ -45,7 +44,6 @@ class AudioSinkNode : public INode {
     ~AudioSinkNode() override;
 
     // --- INode interface ---
-    bool Configure(const NodeConfig& config) override;
     bool Negotiate() override;
     bool Prepare() override;
     bool Start() override;
@@ -63,9 +61,6 @@ class AudioSinkNode : public INode {
     std::string Name() const override { return "AudioSinkNode"; }
 
     // --- AudioSinkNode-specific ---
-
-    /// Set the AVStream for audio format info. Must be called before Prepare.
-    void SetStream(AVStream* stream);
 
     /// Set the clock this node updates (audio master clock).
     void SetAudioClock(mvp::Clock* clock);
@@ -87,9 +82,6 @@ class AudioSinkNode : public INode {
 
     // Ports
     std::unique_ptr<InputPort> input_port_;
-
-    // Configuration (set before Prepare)
-    AVStream* stream_{nullptr};
 
     // External references (non-owning)
     mvp::Clock* audio_clock_{nullptr};

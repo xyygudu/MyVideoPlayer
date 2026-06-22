@@ -72,7 +72,13 @@ class OutputPort {
     const FormatCaps& Caps() const { return caps_; }
 
     /// Get/set the negotiated format.
-    void SetFormat(MediaFormat format) { format_ = std::move(format); }
+    /// If already connected, automatically propagates to downstream InputPort.
+    void SetFormat(MediaFormat format) {
+        format_ = format;
+        if (peer_) {
+            peer_->SetFormat(format);
+        }
+    }
     const MediaFormat& Format() const { return format_; }
 
     INode* Owner() const { return owner_; }

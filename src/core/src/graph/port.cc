@@ -43,6 +43,10 @@ bool OutputPort::Connect(InputPort* peer, int link_capacity) {
         peer->link_ = link_.get();
     }
 
+    // Propagate output format to downstream input port so that
+    // downstream node can read it during Negotiate().
+    peer->SetFormat(format_);
+
     return true;
 }
 

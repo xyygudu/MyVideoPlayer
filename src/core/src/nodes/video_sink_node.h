@@ -46,7 +46,6 @@ class VideoSinkNode : public INode {
     ~VideoSinkNode() override;
 
     // --- INode interface ---
-    bool Configure(const NodeConfig& config) override;
     bool Negotiate() override;
     bool Prepare() override;
     bool Start() override;

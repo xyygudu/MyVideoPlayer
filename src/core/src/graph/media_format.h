@@ -3,7 +3,12 @@
 
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
 #include <vector>
+
+extern "C" {
+#include <libavcodec/codec_par.h>
+}
 
 #include "graph/media_buffer.h"
 #include "media_frame.h"
@@ -29,6 +34,12 @@ class MediaFormat {
     // --- Packet (compressed) format ---
     static MediaFormat Packet(int codec_id, Rational time_base);
 
+    // --- Full stream format (from DemuxNode, carries codec params copy) ---
+    static MediaFormat FromStream(int codec_id, Rational time_base,
+                                  Rational frame_rate,
+                                  const AVCodecParameters* codecpar,
+                                  MediaType type);
+
     MediaType media_type() const { return media_type_; }
     bool IsVideo() const;
     bool IsAudio() const;
@@ -49,6 +60,9 @@ class MediaFormat {
     int codec_id() const { return codec_id_; }
     Rational time_base() const { return time_base_; }
 
+    // Codec parameters (shared copy, may be null for raw frame formats)
+    const AVCodecParameters* codec_params() const { return codec_params_.get(); }
+
   private:
     MediaType media_type_{};
     // Video
@@ -63,6 +77,8 @@ class MediaFormat {
     // Packet
     int codec_id_{0};
     Rational time_base_;
+    // Codec parameters (deep copy, shared ownership for cheap MediaFormat copies)
+    std::shared_ptr<AVCodecParameters> codec_params_;
 };
 
 /// Describes the range of formats a port can accept or produce.

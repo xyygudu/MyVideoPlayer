@@ -59,8 +59,8 @@ class MediaPlayer::Impl {
     Clock audio_clock_;
     Clock video_clock_;
 
-    // HW acceleration
-    std::unique_ptr<HWAccelContext> hw_accel_;
+    // HW acceleration (shared with graph — graph nodes query it)
+    std::shared_ptr<HWAccelContext> hw_accel_;
 
     // Video rendering
     VideoRenderer video_renderer_;
@@ -202,13 +202,15 @@ bool MediaPlayer::Impl::BuildGraph(const std::string& filepath) {
     graph_->SetEventCallback(
         [this](graph::GraphEvent e) { OnGraphEvent(e); });
 
-    // --- DemuxNode ---
-    auto demux = std::make_unique<graph::DemuxNode>();
-    graph::NodeConfig demux_cfg;
-    demux_cfg.file_path = filepath;
-    demux->Configure(demux_cfg);
+    // --- HW acceleration: inject as graph shared resource ---
+    hw_accel_ = std::shared_ptr<HWAccelContext>(
+        HWAccelContext::Create(AV_HWDEVICE_TYPE_D3D11VA).release());
+    if (hw_accel_) {
+        graph_->SetHWDevice(hw_accel_);
+    }
 
-    // Negotiate and Prepare demux to discover streams
+    // --- DemuxNode (Source) ---
+    auto demux = std::make_unique<graph::DemuxNode>(filepath);
     demux->Negotiate();
     if (!demux->Prepare()) {
         return false;
@@ -216,8 +218,7 @@ bool MediaPlayer::Impl::BuildGraph(const std::string& filepath) {
 
     demux_node_ = static_cast<graph::DemuxNode*>(graph_->AddNode(std::move(demux)));
 
-    // Access AVFormatContext streams via DemuxNode ports.
-    // DemuxNode creates ports: [0]=video (if exists), [1]=audio (if exists)
+    // DemuxNode output ports: [0]=video (if exists), [1]=audio (if exists)
     auto demux_outputs = demux_node_->Outputs();
     int video_port_idx = -1;
     int audio_port_idx = -1;
@@ -229,51 +230,23 @@ bool MediaPlayer::Impl::BuildGraph(const std::string& filepath) {
         audio_port_idx = (video_port_idx >= 0) ? 1 : 0;
     }
 
-    // We need access to AVStream* for decoder/audio setup.
-    // This is a controlled internal coupling — DemuxNode exposes
-    // stream info implicitly through its format_ctx_ (set during Prepare).
-    // For decoder setup, we re-open the format context info.
-    // Actually, we can use avformat API since DemuxNode exposes nothing beyond
-    // ports. Better approach: open a temporary format context just for stream info.
-    // BUT this duplicates work. Instead, let's expose stream access on DemuxNode.
-
-    // We'll access the format context through the DemuxNode's internal state.
-    // Since DemuxNode is our code, we add a helper method.
-    // For now, we'll re-open briefly to get AVStream* for decoder config.
-    // This is a pragmatic decision: DemuxNode is internal code we control.
-
-    AVFormatContext* fmt_ctx = nullptr;
-    avformat_open_input(&fmt_ctx, filepath.c_str(), nullptr, nullptr);
-    avformat_find_stream_info(fmt_ctx, nullptr);
-
-    // --- Try hardware acceleration ---
-    hw_accel_ = HWAccelContext::Create(AV_HWDEVICE_TYPE_D3D11VA);
-
     // --- Video pipeline ---
     if (video_port_idx >= 0) {
-        AVStream* vstream = fmt_ctx->streams[demux_node_->VideoStreamIndex()];
+        // Read format from DemuxNode output port (no second file open needed!)
+        const auto& vfmt = demux_outputs[video_port_idx]->Format();
 
         auto vdecoder = std::make_unique<graph::DecoderNode>();
-        graph::NodeConfig dec_cfg;
-        vdecoder->Configure(dec_cfg);
-        vdecoder->SetStream(vstream);
-        if (hw_accel_) vdecoder->SetHWAccel(hw_accel_.get());
-        vdecoder->Negotiate();
-        if (!vdecoder->Prepare()) {
-            avformat_close_input(&fmt_ctx);
-            return false;
-        }
-
-        video_fps_ = (vstream->avg_frame_rate.den > 0)
-                         ? av_q2d(vstream->avg_frame_rate)
-                         : 30.0;
-
+        vdecoder->SetGraph(graph_.get());
         video_decoder_ = static_cast<graph::DecoderNode*>(
             graph_->AddNode(std::move(vdecoder)));
 
         // VideoSinkNode
+        video_fps_ = (vfmt.frame_rate().den > 0)
+                         ? static_cast<double>(vfmt.frame_rate().num) /
+                               vfmt.frame_rate().den
+                         : 30.0;
+
         auto vsink = std::make_unique<graph::VideoSinkNode>();
-        vsink->Configure({});
         vsink->SetRenderer(&video_renderer_);
         vsink->SetAudioClock(&audio_clock_);
         vsink->SetVideoClock(&video_clock_);
@@ -281,28 +254,23 @@ bool MediaPlayer::Impl::BuildGraph(const std::string& filepath) {
         vsink->SetGraph(graph_.get());
         if (video_frame_cb_) vsink->SetFrameCallback(video_frame_cb_);
 
-        // Determine sync mode
         if (audio_port_idx >= 0) {
             vsink->SetSyncMode(graph::VideoSinkNode::SyncMode::kAudioMaster);
         } else {
             vsink->SetSyncMode(graph::VideoSinkNode::SyncMode::kVideoMaster);
         }
 
-        // Open video renderer
-        int w = vstream->codecpar->width;
-        int h = vstream->codecpar->height;
-        if (window_handle_) {
+        // Open video renderer with resolution from codec params
+        int w = vfmt.width();
+        int h = vfmt.height();
+        if (window_handle_ && w > 0 && h > 0) {
             video_renderer_.Open(window_handle_, w, h);
         }
 
-        vsink->Negotiate();
-        vsink->Prepare();
         video_sink_ = static_cast<graph::VideoSinkNode*>(
             graph_->AddNode(std::move(vsink)));
 
-        // Connect: DemuxNode[video_port] → DecoderNode → VideoSinkNode
-        // Packet link: large capacity (256) to avoid DemuxNode backpressure
-        // Frame link: small capacity (8) for low-latency rendering
+        // Connect: DemuxNode → DecoderNode → VideoSinkNode
         graph_->Connect(demux_outputs[video_port_idx],
                         video_decoder_->Inputs()[0], 256);
         graph_->Connect(video_decoder_->Outputs()[0],
@@ -312,39 +280,19 @@ bool MediaPlayer::Impl::BuildGraph(const std::string& filepath) {
 
     // --- Audio pipeline ---
     if (audio_port_idx >= 0) {
-        AVStream* astream = fmt_ctx->streams[demux_node_->AudioStreamIndex()];
-
         auto adecoder = std::make_unique<graph::DecoderNode>();
-        graph::NodeConfig dec_cfg;
-        adecoder->Configure(dec_cfg);
-        adecoder->SetStream(astream);
-        adecoder->Negotiate();
-        if (!adecoder->Prepare()) {
-            avformat_close_input(&fmt_ctx);
-            return false;
-        }
-
+        adecoder->SetGraph(graph_.get());
         audio_decoder_ = static_cast<graph::DecoderNode*>(
             graph_->AddNode(std::move(adecoder)));
 
-        // AudioSinkNode
+        // AudioSinkNode — reads sample_rate/channels from port format in Prepare
         auto asink = std::make_unique<graph::AudioSinkNode>();
-        asink->Configure({});
-        asink->SetStream(astream);
         asink->SetAudioClock(&audio_clock_);
         asink->SetGraph(graph_.get());
-        asink->Negotiate();
-        if (!asink->Prepare()) {
-            avformat_close_input(&fmt_ctx);
-            return false;
-        }
-
         audio_sink_ = static_cast<graph::AudioSinkNode*>(
             graph_->AddNode(std::move(asink)));
 
-        // Connect: DemuxNode[audio_port] → DecoderNode → AudioSinkNode
-        // Packet link: large capacity to avoid blocking DemuxNode
-        // Frame link: moderate capacity for smooth audio output
+        // Connect: DemuxNode → DecoderNode → AudioSinkNode
         graph_->Connect(demux_outputs[audio_port_idx],
                         audio_decoder_->Inputs()[0], 256);
         graph_->Connect(audio_decoder_->Outputs()[0],
@@ -352,10 +300,10 @@ bool MediaPlayer::Impl::BuildGraph(const std::string& filepath) {
         sink_count_++;
     }
 
-    avformat_close_input(&fmt_ctx);
-
-    // Run graph lifecycle to populate topo_order and advance state to kReady.
-    // Individual nodes are already prepared (idempotent Prepare).
+    // --- Graph lifecycle: Negotiate → Prepare ---
+    // Negotiate propagates format from DemuxNode ports → Decoder inputs.
+    // Decoder::Negotiate reads codec_params from input port.
+    // Prepare opens codecs and SDL devices.
     if (!graph_->Negotiate()) {
         SPDLOG_ERROR("MediaPlayer: graph Negotiate failed");
         return false;

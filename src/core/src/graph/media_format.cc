@@ -35,6 +35,35 @@ MediaFormat MediaFormat::Packet(int codec_id, Rational time_base) {
     return f;
 }
 
+MediaFormat MediaFormat::FromStream(int codec_id, Rational time_base,
+                                    Rational frame_rate,
+                                    const AVCodecParameters* codecpar,
+                                    MediaType type) {
+    MediaFormat f;
+    f.media_type_ = type;
+    f.codec_id_ = codec_id;
+    f.time_base_ = time_base;
+    f.frame_rate_ = frame_rate;
+
+    if (codecpar) {
+        // Deep copy codec parameters with custom deleter
+        AVCodecParameters* p = avcodec_parameters_alloc();
+        avcodec_parameters_copy(p, codecpar);
+        f.codec_params_ = std::shared_ptr<AVCodecParameters>(
+            p, [](AVCodecParameters* x) { avcodec_parameters_free(&x); });
+
+        // Also fill convenience fields from codecpar
+        if (type == MediaType::kVideo) {
+            f.width_ = codecpar->width;
+            f.height_ = codecpar->height;
+        } else if (type == MediaType::kAudio) {
+            f.sample_rate_ = codecpar->sample_rate;
+            f.channels_ = codecpar->ch_layout.nb_channels;
+        }
+    }
+    return f;
+}
+
 bool MediaFormat::IsVideo() const {
     return media_type_ == MediaType::kVideo;
 }

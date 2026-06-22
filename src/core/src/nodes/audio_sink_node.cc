@@ -13,6 +13,7 @@ extern "C" {
 #include <spdlog/spdlog.h>
 
 #include "clock.h"
+#include "graph/media_format.h"
 #include "media_frame.h"
 
 namespace mvp::graph {
@@ -26,17 +27,8 @@ AudioSinkNode::~AudioSinkNode() {
     CloseDevice();
 }
 
-bool AudioSinkNode::Configure(const NodeConfig& /*config*/) {
-    state_ = NodeState::kConfigured;
-    return true;
-}
-
 bool AudioSinkNode::Negotiate() {
     return true;
-}
-
-void AudioSinkNode::SetStream(AVStream* stream) {
-    stream_ = stream;
 }
 
 void AudioSinkNode::SetAudioClock(mvp::Clock* clock) {
@@ -47,18 +39,30 @@ bool AudioSinkNode::Prepare() {
     if (state_ == NodeState::kPrepared || state_ == NodeState::kRunning) {
         return true;
     }
-    if (state_ != NodeState::kConfigured) {
+    if (state_ != NodeState::kIdle && state_ != NodeState::kConfigured) {
         SPDLOG_ERROR("AudioSinkNode: Prepare in invalid state");
         return false;
     }
-    if (!stream_) {
-        SPDLOG_ERROR("AudioSinkNode: no stream set");
+
+    // Get audio parameters from input port format.
+    // Decoder output is a frame format (sample_rate/channels fields),
+    // NOT a packet format (codec_params). Use MediaFormat accessors directly.
+    const auto& fmt = input_port_->Format();
+    if (fmt.sample_rate() > 0 && fmt.channels() > 0) {
+        sample_rate_ = fmt.sample_rate();
+        channels_ = fmt.channels();
+    } else if (fmt.codec_params()) {
+        // Fallback: raw codec params (e.g. direct DemuxNode→Sink without decoder)
+        sample_rate_ = fmt.codec_params()->sample_rate;
+        channels_ = fmt.codec_params()->ch_layout.nb_channels;
+    } else {
+        SPDLOG_ERROR("AudioSinkNode: no audio params from port format "
+                     "(sample_rate={}, channels={}, codec_params={})",
+                     fmt.sample_rate(), fmt.channels(),
+                     fmt.codec_params() ? "valid" : "null");
         state_ = NodeState::kError;
         return false;
     }
-
-    sample_rate_ = stream_->codecpar->sample_rate;
-    channels_ = stream_->codecpar->ch_layout.nb_channels;
 
     // Initialize SDL audio
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {

@@ -11,22 +11,12 @@ extern "C" {
 
 namespace mvp::graph {
 
-DemuxNode::DemuxNode() = default;
+DemuxNode::DemuxNode(std::string file_path)
+    : file_path_(std::move(file_path)) {}
 
 DemuxNode::~DemuxNode() {
     Stop();
     CloseFormatContext();
-}
-
-bool DemuxNode::Configure(const NodeConfig& config) {
-    if (config.file_path.empty()) {
-        SPDLOG_ERROR("DemuxNode: file_path is empty");
-        state_ = NodeState::kError;
-        return false;
-    }
-    file_path_ = config.file_path;
-    state_ = NodeState::kConfigured;
-    return true;
 }
 
 bool DemuxNode::Negotiate() {
@@ -39,7 +29,7 @@ bool DemuxNode::Prepare() {
     if (state_ == NodeState::kPrepared || state_ == NodeState::kRunning) {
         return true;  // Already prepared
     }
-    if (state_ != NodeState::kConfigured) {
+    if (state_ != NodeState::kIdle && state_ != NodeState::kConfigured) {
         SPDLOG_ERROR("DemuxNode: Prepare called in invalid state {}",
                      static_cast<int>(state_));
         return false;
@@ -92,7 +82,10 @@ bool DemuxNode::Prepare() {
         auto port = std::make_unique<OutputPort>(this);
         auto* stream = format_ctx_->streams[video_stream_index_];
         Rational tb{stream->time_base.num, stream->time_base.den};
-        port->SetFormat(MediaFormat::Packet(stream->codecpar->codec_id, tb));
+        Rational fr{stream->avg_frame_rate.num, stream->avg_frame_rate.den};
+        port->SetFormat(MediaFormat::FromStream(
+            stream->codecpar->codec_id, tb, fr,
+            stream->codecpar, MediaType::kVideo));
         output_ports_.push_back(std::move(port));
     }
 
@@ -100,7 +93,10 @@ bool DemuxNode::Prepare() {
         auto port = std::make_unique<OutputPort>(this);
         auto* stream = format_ctx_->streams[audio_stream_index_];
         Rational tb{stream->time_base.num, stream->time_base.den};
-        port->SetFormat(MediaFormat::Packet(stream->codecpar->codec_id, tb));
+        Rational fr{0, 1};
+        port->SetFormat(MediaFormat::FromStream(
+            stream->codecpar->codec_id, tb, fr,
+            stream->codecpar, MediaType::kAudio));
         output_ports_.push_back(std::move(port));
     }
 

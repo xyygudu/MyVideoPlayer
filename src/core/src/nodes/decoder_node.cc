@@ -9,6 +9,7 @@ extern "C" {
 #include <spdlog/spdlog.h>
 
 #include "ffmpeg_utils.h"
+#include "graph/media_graph.h"
 #include "hw_accel_context.h"
 #include "media_frame.h"
 
@@ -24,22 +25,25 @@ DecoderNode::~DecoderNode() {
     CloseCodec();
 }
 
-bool DecoderNode::Configure(const NodeConfig& config) {
-    (void)config;  // HW accel set via SetHWAccel()
-    state_ = NodeState::kConfigured;
-    return true;
-}
-
-void DecoderNode::SetStream(AVStream* stream) {
-    stream_ = stream;
-}
-
-void DecoderNode::SetHWAccel(mvp::HWAccelContext* hw_ctx) {
-    hw_ctx_ = hw_ctx;
-}
-
 bool DecoderNode::Negotiate() {
-    // Output format will be known after Prepare opens the codec.
+    // Try to read codec parameters from the input port (new path).
+    // If input port has format with codec_params, cache for Prepare().
+    if (input_port_->IsConnected()) {
+        const MediaFormat& fmt = input_port_->Format();
+        if (fmt.codec_params()) {
+            negotiated_codecpar_ = fmt.codec_params();
+            time_base_ = {fmt.time_base().num, fmt.time_base().den};
+
+            // Determine media type from codec params
+            if (fmt.media_type() == MediaType::kVideo) {
+                media_type_ = MediaType::kVideo;
+                name_ = "DecoderNode(video)";
+            } else if (fmt.media_type() == MediaType::kAudio) {
+                media_type_ = MediaType::kAudio;
+                name_ = "DecoderNode(audio)";
+            }
+        }
+    }
     return true;
 }
 
@@ -47,40 +51,25 @@ bool DecoderNode::Prepare() {
     if (state_ == NodeState::kPrepared || state_ == NodeState::kRunning) {
         return true;  // Already prepared
     }
-    if (state_ != NodeState::kConfigured) {
+    if (state_ != NodeState::kConfigured && state_ != NodeState::kIdle) {
         SPDLOG_ERROR("DecoderNode: Prepare called in invalid state {}",
                      static_cast<int>(state_));
         return false;
     }
 
-    if (!stream_) {
-        SPDLOG_ERROR("DecoderNode: no stream set (call SetStream before Prepare)");
+    // Determine codec parameters source: from port negotiation
+    const AVCodecParameters* codecpar = negotiated_codecpar_;
+    if (!codecpar) {
+        SPDLOG_ERROR("DecoderNode: no codec params from negotiation");
         state_ = NodeState::kError;
         return false;
     }
 
-    // Extract parameters from stream
-    time_base_ = stream_->time_base;
-    switch (stream_->codecpar->codec_type) {
-        case AVMEDIA_TYPE_AUDIO:
-            media_type_ = MediaType::kAudio;
-            name_ = "DecoderNode(audio)";
-            break;
-        case AVMEDIA_TYPE_VIDEO:
-            media_type_ = MediaType::kVideo;
-            name_ = "DecoderNode(video)";
-            break;
-        default:
-            media_type_ = MediaType::kUnknown;
-            break;
-    }
-
     // Find codec
-    const AVCodec* codec =
-        avcodec_find_decoder(stream_->codecpar->codec_id);
+    const AVCodec* codec = avcodec_find_decoder(codecpar->codec_id);
     if (!codec) {
         SPDLOG_ERROR("DecoderNode: codec not found for id {}",
-                     static_cast<int>(stream_->codecpar->codec_id));
+                     static_cast<int>(codecpar->codec_id));
         state_ = NodeState::kError;
         return false;
     }
@@ -92,18 +81,21 @@ bool DecoderNode::Prepare() {
         return false;
     }
 
-    if (avcodec_parameters_to_context(codec_ctx_, stream_->codecpar) < 0) {
+    if (avcodec_parameters_to_context(codec_ctx_, codecpar) < 0) {
         SPDLOG_ERROR("DecoderNode: failed to copy codec params");
         avcodec_free_context(&codec_ctx_);
         state_ = NodeState::kError;
         return false;
     }
 
-    // Hardware acceleration setup
-    if (hw_ctx_ && hw_ctx_->DeviceRef()) {
-        codec_ctx_->opaque = hw_ctx_;
-        codec_ctx_->get_format = mvp::HWAccelContext::GetFormat;
-        codec_ctx_->hw_device_ctx = av_buffer_ref(hw_ctx_->DeviceRef());
+    // Hardware acceleration: query from graph shared resource
+    if (graph_ && graph_->HWDevice() && media_type_ == MediaType::kVideo) {
+        auto* hw = graph_->HWDevice().get();
+        if (hw->DeviceRef()) {
+            codec_ctx_->opaque = hw;
+            codec_ctx_->get_format = mvp::HWAccelContext::GetFormat;
+            codec_ctx_->hw_device_ctx = av_buffer_ref(hw->DeviceRef());
+        }
     }
 
     if (avcodec_open2(codec_ctx_, codec, nullptr) < 0) {
@@ -115,19 +107,23 @@ bool DecoderNode::Prepare() {
 
     // Set output port format
     if (media_type_ == MediaType::kVideo) {
+        // Frame rate comes from the negotiated input format (originally from DemuxNode)
+        const auto& in_fmt = input_port_->Format();
+        Rational fr = in_fmt.frame_rate();
         output_port_->SetFormat(MediaFormat::Video(
             codec_ctx_->width, codec_ctx_->height,
             PixelFormat::kYUV420P,  // Will be refined at runtime
-            Rational{stream_->avg_frame_rate.num, stream_->avg_frame_rate.den}));
+            fr));
     } else if (media_type_ == MediaType::kAudio) {
         output_port_->SetFormat(MediaFormat::Audio(
             codec_ctx_->sample_rate, codec_ctx_->ch_layout.nb_channels,
             SampleFormat::kFloat));  // Placeholder, refined at runtime
     }
 
+    bool has_hw = (graph_ && graph_->HWDevice() && media_type_ == MediaType::kVideo);
     SPDLOG_INFO("DecoderNode: opened codec '{}' ({}){}",
                 codec->name, (media_type_ == MediaType::kVideo ? "video" : "audio"),
-                hw_ctx_ ? " [HW accel]" : "");
+                has_hw ? " [HW accel]" : "");
 
     state_ = NodeState::kPrepared;
     return true;

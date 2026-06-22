@@ -39,38 +39,25 @@ enum class NodeState {
 /// Callback for Passive node output (supports 0/1/N outputs per input).
 using OutputCallback = std::function<void(MediaBuffer)>;
 
-/// Configuration parameters passed to INode::Configure().
-/// Key-value pairs with typed values for common parameter types.
-struct NodeConfig {
-    std::string file_path;              // For DemuxNode
-    int hw_accel_device_type{0};        // For DecoderNode (AVHWDeviceType)
-    std::string filter_description;     // For AVFilterNode
-    std::string codec_name;             // For EncoderNode
-    int64_t bitrate{0};                 // For EncoderNode
-    int gop_size{0};                    // For EncoderNode
-    std::string output_path;            // For MuxNode/FileSinkNode
-    std::string container_format;       // For MuxNode (e.g., "mp4")
-};
-
 /// Abstract interface for all graph processing nodes.
 ///
-/// Lifecycle: Configure → Negotiate → Prepare → Start → [Running] → Stop
-/// All methods must be called in order. State transitions are validated.
+/// Lifecycle: [construct with config] → Negotiate → Prepare → Start → [Running] → Stop
+/// Negotiate and Prepare must be called in order. State transitions are validated.
+///
+/// Configuration is node-specific (constructor params or setters), NOT part of
+/// the polymorphic interface. Only lifecycle + data flow are polymorphic.
 class INode {
   public:
     virtual ~INode() = default;
 
     // --- Lifecycle ---
 
-    /// Inject configuration parameters. Transitions: Idle → Configured.
-    virtual bool Configure(const NodeConfig& config) = 0;
-
     /// Declare/negotiate port formats with neighbors.
     /// Called by MediaGraph after all connections are made.
     virtual bool Negotiate() = 0;
 
     /// Allocate resources (codecs, surfaces, devices).
-    /// Transitions: Configured → Prepared.
+    /// Transitions: Idle/Configured → Prepared.
     virtual bool Prepare() = 0;
 
     /// Start processing (launch worker thread for Active nodes).

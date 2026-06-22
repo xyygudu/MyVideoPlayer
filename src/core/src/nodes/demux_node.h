@@ -32,11 +32,10 @@ namespace mvp::graph {
 /// - Worker thread blocks on running_ flag + seek_requested_ atomic
 class DemuxNode : public INode {
   public:
-    DemuxNode();
+    explicit DemuxNode(std::string file_path);
     ~DemuxNode() override;
 
     // --- INode interface ---
-    bool Configure(const NodeConfig& config) override;
     bool Negotiate() override;
     bool Prepare() override;
     bool Start() override;

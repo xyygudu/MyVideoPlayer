@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "graph/media_buffer.h"
+#include "graph/media_format.h"
 #include "graph/node.h"
 #include "graph/port.h"
 
@@ -16,13 +17,14 @@ extern "C" {
 }
 
 struct AVCodecContext;
-struct AVStream;
 
 namespace mvp {
 class HWAccelContext;
 }
 
 namespace mvp::graph {
+
+class MediaGraph;  // Forward declaration to avoid circular include
 
 /// Transform node: decodes compressed packets (AVPacket) into frames
 /// (MediaFrame).
@@ -45,7 +47,6 @@ class DecoderNode : public INode {
     ~DecoderNode() override;
 
     // --- INode interface ---
-    bool Configure(const NodeConfig& config) override;
     bool Negotiate() override;
     bool Prepare() override;
     bool Start() override;
@@ -70,13 +71,8 @@ class DecoderNode : public INode {
     /// Used for seek optimization.
     void SetDropUntilPts(double pts);
 
-    /// Set the AVStream* to configure the decoder from.
-    /// Must be called before Prepare(). This is needed because the codec
-    /// params come from the upstream DemuxNode's AVFormatContext.
-    void SetStream(AVStream* stream);
-
-    /// Set optional hardware acceleration context.
-    void SetHWAccel(mvp::HWAccelContext* hw_ctx);
+    /// Set graph reference for shared resource access (HW device).
+    void SetGraph(MediaGraph* graph) { graph_ = graph; }
 
   private:
     void DecodeLoop();
@@ -86,9 +82,9 @@ class DecoderNode : public INode {
     NodeState state_{NodeState::kIdle};
     std::string name_{"DecoderNode"};
 
-    // Configuration (set before Prepare)
-    AVStream* stream_{nullptr};          // Non-owning, from DemuxNode's format_ctx
-    mvp::HWAccelContext* hw_ctx_{nullptr}; // Non-owning, from external
+    // Negotiated parameters (from input port format)
+    const AVCodecParameters* negotiated_codecpar_{nullptr};
+    MediaGraph* graph_{nullptr};
 
     // FFmpeg codec state (owned, allocated in Prepare)
     AVCodecContext* codec_ctx_{nullptr};
