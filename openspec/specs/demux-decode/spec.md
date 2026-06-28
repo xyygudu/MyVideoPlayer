@@ -91,3 +91,31 @@ Demuxer SHALL 不再公开 `FormatContext()` 方法。内部需要 `AVFormatCont
 ### Requirement: Decoder drops frames before target pts
 **Reason**: 同上，SetDropUntilPts 现在是 IDecoder 接口的一部分。
 **Migration**: 参见 decoder-interface spec 中 "AVFrameDecoder drops frames before target pts" scenario。
+
+### Requirement: DemuxNode uses constructor injection for file path
+DemuxNode SHALL 通过构造函数接收文件路径 `explicit DemuxNode(std::string file_path)`，移除对 NodeConfig 的依赖。
+
+### Requirement: DecoderNode self-configures via Negotiate
+DecoderNode::Negotiate() SHALL 从 input_port_->Format().codec_params() 读取编码参数，缓存供 Prepare() 使用。移除 SetStream 和 stream_ 成员。Prepare() 使用缓存 codecpar 打开解码器。
+
+### Requirement: DecoderNode queries HW device from graph
+DecoderNode SHALL 移除 SetHWAccel 方法，Prepare() 通过 graph_->HWDevice() 查询 HW 加速上下文。
+
+### Requirement: AudioSinkNode reads params from port format
+AudioSinkNode SHALL 移除 SetStream 方法和 stream_ 成员，从 input_port_->Format() 读取 sample_rate 和 channels。
+
+### Requirement: DecoderNode Negotiate 做格式推理
+DecoderNode::Negotiate SHALL 从 EncodedFormat::codec_params 推理输出格式，不开 codec。Prepare SHALL 只剩资源分配。
+
+#### Scenario: Negotiate 算出输出格式不开 codec
+- **WHEN** DecoderNode::Negotiate 执行
+- **THEN** 从输入端口的 codec_params 构造输出 VideoFormat，未调用 avcodec_open2
+
+### Requirement: DemuxNode 实现 ISourceNode::Probe
+DemuxNode SHALL 实现 ISourceNode，提供 Probe() 返回 StreamInfo 列表。Probe SHALL 打开文件、发现流、构造 EncodedFormat。Prepare SHALL 幂等（format_ctx_ 判空守卫）。
+
+### Requirement: 节点长函数提炼至 50 行内
+DemuxNode/DecoderNode/VideoSinkNode/AudioSinkNode 的长函数 SHALL 提炼私有辅助方法，每个函数体不超过 50 行。DecodeLoop SHALL 不使用 goto。
+
+### Requirement: 节点响应 OnCommand
+DemuxNode/DecoderNode/AudioSinkNode SHALL 覆写 OnCommand 响应 kSeek：DemuxNode 重定位、DecoderNode 设 drop_until_pts、AudioSinkNode 清 SDL 缓冲。
