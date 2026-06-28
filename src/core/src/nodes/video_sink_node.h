@@ -87,8 +87,14 @@ class VideoSinkNode : public INode {
 
   private:
     void RenderLoop();
+    void SyncAndRender(MediaFrame& mf, double& last_pts,
+                       double& last_display_time);
+    void HoldLastFrameUntilStop();
     double ComputeDisplayDelay(double pts, double last_pts,
                                double last_display_time);
+    double ComputeAudioMasterDelay(double pts, double last_pts);
+    double ComputeVideoMasterDelay(double pts, double last_pts,
+                                   double last_display_time);
 
     NodeState state_{NodeState::kIdle};
 

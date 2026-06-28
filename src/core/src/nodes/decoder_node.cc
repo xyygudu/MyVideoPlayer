@@ -26,23 +26,37 @@ DecoderNode::~DecoderNode() {
 }
 
 bool DecoderNode::Negotiate() {
-    // Try to read codec parameters from the input port (new path).
-    // If input port has format with codec_params, cache for Prepare().
-    if (input_port_->IsConnected()) {
-        const MediaFormat& fmt = input_port_->Format();
-        if (fmt.codec_params()) {
-            negotiated_codecpar_ = fmt.codec_params();
-            time_base_ = {fmt.time_base().num, fmt.time_base().den};
+    // --- Pure format reasoning (no resource allocation) ---
+    // Read the upstream EncodedFormat, then derive this node's output format
+    // directly from AVCodecParameters (which carries width/height/sample_rate)
+    // WITHOUT opening the codec. Resource allocation happens in Prepare().
+    if (!input_port_->IsConnected()) {
+        SPDLOG_ERROR("DecoderNode: input port not connected");
+        return false;
+    }
+    const MediaFormat& fmt = input_port_->Format();
+    if (!fmt.IsEncoded() || !fmt.AsEncoded().codec_params) {
+        SPDLOG_ERROR("DecoderNode: input is not an encoded format with params");
+        return false;
+    }
 
-            // Determine media type from codec params
-            if (fmt.media_type() == MediaType::kVideo) {
-                media_type_ = MediaType::kVideo;
-                name_ = "DecoderNode(video)";
-            } else if (fmt.media_type() == MediaType::kAudio) {
-                media_type_ = MediaType::kAudio;
-                name_ = "DecoderNode(audio)";
-            }
-        }
+    const auto& enc = fmt.AsEncoded();
+    negotiated_codecpar_ = enc.codec_params.get();
+    time_base_ = {fmt.time_base().num, fmt.time_base().den};
+    media_type_ = fmt.media_type();
+
+    // Derive output format from codec params (no codec open).
+    // Pixel/sample format is a placeholder, refined at runtime from frames.
+    if (media_type_ == MediaType::kVideo) {
+        name_ = "DecoderNode(video)";
+        output_port_->SetFormat(MediaFormat::Video(
+            negotiated_codecpar_->width, negotiated_codecpar_->height,
+            PixelFormat::kYUV420P, enc.frame_rate));
+    } else if (media_type_ == MediaType::kAudio) {
+        name_ = "DecoderNode(audio)";
+        output_port_->SetFormat(MediaFormat::Audio(
+            negotiated_codecpar_->sample_rate,
+            negotiated_codecpar_->ch_layout.nb_channels, SampleFormat::kFloat));
     }
     return true;
 }
@@ -57,76 +71,66 @@ bool DecoderNode::Prepare() {
         return false;
     }
 
-    // Determine codec parameters source: from port negotiation
-    const AVCodecParameters* codecpar = negotiated_codecpar_;
-    if (!codecpar) {
+    if (!negotiated_codecpar_) {
         SPDLOG_ERROR("DecoderNode: no codec params from negotiation");
         state_ = NodeState::kError;
         return false;
     }
 
-    // Find codec
-    const AVCodec* codec = avcodec_find_decoder(codecpar->codec_id);
-    if (!codec) {
-        SPDLOG_ERROR("DecoderNode: codec not found for id {}",
-                     static_cast<int>(codecpar->codec_id));
+    if (!FindAndOpenCodec(negotiated_codecpar_)) {
         state_ = NodeState::kError;
         return false;
     }
 
-    // Allocate context
+    state_ = NodeState::kPrepared;
+    return true;
+}
+
+bool DecoderNode::FindAndOpenCodec(const AVCodecParameters* codecpar) {
+    const AVCodec* codec = avcodec_find_decoder(codecpar->codec_id);
+    if (!codec) {
+        SPDLOG_ERROR("DecoderNode: codec not found for id {}",
+                     static_cast<int>(codecpar->codec_id));
+        return false;
+    }
+
     codec_ctx_ = avcodec_alloc_context3(codec);
     if (!codec_ctx_) {
-        state_ = NodeState::kError;
         return false;
     }
 
     if (avcodec_parameters_to_context(codec_ctx_, codecpar) < 0) {
         SPDLOG_ERROR("DecoderNode: failed to copy codec params");
         avcodec_free_context(&codec_ctx_);
-        state_ = NodeState::kError;
         return false;
     }
 
-    // Hardware acceleration: query from graph shared resource
-    if (graph_ && graph_->HWDevice() && media_type_ == MediaType::kVideo) {
-        auto* hw = graph_->HWDevice().get();
-        if (hw->DeviceRef()) {
-            codec_ctx_->opaque = hw;
-            codec_ctx_->get_format = mvp::HWAccelContext::GetFormat;
-            codec_ctx_->hw_device_ctx = av_buffer_ref(hw->DeviceRef());
-        }
-    }
+    ConfigureHWAccel();
 
     if (avcodec_open2(codec_ctx_, codec, nullptr) < 0) {
         SPDLOG_ERROR("DecoderNode: failed to open codec '{}'", codec->name);
         avcodec_free_context(&codec_ctx_);
-        state_ = NodeState::kError;
         return false;
     }
 
-    // Set output port format
-    if (media_type_ == MediaType::kVideo) {
-        // Frame rate comes from the negotiated input format (originally from DemuxNode)
-        const auto& in_fmt = input_port_->Format();
-        Rational fr = in_fmt.frame_rate();
-        output_port_->SetFormat(MediaFormat::Video(
-            codec_ctx_->width, codec_ctx_->height,
-            PixelFormat::kYUV420P,  // Will be refined at runtime
-            fr));
-    } else if (media_type_ == MediaType::kAudio) {
-        output_port_->SetFormat(MediaFormat::Audio(
-            codec_ctx_->sample_rate, codec_ctx_->ch_layout.nb_channels,
-            SampleFormat::kFloat));  // Placeholder, refined at runtime
-    }
-
-    bool has_hw = (graph_ && graph_->HWDevice() && media_type_ == MediaType::kVideo);
-    SPDLOG_INFO("DecoderNode: opened codec '{}' ({}){}",
-                codec->name, (media_type_ == MediaType::kVideo ? "video" : "audio"),
+    bool has_hw = (codec_ctx_->hw_device_ctx != nullptr);
+    SPDLOG_INFO("DecoderNode: opened codec '{}' ({}){}", codec->name,
+                (media_type_ == MediaType::kVideo ? "video" : "audio"),
                 has_hw ? " [HW accel]" : "");
-
-    state_ = NodeState::kPrepared;
     return true;
+}
+
+void DecoderNode::ConfigureHWAccel() {
+    // Query HW device from graph shared resource (video only).
+    if (!graph_ || !graph_->HWDevice() || media_type_ != MediaType::kVideo) {
+        return;
+    }
+    auto* hw = graph_->HWDevice().get();
+    if (hw->DeviceRef()) {
+        codec_ctx_->opaque = hw;
+        codec_ctx_->get_format = mvp::HWAccelContext::GetFormat;
+        codec_ctx_->hw_device_ctx = av_buffer_ref(hw->DeviceRef());
+    }
 }
 
 bool DecoderNode::Start() {
@@ -170,6 +174,14 @@ void DecoderNode::SetDropUntilPts(double pts) {
     drop_until_pts_.store(pts, std::memory_order_release);
     if (codec_ctx_ && pts > 0) {
         codec_ctx_->skip_frame = AVDISCARD_NONREF;
+    }
+}
+
+void DecoderNode::OnCommand(const Command& cmd) {
+    // On seek, drop decoded frames until the target PTS (fast catch-up).
+    // The codec flush itself happens on the decode thread via serial change.
+    if (cmd.type == CommandType::kSeek) {
+        SetDropUntilPts(cmd.position);
     }
 }
 
@@ -226,76 +238,65 @@ void DecoderNode::DrainFrames() {
     }
 }
 
+void DecoderNode::MaybeFlushOnSerialChange(int serial) {
+    // After a seek, Link::Flush() increments the serial. When the serial
+    // changes, flush the codec on THIS thread (safe) to clear stale
+    // reference frames before decoding the new (post-seek) packets.
+    if (serial == last_serial_) {
+        return;
+    }
+    avcodec_flush_buffers(codec_ctx_);
+    last_serial_ = serial;
+    if (drop_until_pts_.load(std::memory_order_acquire) > 0.0) {
+        codec_ctx_->skip_frame = AVDISCARD_NONREF;
+    }
+}
+
+void DecoderNode::HandleEos() {
+    // Drain remaining frames, then propagate EOS downstream.
+    avcodec_send_packet(codec_ctx_, nullptr);
+    DrainFrames();
+    output_port_->Push(MediaBuffer::MakeEos(media_type_));
+}
+
+void DecoderNode::ProcessPacket(MediaBuffer& buf) {
+    if (!buf.IsPacket()) {
+        return;  // Unexpected buffer type
+    }
+    AVPacketPtr& pkt = buf.AsPacket();
+    if (!pkt.get() || !pkt->data) {
+        // Null/empty packet — treat as a flush request.
+        avcodec_send_packet(codec_ctx_, nullptr);
+        DrainFrames();
+        return;
+    }
+    int ret = avcodec_send_packet(codec_ctx_, pkt.get());
+    if (ret < 0 && ret != AVERROR(EAGAIN)) {
+        SPDLOG_WARN("DecoderNode: send_packet error {}", ret);
+        return;
+    }
+    DrainFrames();
+}
+
 void DecoderNode::DecodeLoop() {
     while (running_.load(std::memory_order_relaxed)) {
-        // Pull packet from input link
         auto opt_buf = input_port_->Pull();
         if (!opt_buf) {
             break;  // Link aborted
         }
-
         MediaBuffer& buf = *opt_buf;
 
-        // --- Serial-based flush detection ---
-        // After a seek, Link::Flush() increments the serial. New packets
-        // carry the new serial. When we detect a serial change, flush the
-        // codec on THIS thread (safe) to clear stale reference frames.
-        int buf_serial = buf.serial();
-        if (buf_serial != last_serial_) {
-            avcodec_flush_buffers(codec_ctx_);
-            last_serial_ = buf_serial;
+        MaybeFlushOnSerialChange(buf.serial());
 
-            // Re-apply skip_frame if drop target is active
-            if (drop_until_pts_.load(std::memory_order_acquire) > 0.0) {
-                codec_ctx_->skip_frame = AVDISCARD_NONREF;
-            }
-        }
-
-        // EOS → drain codec and propagate
         if (HasFlag(buf.flags(), BufferFlags::kEos)) {
-            avcodec_send_packet(codec_ctx_, nullptr);
-            DrainFrames();
-            output_port_->Push(MediaBuffer::MakeEos(media_type_));
-
-            // Wait for either stop or new data (after a seek)
-            while (running_.load(std::memory_order_relaxed)) {
-                auto next = input_port_->Pull();
-                if (!next) break;
-                // Got new data — update serial tracking and process
-                buf = std::move(*next);
-                buf_serial = buf.serial();
-                if (buf_serial != last_serial_) {
-                    avcodec_flush_buffers(codec_ctx_);
-                    last_serial_ = buf_serial;
-                    if (drop_until_pts_.load(std::memory_order_acquire) > 0.0) {
-                        codec_ctx_->skip_frame = AVDISCARD_NONREF;
-                    }
-                }
-                goto process_packet;
-            }
-            break;
-        }
-
-    process_packet:
-        if (!buf.IsPacket()) {
-            continue;  // Unexpected buffer type
-        }
-
-        AVPacketPtr& pkt = buf.AsPacket();
-        if (!pkt.get() || !pkt->data) {
-            // Null/empty packet — treat as EOS signal
-            avcodec_send_packet(codec_ctx_, nullptr);
-            DrainFrames();
+            HandleEos();
+            // After EOS, loop back to a blocking Pull. New data only arrives
+            // after a seek (which carries a new serial, handled above). The
+            // next iteration processes it normally via a clean control flow.
             continue;
         }
 
-        int ret = avcodec_send_packet(codec_ctx_, pkt.get());
-        if (ret < 0 && ret != AVERROR(EAGAIN)) {
-            SPDLOG_WARN("DecoderNode: send_packet error {}", ret);
-            continue;
-        }
-
-        DrainFrames();
+        ProcessPacket(buf);
     }
 }
 

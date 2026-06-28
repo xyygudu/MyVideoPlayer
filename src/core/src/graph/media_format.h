@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <memory>
+#include <variant>
 #include <vector>
 
 extern "C" {
@@ -17,68 +18,78 @@ extern "C" {
 
 namespace mvp::graph {
 
+/// Compressed stream format (Demux -> Decoder link).
+/// Carries the full codec parameters needed to open a decoder.
+struct EncodedFormat {
+    int codec_id{0};
+    Rational frame_rate;  // Nominal video fps (0/1 for audio); not in codecpar
+    std::shared_ptr<AVCodecParameters> codec_params;  // Deep copy, shared
+};
+
+/// Decoded video frame format (Decoder -> Sink/Filter link).
+struct VideoFormat {
+    int width{0};
+    int height{0};
+    PixelFormat pixel_format{};
+    Rational frame_rate;
+};
+
+/// Decoded audio frame format (Decoder -> Sink/Filter link).
+struct AudioFormat {
+    int sample_rate{0};
+    int channels{0};
+    SampleFormat sample_format{};
+};
+
 /// Describes the negotiated format on a port connection.
-/// Uses project-local enums — no FFmpeg types exposed.
+///
+/// Common fields (media_type, time_base) live outside; type-specific payload
+/// is a closed-set variant. Encoded vs decoded are distinct alternatives, so
+/// codec_params only exists on EncodedFormat (no fat-struct null slots).
 class MediaFormat {
   public:
     MediaFormat() = default;
 
-    // --- Video format ---
+    // --- Factories ---
     static MediaFormat Video(int width, int height, PixelFormat fmt,
-                            Rational frame_rate = {});
-
-    // --- Audio format ---
-    static MediaFormat Audio(int sample_rate, int channels,
-                            SampleFormat fmt);
-
-    // --- Packet (compressed) format ---
-    static MediaFormat Packet(int codec_id, Rational time_base);
-
-    // --- Full stream format (from DemuxNode, carries codec params copy) ---
+                             Rational frame_rate = {});
+    static MediaFormat Audio(int sample_rate, int channels, SampleFormat fmt);
+    /// Compressed stream format from a demuxer (deep-copies codecpar).
     static MediaFormat FromStream(int codec_id, Rational time_base,
                                   Rational frame_rate,
                                   const AVCodecParameters* codecpar,
                                   MediaType type);
 
+    // --- Common fields ---
     MediaType media_type() const { return media_type_; }
-    bool IsVideo() const;
-    bool IsAudio() const;
-    bool IsPacket() const;
-
-    // Video accessors
-    int width() const { return width_; }
-    int height() const { return height_; }
-    PixelFormat pixel_format() const { return pixel_format_; }
-    Rational frame_rate() const { return frame_rate_; }
-
-    // Audio accessors
-    int sample_rate() const { return sample_rate_; }
-    int channels() const { return channels_; }
-    SampleFormat sample_format() const { return sample_format_; }
-
-    // Packet accessors
-    int codec_id() const { return codec_id_; }
     Rational time_base() const { return time_base_; }
 
-    // Codec parameters (shared copy, may be null for raw frame formats)
-    const AVCodecParameters* codec_params() const { return codec_params_.get(); }
+    // --- Type-safe variant access ---
+    bool IsEncoded() const {
+        return std::holds_alternative<EncodedFormat>(payload_);
+    }
+    bool IsVideo() const {
+        return std::holds_alternative<VideoFormat>(payload_);
+    }
+    bool IsAudio() const {
+        return std::holds_alternative<AudioFormat>(payload_);
+    }
+
+    const EncodedFormat& AsEncoded() const {
+        return std::get<EncodedFormat>(payload_);
+    }
+    const VideoFormat& AsVideo() const {
+        return std::get<VideoFormat>(payload_);
+    }
+    const AudioFormat& AsAudio() const {
+        return std::get<AudioFormat>(payload_);
+    }
 
   private:
     MediaType media_type_{};
-    // Video
-    int width_{0};
-    int height_{0};
-    PixelFormat pixel_format_{};
-    Rational frame_rate_;
-    // Audio
-    int sample_rate_{0};
-    int channels_{0};
-    SampleFormat sample_format_{};
-    // Packet
-    int codec_id_{0};
     Rational time_base_;
-    // Codec parameters (deep copy, shared ownership for cheap MediaFormat copies)
-    std::shared_ptr<AVCodecParameters> codec_params_;
+    std::variant<std::monostate, EncodedFormat, VideoFormat, AudioFormat>
+        payload_;
 };
 
 /// Describes the range of formats a port can accept or produce.

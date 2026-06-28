@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 
+#include "graph/graph_command.h"
 #include "graph/node.h"
 #include "graph/port.h"
 
@@ -86,6 +87,19 @@ class MediaGraph {
 
     /// Broadcast flush to all nodes and links (seek).
     void Flush();
+
+    // --- Control (high-level operations, decoupled from topology) ---
+
+    /// Seek to a position: flush all links, then broadcast a seek command
+    /// so each node resets its own internal state and repositions.
+    void Seek(double position);
+
+    /// Pause or resume playback (cascades to all nodes).
+    void SetPaused(bool paused);
+
+    /// Dispatch a command to all nodes in topological order. Nodes that do
+    /// not handle the command type ignore it (default no-op).
+    void SendCommand(const Command& cmd);
 
     // --- State & Clock ---
 

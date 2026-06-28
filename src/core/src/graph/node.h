@@ -7,11 +7,13 @@
 #include <vector>
 
 #include "graph/media_buffer.h"
+#include "graph/media_format.h"
 
 namespace mvp::graph {
 
 class InputPort;
 class OutputPort;
+struct Command;
 
 /// Categorizes node's role in the graph.
 enum class NodeType {
@@ -71,6 +73,16 @@ class INode {
     /// Clear internal state (buffers, decoder state) on seek.
     virtual void Flush() = 0;
 
+    // --- Control ---
+
+    /// Respond to a high-level control command (e.g. seek). Default no-op;
+    /// nodes override to react (mechanism lives in the node, not the caller).
+    virtual void OnCommand(const Command& cmd) { (void)cmd; }
+
+    /// Pause or resume the node. Default no-op; sink nodes override to
+    /// freeze/resume output. Backpressure naturally propagates upstream.
+    virtual void SetPaused(bool paused) { (void)paused; }
+
     // --- Processing (Transform/Sink nodes) ---
 
     /// Process a single input buffer. Called synchronously for Passive nodes
@@ -95,6 +107,25 @@ class INode {
 
     /// Human-readable name for logging.
     virtual std::string Name() const = 0;
+};
+
+/// Stream descriptor produced by source probing.
+struct StreamInfo {
+    int index{-1};
+    MediaType type{};
+    MediaFormat format;    // EncodedFormat carrying a codec_params copy
+    double duration{0.0};  // Source duration in seconds
+};
+
+/// A source node can probe its input to discover stream topology BEFORE the
+/// full graph is built. This formalizes the inherent "inspect source first"
+/// constraint (topology depends on source content) as an explicit phase,
+/// distinct from the graph's unified Negotiate/Prepare lifecycle.
+class ISourceNode : public INode {
+  public:
+    /// Open the source and return descriptors for all usable streams.
+    /// Idempotent: repeated calls do not re-open the source.
+    virtual std::vector<StreamInfo> Probe() = 0;
 };
 
 }  // namespace mvp::graph

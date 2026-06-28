@@ -7,6 +7,7 @@ extern "C" {
 }
 #include <spdlog/spdlog.h>
 
+#include "graph/graph_command.h"
 #include "graph/media_format.h"
 
 namespace mvp::graph {
@@ -20,9 +21,38 @@ DemuxNode::~DemuxNode() {
 }
 
 bool DemuxNode::Negotiate() {
-    // Source node: format is determined after Prepare opens the file.
-    // Negotiate is a no-op for Source nodes; ports get their format in Prepare.
+    // Source node: format is determined when the file is opened (Probe or
+    // Prepare). Negotiate is a no-op; downstream reads the port formats.
     return true;
+}
+
+std::vector<StreamInfo> DemuxNode::Probe() {
+    // Discover stream topology before the full graph is built.
+    if (!OpenFile()) {
+        return {};
+    }
+    FindStreams();
+
+    std::vector<StreamInfo> infos;
+    double dur = Duration();
+    auto add = [&](int index, MediaType type, Rational fr) {
+        StreamInfo info;
+        info.index = index;
+        info.type = type;
+        info.format = MakeStreamFormat(index, type, fr);
+        info.duration = dur;
+        infos.push_back(std::move(info));
+    };
+
+    if (video_stream_index_ >= 0) {
+        auto* s = format_ctx_->streams[video_stream_index_];
+        add(video_stream_index_, MediaType::kVideo,
+            {s->avg_frame_rate.num, s->avg_frame_rate.den});
+    }
+    if (audio_stream_index_ >= 0) {
+        add(audio_stream_index_, MediaType::kAudio, {0, 1});
+    }
+    return infos;
 }
 
 bool DemuxNode::Prepare() {
@@ -35,26 +65,50 @@ bool DemuxNode::Prepare() {
         return false;
     }
 
-    // Open file
-    if (avformat_open_input(&format_ctx_, file_path_.c_str(), nullptr,
-                            nullptr) < 0) {
-        SPDLOG_ERROR("DemuxNode: failed to open '{}'", file_path_);
+    if (!OpenFile()) {  // Idempotent: skips if Probe already opened the file
         state_ = NodeState::kError;
         return false;
     }
 
-    if (avformat_find_stream_info(format_ctx_, nullptr) < 0) {
-        SPDLOG_ERROR("DemuxNode: failed to find stream info for '{}'",
-                     file_path_);
+    FindStreams();
+    if (audio_stream_index_ < 0 && video_stream_index_ < 0) {
+        SPDLOG_ERROR("DemuxNode: no audio or video streams in '{}'", file_path_);
         avformat_close_input(&format_ctx_);
         state_ = NodeState::kError;
         return false;
     }
 
-    // Identify best audio/video streams
+    CreateOutputPorts();
+
+    SPDLOG_INFO(
+        "DemuxNode: opened '{}' — duration {:.2f}s, video={}, audio={}",
+        file_path_, Duration(), video_stream_index_, audio_stream_index_);
+
+    state_ = NodeState::kPrepared;
+    return true;
+}
+
+bool DemuxNode::OpenFile() {
+    if (format_ctx_) {
+        return true;  // Already open (e.g. by an earlier Probe call)
+    }
+    if (avformat_open_input(&format_ctx_, file_path_.c_str(), nullptr,
+                            nullptr) < 0) {
+        SPDLOG_ERROR("DemuxNode: failed to open '{}'", file_path_);
+        return false;
+    }
+    if (avformat_find_stream_info(format_ctx_, nullptr) < 0) {
+        SPDLOG_ERROR("DemuxNode: failed to find stream info for '{}'",
+                     file_path_);
+        avformat_close_input(&format_ctx_);
+        return false;
+    }
+    return true;
+}
+
+void DemuxNode::FindStreams() {
     audio_stream_index_ = -1;
     video_stream_index_ = -1;
-
     for (unsigned int i = 0; i < format_ctx_->nb_streams; ++i) {
         auto* codecpar = format_ctx_->streams[i]->codecpar;
         if (codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
@@ -65,47 +119,34 @@ bool DemuxNode::Prepare() {
             audio_stream_index_ = static_cast<int>(i);
         }
     }
+}
 
-    if (audio_stream_index_ < 0 && video_stream_index_ < 0) {
-        SPDLOG_ERROR("DemuxNode: no audio or video streams in '{}'",
-                     file_path_);
-        avformat_close_input(&format_ctx_);
-        state_ = NodeState::kError;
-        return false;
-    }
+MediaFormat DemuxNode::MakeStreamFormat(int stream_index, MediaType type,
+                                        Rational frame_rate) const {
+    auto* stream = format_ctx_->streams[stream_index];
+    Rational tb{stream->time_base.num, stream->time_base.den};
+    return MediaFormat::FromStream(stream->codecpar->codec_id, tb, frame_rate,
+                                   stream->codecpar, type);
+}
 
-    // Create output ports — one per selected stream.
-    // We only create ports for audio and video streams we'll use.
+void DemuxNode::CreateOutputPorts() {
+    // One output port per selected stream: video first (if any), then audio.
     output_ports_.clear();
 
+    auto make_port = [this](int stream_index, MediaType type, Rational fr) {
+        auto port = std::make_unique<OutputPort>(this);
+        port->SetFormat(MakeStreamFormat(stream_index, type, fr));
+        output_ports_.push_back(std::move(port));
+    };
+
     if (video_stream_index_ >= 0) {
-        auto port = std::make_unique<OutputPort>(this);
-        auto* stream = format_ctx_->streams[video_stream_index_];
-        Rational tb{stream->time_base.num, stream->time_base.den};
-        Rational fr{stream->avg_frame_rate.num, stream->avg_frame_rate.den};
-        port->SetFormat(MediaFormat::FromStream(
-            stream->codecpar->codec_id, tb, fr,
-            stream->codecpar, MediaType::kVideo));
-        output_ports_.push_back(std::move(port));
+        auto* s = format_ctx_->streams[video_stream_index_];
+        make_port(video_stream_index_, MediaType::kVideo,
+                  {s->avg_frame_rate.num, s->avg_frame_rate.den});
     }
-
     if (audio_stream_index_ >= 0) {
-        auto port = std::make_unique<OutputPort>(this);
-        auto* stream = format_ctx_->streams[audio_stream_index_];
-        Rational tb{stream->time_base.num, stream->time_base.den};
-        Rational fr{0, 1};
-        port->SetFormat(MediaFormat::FromStream(
-            stream->codecpar->codec_id, tb, fr,
-            stream->codecpar, MediaType::kAudio));
-        output_ports_.push_back(std::move(port));
+        make_port(audio_stream_index_, MediaType::kAudio, {0, 1});
     }
-
-    SPDLOG_INFO(
-        "DemuxNode: opened '{}' — duration {:.2f}s, video={}, audio={}",
-        file_path_, Duration(), video_stream_index_, audio_stream_index_);
-
-    state_ = NodeState::kPrepared;
-    return true;
 }
 
 bool DemuxNode::Start() {
@@ -146,6 +187,12 @@ void DemuxNode::RequestSeek(double position_seconds) {
     seek_requested_.store(true, std::memory_order_release);
 }
 
+void DemuxNode::OnCommand(const Command& cmd) {
+    if (cmd.type == CommandType::kSeek) {
+        RequestSeek(cmd.position);
+    }
+}
+
 double DemuxNode::Duration() const {
     if (!format_ctx_ || format_ctx_->duration == AV_NOPTS_VALUE) {
         return 0.0;
@@ -172,6 +219,61 @@ void DemuxNode::CloseFormatContext() {
     output_ports_.clear();
 }
 
+bool DemuxNode::HandlePendingSeek() {
+    if (!seek_requested_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    double pos = seek_position_.load(std::memory_order_acquire);
+    int64_t timestamp = static_cast<int64_t>(pos * AV_TIME_BASE);
+    av_seek_frame(format_ctx_, -1, timestamp, AVSEEK_FLAG_BACKWARD);
+    seek_requested_.store(false, std::memory_order_release);
+    SPDLOG_DEBUG("DemuxNode: seek to {:.2f}s", pos);
+    return true;
+}
+
+void DemuxNode::EmitEos(OutputPort* video_port, OutputPort* audio_port) {
+    if (video_port && video_port->IsConnected()) {
+        video_port->Push(MediaBuffer::MakeEos(MediaType::kVideo));
+    }
+    if (audio_port && audio_port->IsConnected()) {
+        audio_port->Push(MediaBuffer::MakeEos(MediaType::kAudio));
+    }
+}
+
+void DemuxNode::RoutePacket(AVPacketPtr pkt, OutputPort* video_port,
+                            OutputPort* audio_port) {
+    int stream_index = pkt->stream_index;
+    OutputPort* target = nullptr;
+    MediaType type = MediaType::kUnknown;
+    if (stream_index == video_stream_index_ && video_port) {
+        target = video_port;
+        type = MediaType::kVideo;
+    } else if (stream_index == audio_stream_index_ && audio_port) {
+        target = audio_port;
+        type = MediaType::kAudio;
+    }
+    if (!target || !target->IsConnected()) {
+        return;
+    }
+
+    auto* stream = format_ctx_->streams[stream_index];
+    double pts_sec = (pkt->pts != AV_NOPTS_VALUE)
+                         ? pkt->pts * av_q2d(stream->time_base)
+                         : 0.0;
+    Timestamp ts;
+    ts.pts = pts_sec;
+    ts.dts = (pkt->dts != AV_NOPTS_VALUE) ? pkt->dts * av_q2d(stream->time_base)
+                                          : pts_sec;
+    ts.duration = pkt->duration * av_q2d(stream->time_base);
+    ts.time_base = {stream->time_base.num, stream->time_base.den};
+
+    BufferFlags flags = BufferFlags::kNone;
+    if (pkt->flags & AV_PKT_FLAG_KEY) {
+        flags = flags | BufferFlags::kKeyFrame;
+    }
+    target->Push(MediaBuffer(std::move(pkt), type, ts, flags));
+}
+
 void DemuxNode::DemuxLoop() {
     // Port index mapping: video port is always [0] if exists, audio follows.
     OutputPort* video_port = nullptr;
@@ -185,34 +287,18 @@ void DemuxNode::DemuxLoop() {
     }
 
     while (running_.load(std::memory_order_relaxed)) {
-        // Handle seek
-        if (seek_requested_.load(std::memory_order_acquire)) {
-            double pos = seek_position_.load(std::memory_order_acquire);
-            int64_t timestamp = static_cast<int64_t>(pos * AV_TIME_BASE);
-            av_seek_frame(format_ctx_, -1, timestamp, AVSEEK_FLAG_BACKWARD);
-            seek_requested_.store(false, std::memory_order_release);
-            SPDLOG_DEBUG("DemuxNode: seek to {:.2f}s", pos);
-        }
+        HandlePendingSeek();
 
         AVPacketPtr pkt;
         int ret = av_read_frame(format_ctx_, pkt.get());
 
         if (ret < 0) {
             if (ret == AVERROR_EOF || avio_feof(format_ctx_->pb)) {
-                // Send EOS to each connected output port.
-                if (video_port && video_port->IsConnected()) {
-                    video_port->Push(
-                        MediaBuffer::MakeEos(MediaType::kVideo));
-                }
-                if (audio_port && audio_port->IsConnected()) {
-                    audio_port->Push(
-                        MediaBuffer::MakeEos(MediaType::kAudio));
-                }
+                EmitEos(video_port, audio_port);
             } else {
                 SPDLOG_WARN("DemuxNode: av_read_frame error {}", ret);
             }
-
-            // Wait for seek or stop.
+            // Wait for a seek request or stop.
             while (running_.load(std::memory_order_relaxed) &&
                    !seek_requested_.load(std::memory_order_relaxed)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -220,41 +306,7 @@ void DemuxNode::DemuxLoop() {
             continue;
         }
 
-        // Route packet to appropriate port.
-        int stream_index = pkt->stream_index;
-        OutputPort* target = nullptr;
-        MediaType type = MediaType::kUnknown;
-
-        if (stream_index == video_stream_index_ && video_port) {
-            target = video_port;
-            type = MediaType::kVideo;
-        } else if (stream_index == audio_stream_index_ && audio_port) {
-            target = audio_port;
-            type = MediaType::kAudio;
-        }
-
-        if (target && target->IsConnected()) {
-            auto* stream = format_ctx_->streams[stream_index];
-            double pts_sec = (pkt->pts != AV_NOPTS_VALUE)
-                                 ? pkt->pts * av_q2d(stream->time_base)
-                                 : 0.0;
-
-            Timestamp ts;
-            ts.pts = pts_sec;
-            ts.dts = (pkt->dts != AV_NOPTS_VALUE)
-                         ? pkt->dts * av_q2d(stream->time_base)
-                         : pts_sec;
-            ts.duration = pkt->duration * av_q2d(stream->time_base);
-            ts.time_base = {stream->time_base.num, stream->time_base.den};
-
-            BufferFlags flags = BufferFlags::kNone;
-            if (pkt->flags & AV_PKT_FLAG_KEY) {
-                flags = flags | BufferFlags::kKeyFrame;
-            }
-
-            MediaBuffer buf(std::move(pkt), type, ts, flags);
-            target->Push(std::move(buf));
-        }
+        RoutePacket(std::move(pkt), video_port, audio_port);
     }
 }
 

@@ -49,6 +49,8 @@ class AudioSinkNode : public INode {
     bool Start() override;
     void Stop() override;
     void Flush() override;
+    void OnCommand(const Command& cmd) override;
+    void SetPaused(bool paused) override;
 
     void Process(MediaBuffer, OutputCallback) override {}
 
@@ -68,15 +70,21 @@ class AudioSinkNode : public INode {
     /// Set graph reference for EOS reporting.
     void SetGraph(MediaGraph* graph) { graph_ = graph; }
 
-    /// Pause/resume audio playback.
-    void SetPaused(bool paused);
-
     /// Clear SDL audio buffer (used on seek).
     void FlushSdlBuffer();
 
   private:
     void AudioLoop();
     void CloseDevice();
+
+    // Prepare helpers
+    bool ReadAudioParams();
+    bool OpenSdlDevice();
+
+    // AudioLoop helpers
+    bool ShouldThrottle() const;
+    void ConvertAndFeed(struct AVFrame* frame);
+    void DrainAndReportEos();
 
     NodeState state_{NodeState::kIdle};
 
@@ -91,6 +99,9 @@ class AudioSinkNode : public INode {
     ::SDL_AudioStream* sdl_stream_{nullptr};
     int sample_rate_{0};
     int channels_{0};
+
+    // Resampler (lazily created in AudioLoop, owned by audio thread)
+    SwrContext* swr_ctx_{nullptr};
 
     // Worker thread
     std::thread audio_thread_;

@@ -172,6 +172,27 @@ void MediaGraph::Flush() {
     }
 }
 
+void MediaGraph::SendCommand(const Command& cmd) {
+    // Dispatch in topological order; nodes filter by command type.
+    const auto& order = topo_order_.empty() ? node_ptrs_ : topo_order_;
+    for (auto* node : order) {
+        node->OnCommand(cmd);
+    }
+}
+
+void MediaGraph::Seek(double position) {
+    // 1. Clear all link queues (drop in-flight buffers, bump serial).
+    Flush();
+    // 2. Broadcast seek so each node resets its own state and repositions.
+    SendCommand({CommandType::kSeek, position});
+}
+
+void MediaGraph::SetPaused(bool paused) {
+    for (auto* node : node_ptrs_) {
+        node->SetPaused(paused);
+    }
+}
+
 void MediaGraph::ReportEvent(GraphEvent event) {
     if (event == GraphEvent::kEos) {
         state_ = GraphState::kFinished;

@@ -13,6 +13,7 @@ extern "C" {
 #include <spdlog/spdlog.h>
 
 #include "clock.h"
+#include "graph/graph_command.h"
 #include "graph/media_format.h"
 #include "media_frame.h"
 
@@ -44,31 +45,40 @@ bool AudioSinkNode::Prepare() {
         return false;
     }
 
-    // Get audio parameters from input port format.
-    // Decoder output is a frame format (sample_rate/channels fields),
-    // NOT a packet format (codec_params). Use MediaFormat accessors directly.
-    const auto& fmt = input_port_->Format();
-    if (fmt.sample_rate() > 0 && fmt.channels() > 0) {
-        sample_rate_ = fmt.sample_rate();
-        channels_ = fmt.channels();
-    } else if (fmt.codec_params()) {
-        // Fallback: raw codec params (e.g. direct DemuxNode→Sink without decoder)
-        sample_rate_ = fmt.codec_params()->sample_rate;
-        channels_ = fmt.codec_params()->ch_layout.nb_channels;
-    } else {
-        SPDLOG_ERROR("AudioSinkNode: no audio params from port format "
-                     "(sample_rate={}, channels={}, codec_params={})",
-                     fmt.sample_rate(), fmt.channels(),
-                     fmt.codec_params() ? "valid" : "null");
+    if (!ReadAudioParams() || !OpenSdlDevice()) {
         state_ = NodeState::kError;
         return false;
     }
 
-    // Initialize SDL audio
+    SPDLOG_INFO("AudioSinkNode: opened (rate={}, channels={})", sample_rate_,
+                channels_);
+    state_ = NodeState::kPrepared;
+    return true;
+}
+
+bool AudioSinkNode::ReadAudioParams() {
+    // Audio parameters come from the input port's decoded AudioFormat.
+    const auto& fmt = input_port_->Format();
+    if (fmt.IsAudio()) {
+        sample_rate_ = fmt.AsAudio().sample_rate;
+        channels_ = fmt.AsAudio().channels;
+        return true;
+    }
+    // Fallback: direct DemuxNode->Sink without decoder (rare).
+    if (fmt.IsEncoded() && fmt.AsEncoded().codec_params) {
+        const auto* cp = fmt.AsEncoded().codec_params.get();
+        sample_rate_ = cp->sample_rate;
+        channels_ = cp->ch_layout.nb_channels;
+        return true;
+    }
+    SPDLOG_ERROR("AudioSinkNode: no audio params from input port format");
+    return false;
+}
+
+bool AudioSinkNode::OpenSdlDevice() {
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
         SPDLOG_ERROR("AudioSinkNode: SDL_InitSubSystem failed: {}",
                      SDL_GetError());
-        state_ = NodeState::kError;
         return false;
     }
 
@@ -82,13 +92,8 @@ bool AudioSinkNode::Prepare() {
     if (!sdl_stream_) {
         SPDLOG_ERROR("AudioSinkNode: SDL_OpenAudioDeviceStream failed: {}",
                      SDL_GetError());
-        state_ = NodeState::kError;
         return false;
     }
-
-    SPDLOG_INFO("AudioSinkNode: opened (rate={}, channels={})",
-                sample_rate_, channels_);
-    state_ = NodeState::kPrepared;
     return true;
 }
 
@@ -136,6 +141,12 @@ void AudioSinkNode::FlushSdlBuffer() {
     }
 }
 
+void AudioSinkNode::OnCommand(const Command& cmd) {
+    if (cmd.type == CommandType::kSeek) {
+        FlushSdlBuffer();
+    }
+}
+
 std::vector<InputPort*> AudioSinkNode::Inputs() {
     return {input_port_.get()};
 }
@@ -148,93 +159,91 @@ void AudioSinkNode::CloseDevice() {
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }
 
+bool AudioSinkNode::ShouldThrottle() const {
+    if (paused_.load(std::memory_order_relaxed)) {
+        return true;
+    }
+    // Back-pressure: keep at most ~100ms of audio buffered in SDL.
+    int queued = SDL_GetAudioStreamQueued(sdl_stream_);
+    int target_bytes = sample_rate_ * channels_ * 2 / 10;  // 100ms of S16
+    return queued > target_bytes;
+}
+
+void AudioSinkNode::ConvertAndFeed(AVFrame* frame) {
+    int out_samples = frame->nb_samples;
+    int out_buffer_size = out_samples * channels_ * 2;  // S16 = 2 bytes/sample
+
+    if (frame->format == AV_SAMPLE_FMT_S16) {
+        SDL_PutAudioStreamData(sdl_stream_, frame->data[0], out_buffer_size);
+        return;
+    }
+
+    // Lazy-init resampler (owned by this audio thread)
+    if (!swr_ctx_) {
+        AVChannelLayout out_layout;
+        av_channel_layout_default(&out_layout, channels_);
+        swr_alloc_set_opts2(&swr_ctx_, &out_layout, AV_SAMPLE_FMT_S16,
+                            sample_rate_, &frame->ch_layout,
+                            static_cast<AVSampleFormat>(frame->format),
+                            frame->sample_rate, 0, nullptr);
+        swr_init(swr_ctx_);
+        av_channel_layout_uninit(&out_layout);
+    }
+
+    uint8_t* out_buf = static_cast<uint8_t*>(av_malloc(out_buffer_size));
+    uint8_t* out_planes[] = {out_buf};
+    swr_convert(swr_ctx_, out_planes, out_samples,
+                const_cast<const uint8_t**>(frame->data), frame->nb_samples);
+    SDL_PutAudioStreamData(sdl_stream_, out_buf, out_buffer_size);
+    av_free(out_buf);
+}
+
+void AudioSinkNode::DrainAndReportEos() {
+    // Wait until SDL finishes playing buffered audio, then report EOS.
+    while (running_.load(std::memory_order_relaxed) &&
+           SDL_GetAudioStreamQueued(sdl_stream_) > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (graph_) {
+        graph_->ReportEvent(GraphEvent::kEos);
+    }
+}
+
 void AudioSinkNode::AudioLoop() {
-    SwrContext* swr_ctx = nullptr;
-
     while (running_.load(std::memory_order_relaxed)) {
-        if (paused_.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue;
-        }
-
-        // Back-pressure: don't overwhelm SDL buffer.
-        // Keep ~100ms of audio buffered.
-        int queued = SDL_GetAudioStreamQueued(sdl_stream_);
-        int target_bytes = sample_rate_ * channels_ * 2 / 10;  // 100ms of S16
-        if (queued > target_bytes) {
+        if (ShouldThrottle()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
 
-        // Pull next buffer from input link
         auto opt_buf = input_port_->Pull();
         if (!opt_buf) {
             break;  // Link aborted
         }
-
         MediaBuffer& buf = *opt_buf;
 
-        // EOS → report and exit
         if (HasFlag(buf.flags(), BufferFlags::kEos)) {
-            // Wait until SDL finishes playing buffered audio
-            while (running_.load(std::memory_order_relaxed) &&
-                   SDL_GetAudioStreamQueued(sdl_stream_) > 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            if (graph_) {
-                graph_->ReportEvent(GraphEvent::kEos);
-            }
+            DrainAndReportEos();
             break;
         }
-
         if (!buf.IsFrame()) {
             continue;
         }
-
         MediaFrame& mf = buf.AsFrame();
         if (!mf.IsValid()) {
             continue;
         }
 
-        // Update audio clock (this is the MasterClock source in AudioMaster mode)
+        // Update audio clock (MasterClock source in AudioMaster mode)
         if (audio_clock_) {
             audio_clock_->Set(mf.pts());
         }
-
-        AVFrame* frame = mf.RawFrame();
-
-        // Convert to S16 and feed SDL
-        int out_samples = frame->nb_samples;
-        int out_buffer_size = out_samples * channels_ * 2;  // S16 = 2 bytes/sample
-
-        if (frame->format != AV_SAMPLE_FMT_S16) {
-            // Lazy-init resampler
-            if (!swr_ctx) {
-                AVChannelLayout out_layout;
-                av_channel_layout_default(&out_layout, channels_);
-                swr_alloc_set_opts2(&swr_ctx, &out_layout, AV_SAMPLE_FMT_S16,
-                                    sample_rate_, &frame->ch_layout,
-                                    static_cast<AVSampleFormat>(frame->format),
-                                    frame->sample_rate, 0, nullptr);
-                swr_init(swr_ctx);
-                av_channel_layout_uninit(&out_layout);
-            }
-
-            uint8_t* out_buf = static_cast<uint8_t*>(av_malloc(out_buffer_size));
-            uint8_t* out_planes[] = {out_buf};
-            swr_convert(swr_ctx, out_planes, out_samples,
-                        const_cast<const uint8_t**>(frame->data),
-                        frame->nb_samples);
-            SDL_PutAudioStreamData(sdl_stream_, out_buf, out_buffer_size);
-            av_free(out_buf);
-        } else {
-            SDL_PutAudioStreamData(sdl_stream_, frame->data[0],
-                                   out_buffer_size);
-        }
+        ConvertAndFeed(mf.RawFrame());
     }
 
-    if (swr_ctx) {
-        swr_free(&swr_ctx);
+    if (swr_ctx_) {
+        swr_free(&swr_ctx_);
+        swr_ctx_ = nullptr;
     }
 }
 

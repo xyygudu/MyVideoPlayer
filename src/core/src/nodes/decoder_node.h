@@ -52,6 +52,7 @@ class DecoderNode : public INode {
     bool Start() override;
     void Stop() override;
     void Flush() override;
+    void OnCommand(const Command& cmd) override;
 
     void Process(MediaBuffer /*input*/, OutputCallback /*emit*/) override {
         // Active node: no-op (uses own thread)
@@ -78,6 +79,15 @@ class DecoderNode : public INode {
     void DecodeLoop();
     void DrainFrames();
     void CloseCodec();
+
+    // Prepare helpers (resource allocation)
+    bool FindAndOpenCodec(const AVCodecParameters* codecpar);
+    void ConfigureHWAccel();
+
+    // DecodeLoop helpers (per-packet processing)
+    void MaybeFlushOnSerialChange(int serial);
+    void ProcessPacket(MediaBuffer& buf);
+    void HandleEos();
 
     NodeState state_{NodeState::kIdle};
     std::string name_{"DecoderNode"};
