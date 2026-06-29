@@ -180,14 +180,36 @@ void AudioSinkNode::ConvertAndFeed(AVFrame* frame) {
 
     // Lazy-init resampler (owned by this audio thread)
     if (!swr_ctx_) {
-        AVChannelLayout out_layout;
+        AVChannelLayout out_layout, in_layout;
         av_channel_layout_default(&out_layout, channels_);
-        swr_alloc_set_opts2(&swr_ctx_, &out_layout, AV_SAMPLE_FMT_S16,
-                            sample_rate_, &frame->ch_layout,
-                            static_cast<AVSampleFormat>(frame->format),
-                            frame->sample_rate, 0, nullptr);
-        swr_init(swr_ctx_);
+
+        // 检查输入布局有效性，无效则降级
+        if (av_channel_layout_check(&frame->ch_layout)) {
+            av_channel_layout_copy(&in_layout, &frame->ch_layout);
+        } else {
+            av_channel_layout_default(&in_layout, frame->ch_layout.nb_channels);
+        }
+
+        int ret = swr_alloc_set_opts2(&swr_ctx_,
+                                    &out_layout, AV_SAMPLE_FMT_S16, sample_rate_,
+                                    &in_layout,
+                                    static_cast<AVSampleFormat>(frame->format),
+                                    frame->sample_rate, 0, nullptr);
+        av_channel_layout_uninit(&in_layout);
         av_channel_layout_uninit(&out_layout);
+
+        if (ret < 0 || !swr_ctx_) {
+            SPDLOG_ERROR("AudioSinkNode: ConvertAndFeed failed, swr_ctx_ is nullptr");
+            swr_ctx_ = nullptr; // 确保不会野指针
+            return;
+        }
+        
+        ret = swr_init(swr_ctx_);
+        if (ret < 0) {
+            SPDLOG_ERROR("AudioSinkNode: ConvertAndFeed failed, swr_init returned error");
+            swr_free(&swr_ctx_);
+            return;
+        }
     }
 
     uint8_t* out_buf = static_cast<uint8_t*>(av_malloc(out_buffer_size));
