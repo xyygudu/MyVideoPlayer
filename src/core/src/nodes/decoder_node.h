@@ -18,10 +18,6 @@ extern "C" {
 
 struct AVCodecContext;
 
-namespace mvp {
-class HWAccelContext;
-}
-
 namespace mvp::graph {
 
 class MediaGraph;  // Forward declaration to avoid circular include
@@ -82,7 +78,6 @@ class DecoderNode : public INode {
 
     // Prepare helpers (resource allocation)
     bool FindAndOpenCodec(const AVCodecParameters* codecpar);
-    void ConfigureHWAccel();
 
     // DecodeLoop helpers (per-packet processing)
     void MaybeFlushOnSerialChange(int serial);

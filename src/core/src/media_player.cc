@@ -11,7 +11,6 @@ extern "C" {
 #include "clock.h"
 #include "graph/media_graph.h"
 #include "graph/port.h"
-#include "hw_accel_context.h"
 #include "nodes/demux_node.h"
 #include "nodes/playback_graph_builder.h"
 #include "video_renderer.h"
@@ -53,9 +52,6 @@ class MediaPlayer::Impl {
     Clock audio_clock_;
     Clock video_clock_;
 
-    // HW acceleration (shared with graph — graph nodes query it)
-    std::shared_ptr<HWAccelContext> hw_accel_;
-
     // Video rendering
     VideoRenderer video_renderer_;
     void* window_handle_{nullptr};
@@ -93,7 +89,6 @@ void MediaPlayer::Impl::Close() {
         graph_.reset();
     }
     video_renderer_.Close();
-    hw_accel_.reset();
 
     eos_count_ = 0;
     sink_count_ = 0;
@@ -180,13 +175,6 @@ bool MediaPlayer::Impl::BuildGraph(const std::string& filepath) {
     graph_ = std::make_unique<graph::MediaGraph>();
     graph_->SetEventCallback(
         [this](graph::GraphEvent e) { OnGraphEvent(e); });
-
-    // --- HW acceleration: inject as graph shared resource ---
-    hw_accel_ = std::shared_ptr<HWAccelContext>(
-        HWAccelContext::Create(AV_HWDEVICE_TYPE_D3D11VA).release());
-    if (hw_accel_) {
-        graph_->SetHWDevice(hw_accel_);
-    }
 
     // --- Source probe: discover stream topology before building the graph ---
     auto demux = std::make_unique<graph::DemuxNode>(filepath);

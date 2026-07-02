@@ -9,10 +9,6 @@
 #include "graph/node.h"
 #include "graph/port.h"
 
-namespace mvp {
-class HWAccelContext;  // Forward declaration
-}
-
 namespace mvp::graph {
 
 /// Events reported by the graph to the application.
@@ -108,11 +104,6 @@ class MediaGraph {
     void SetClock(std::shared_ptr<IClock> clock) { clock_ = std::move(clock); }
     std::shared_ptr<IClock> Clock() const { return clock_; }
 
-    void SetHWDevice(std::shared_ptr<mvp::HWAccelContext> hw) {
-        hw_device_ = std::move(hw);
-    }
-    std::shared_ptr<mvp::HWAccelContext> HWDevice() const { return hw_device_; }
-
     void SetEventCallback(EventCallback cb) { event_cb_ = std::move(cb); }
 
     /// Report an event (called by nodes, thread-safe).
@@ -131,7 +122,6 @@ class MediaGraph {
     std::vector<INode*> topo_order_;      // Sorted execution order
     GraphState state_{GraphState::kIdle};
     std::shared_ptr<IClock> clock_;
-    std::shared_ptr<mvp::HWAccelContext> hw_device_;
     EventCallback event_cb_;
 };
 

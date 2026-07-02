@@ -10,7 +10,6 @@ extern "C" {
 
 #include "ffmpeg_utils.h"
 #include "graph/media_graph.h"
-#include "hw_accel_context.h"
 #include "media_frame.h"
 
 namespace mvp::graph {
@@ -105,32 +104,13 @@ bool DecoderNode::FindAndOpenCodec(const AVCodecParameters* codecpar) {
         return false;
     }
 
-    ConfigureHWAccel();
-
     if (avcodec_open2(codec_ctx_, codec, nullptr) < 0) {
         SPDLOG_ERROR("DecoderNode: failed to open codec '{}'", codec->name);
         avcodec_free_context(&codec_ctx_);
         return false;
     }
 
-    bool has_hw = (codec_ctx_->hw_device_ctx != nullptr);
-    SPDLOG_INFO("DecoderNode: opened codec '{}' ({}){}", codec->name,
-                (media_type_ == MediaType::kVideo ? "video" : "audio"),
-                has_hw ? " [HW accel]" : "");
     return true;
-}
-
-void DecoderNode::ConfigureHWAccel() {
-    // Query HW device from graph shared resource (video only).
-    if (!graph_ || !graph_->HWDevice() || media_type_ != MediaType::kVideo) {
-        return;
-    }
-    auto* hw = graph_->HWDevice().get();
-    if (hw->DeviceRef()) {
-        codec_ctx_->opaque = hw;
-        codec_ctx_->get_format = mvp::HWAccelContext::GetFormat;
-        codec_ctx_->hw_device_ctx = av_buffer_ref(hw->DeviceRef());
-    }
 }
 
 bool DecoderNode::Start() {
