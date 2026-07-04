@@ -7,6 +7,7 @@
       "request": "launch",
       "program": "${workspaceFolder}/build/bin/mvp_app.exe",
       "args": [],
+      "preLaunchTask": "cmake-build",
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}/build/bin",
       "environment": [

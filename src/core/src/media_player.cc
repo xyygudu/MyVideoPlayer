@@ -62,6 +62,9 @@ class MediaPlayer::Impl {
     VideoRenderer video_renderer_;
     void* window_handle_{nullptr};
 
+    int window_width_{640};
+    int window_height_{480};
+
     // State
     PlaybackState state_{PlaybackState::kIdle};
     double video_fps_{30.0};
@@ -84,6 +87,8 @@ bool MediaPlayer::Impl::Open(const std::string& filepath) {
         state_ = PlaybackState::kError;
         return false;
     }
+
+    video_renderer_.Open(window_handle_, window_width_, window_height_); 
 
     state_ = PlaybackState::kReady;
     return true;
@@ -174,6 +179,8 @@ double MediaPlayer::Impl::VideoFps() const {
 }
 
 void MediaPlayer::Impl::NotifyWindowResized(int w, int h) {
+    window_width_ = w;
+    window_height_ = h;
     video_renderer_.Resize(w, h);
 }
 
