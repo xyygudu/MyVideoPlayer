@@ -12,7 +12,10 @@ extern "C" {
 #include "graph/media_graph.h"
 #include "graph/port.h"
 #include "nodes/demux_node.h"
-#include "nodes/playback_graph_builder.h"
+#include "nodes/audio_sink_node.h"
+#include "nodes/decoder_node.h"
+#include "nodes/video_sink_node.h"
+#include "nodes/audio_sink_node.h"
 #include "video_renderer.h"
 
 namespace mvp {
@@ -47,6 +50,8 @@ class MediaPlayer::Impl {
 
     // Graph (owns all nodes)
     std::unique_ptr<graph::MediaGraph> graph_;
+
+    std::unordered_map<int, graph::StreamInfo> streams_; 
 
     // Clocks
     Clock audio_clock_;
@@ -173,59 +178,101 @@ void MediaPlayer::Impl::NotifyWindowResized(int w, int h) {
 
 bool MediaPlayer::Impl::BuildGraph(const std::string& filepath) {
     graph_ = std::make_unique<graph::MediaGraph>();
-    graph_->SetEventCallback(
-        [this](graph::GraphEvent e) { OnGraphEvent(e); });
+    graph_->SetEventCallback([this](graph::GraphEvent e) { OnGraphEvent(e); });
 
-    // --- Source probe: discover stream topology before building the graph ---
-    auto demux = std::make_unique<graph::DemuxNode>(filepath);
-    std::vector<graph::StreamInfo> streams = demux->Probe();
-    if (streams.empty()) {
+    std::unique_ptr<graph::DemuxNode> demux = std::make_unique<graph::DemuxNode>(filepath);
+    std::unique_ptr<graph::DecoderNode> video_decoder = nullptr;
+    std::unique_ptr<graph::VideoSinkNode> video_sink = nullptr;
+    std::unique_ptr<graph::DecoderNode> audio_decoder = nullptr;
+    std::unique_ptr<graph::AudioSinkNode> audio_sink = nullptr;
+
+    streams_ = demux->StreamInfoMap();
+    if (streams_.empty()) {
         SPDLOG_ERROR("MediaPlayer: source probe found no streams");
         return false;
     }
-    duration_ = streams.front().duration;
-    has_audio_ = std::any_of(streams.begin(), streams.end(), [](const auto& s) {
-        return s.type == MediaType::kAudio;
-    });
-    for (const auto& s : streams) {
-        if (s.type == MediaType::kVideo) {
-            const auto& enc = s.format.AsEncoded();
+
+    for (const auto& s : streams_) {
+        if (s.second.type == MediaType::kVideo && !video_decoder) {
+            video_decoder = std::make_unique<graph::DecoderNode>();
+            video_sink = std::make_unique<graph::VideoSinkNode>();
+        } else if (s.second.type == MediaType::kAudio && !audio_decoder) {
+            audio_decoder = std::make_unique<graph::DecoderNode>();
+            audio_sink = std::make_unique<graph::AudioSinkNode>();
+        }
+    }
+
+    auto* demux_node = static_cast<graph::DemuxNode*>(graph_->AddNode(std::move(demux)));
+    graph::DecoderNode* video_decoder_node = nullptr;
+    graph::DecoderNode* audio_decoder_node = nullptr;
+    graph::VideoSinkNode* video_sink_node = nullptr;
+    graph::AudioSinkNode* audio_sink_node = nullptr;
+
+    if (video_decoder) {
+        video_decoder_node = static_cast<graph::DecoderNode*>(graph_->AddNode(std::move(video_decoder)));
+    }
+    if (audio_decoder) {
+        audio_decoder_node = static_cast<graph::DecoderNode*>(graph_->AddNode(std::move(audio_decoder)));
+    }
+    if (video_sink) {
+        video_sink_node = static_cast<graph::VideoSinkNode*>(graph_->AddNode(std::move(video_sink)));
+    }
+    if (audio_sink) {
+        audio_sink_node = static_cast<graph::AudioSinkNode*>(graph_->AddNode(std::move(audio_sink)));
+    }
+    
+    for (const auto& s : streams_) {
+        if (s.second.type == MediaType::kVideo) {
+            const auto& enc = s.second.format.AsEncoded();
             video_fps_ = (enc.frame_rate.den > 0)
                              ? static_cast<double>(enc.frame_rate.num) /
                                    enc.frame_rate.den
                              : 30.0;
         }
     }
+    duration_ = streams_.begin()->second.duration;
+    has_audio_ = std::any_of(streams_.begin(), streams_.end(), [](const auto& s) {
+        return s.second.type == MediaType::kAudio;
+    });
 
-    auto* demux_node =
-        static_cast<graph::DemuxNode*>(graph_->AddNode(std::move(demux)));
+    if (video_sink_node) {
+        video_sink_node->SetRenderer(&video_renderer_);
+        video_sink_node->SetAudioClock(&audio_clock_);
+        video_sink_node->SetVideoClock(&video_clock_);
+        video_sink_node->SetVideoFps(video_fps_);
+        video_sink_node->SetFrameCallback(video_frame_cb_);
+        video_sink_node->SetSyncMode(has_audio_
+                          ? graph::VideoSinkNode::SyncMode::kAudioMaster
+                          : graph::VideoSinkNode::SyncMode::kVideoMaster);
+        video_sink_node->SetGraph(graph_.get());
+    }
+
+    if (audio_sink_node) {
+        audio_sink_node->SetAudioClock(&audio_clock_);
+        audio_sink_node->SetGraph(graph_.get());
+    }
+
+    if (video_decoder_node && video_sink_node) {
+        if (demux_node->Outputs().size() > 0 && video_decoder_node->Inputs().size() > 0) {
+            graph_->Connect(demux_node->Outputs()[0], video_decoder_node->Inputs()[0]);
+        }
+        if (video_decoder_node->Outputs().size() > 0 && video_sink_node->Inputs().size() > 0) {
+            graph_->Connect(video_decoder_node->Outputs()[0], video_sink_node->Inputs()[0]);
+        }
+    }
+    if (audio_decoder_node && audio_sink_node) {
+        if (demux_node->Outputs().size() > 1 && audio_decoder_node->Inputs().size() > 0) {
+            graph_->Connect(demux_node->Outputs()[1], audio_decoder_node->Inputs()[0]);
+        }
+        if (audio_decoder_node->Outputs().size() > 0 && audio_sink_node->Inputs().size() > 0) {
+            graph_->Connect(audio_decoder_node->Outputs()[0], audio_sink_node->Inputs()[0]);
+        }
+    }
+    
     if (!demux_node->Prepare()) {
         return false;
     }
     auto demux_outputs = demux_node->Outputs();
-
-    // --- Build per-stream pipelines via the builder ---
-    graph::PlaybackContext ctx;
-    ctx.graph = graph_.get();
-    ctx.renderer = &video_renderer_;
-    ctx.audio_clock = &audio_clock_;
-    ctx.video_clock = &video_clock_;
-    ctx.window_handle = window_handle_;
-    ctx.video_cb = video_frame_cb_;
-    ctx.has_audio = has_audio_;
-    graph::PlaybackGraphBuilder builder(ctx);
-
-    // Streams and demux output ports share the same order (video, then audio).
-    for (size_t i = 0; i < streams.size() && i < demux_outputs.size(); ++i) {
-        graph::OutputPort* src = demux_outputs[i];
-        if (streams[i].type == MediaType::kVideo) {
-            builder.AddVideoPipeline(streams[i], src);
-            sink_count_++;
-        } else if (streams[i].type == MediaType::kAudio) {
-            builder.AddAudioPipeline(streams[i], src);
-            sink_count_++;
-        }
-    }
 
     // --- Graph lifecycle: Negotiate -> Prepare ---
     if (!graph_->Negotiate()) {

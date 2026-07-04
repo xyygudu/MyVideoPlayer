@@ -30,13 +30,10 @@ namespace mvp::graph {
 /// - format_ctx_ is allocated in Prepare(), freed in Stop()
 /// - Output ports are created dynamically in Prepare() (count = nb_streams)
 /// - Worker thread blocks on running_ flag + seek_requested_ atomic
-class DemuxNode : public ISourceNode {
+class DemuxNode : public INode {
   public:
     explicit DemuxNode(std::string file_path);
     ~DemuxNode() override;
-
-    // --- ISourceNode interface ---
-    std::vector<StreamInfo> Probe() override;
 
     // --- INode interface ---
     bool Negotiate() override;
@@ -67,15 +64,16 @@ class DemuxNode : public ISourceNode {
     double Duration() const;
     int AudioStreamIndex() const { return audio_stream_index_; }
     int VideoStreamIndex() const { return video_stream_index_; }
+    std::unordered_map<int, StreamInfo> StreamInfoMap() const { return stream_info_map_; }
 
   private:
+    void InitStreamInfo();
     void DemuxLoop();
     void CloseFormatContext();
 
-    // Prepare helpers
+    
     bool OpenFile();
     void FindStreams();
-    void CreateOutputPorts();
     MediaFormat MakeStreamFormat(int stream_index, MediaType type,
                                  Rational frame_rate) const;
 
@@ -101,6 +99,7 @@ class DemuxNode : public ISourceNode {
     std::atomic<bool> running_{false};
     std::atomic<bool> seek_requested_{false};
     std::atomic<double> seek_position_{0.0};
+    std::unordered_map<int, StreamInfo> stream_info_map_;  // stream_index -> StreamInfo
 };
 
 }  // namespace mvp::graph

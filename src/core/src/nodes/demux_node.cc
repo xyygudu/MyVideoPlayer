@@ -9,11 +9,24 @@ extern "C" {
 
 #include "graph/graph_command.h"
 #include "graph/media_format.h"
+#include "demux_node.h"
 
 namespace mvp::graph {
 
 DemuxNode::DemuxNode(std::string file_path)
-    : file_path_(std::move(file_path)) {}
+    : file_path_(std::move(file_path)) {
+    InitStreamInfo();
+
+    // 暂定output_ports_的顺序为video port在前，audio port在后
+    if (video_stream_index_ >= 0) {
+        auto video_port = std::make_unique<OutputPort>(this);
+        output_ports_.push_back(std::move(video_port));
+    }
+    if (audio_stream_index_ >= 0) {
+        auto audio_port = std::make_unique<OutputPort>(this);
+        output_ports_.push_back(std::move(audio_port));
+    }
+}
 
 DemuxNode::~DemuxNode() {
     Stop();
@@ -21,38 +34,17 @@ DemuxNode::~DemuxNode() {
 }
 
 bool DemuxNode::Negotiate() {
-    // Source node: format is determined when the file is opened (Probe or
-    // Prepare). Negotiate is a no-op; downstream reads the port formats.
-    return true;
-}
-
-std::vector<StreamInfo> DemuxNode::Probe() {
-    // Discover stream topology before the full graph is built.
-    if (!OpenFile()) {
-        return {};
-    }
-    FindStreams();
-
-    std::vector<StreamInfo> infos;
-    double dur = Duration();
-    auto add = [&](int index, MediaType type, Rational fr) {
-        StreamInfo info;
-        info.index = index;
-        info.type = type;
-        info.format = MakeStreamFormat(index, type, fr);
-        info.duration = dur;
-        infos.push_back(std::move(info));
-    };
-
     if (video_stream_index_ >= 0) {
         auto* s = format_ctx_->streams[video_stream_index_];
-        add(video_stream_index_, MediaType::kVideo,
-            {s->avg_frame_rate.num, s->avg_frame_rate.den});
+        output_ports_[0]->SetFormat(MakeStreamFormat(
+            video_stream_index_, MediaType::kVideo, {s->avg_frame_rate.num, s->avg_frame_rate.den}));
     }
     if (audio_stream_index_ >= 0) {
-        add(audio_stream_index_, MediaType::kAudio, {0, 1});
+        output_ports_[1]->SetFormat(MakeStreamFormat(
+            audio_stream_index_, MediaType::kAudio, {0, 1}));
     }
-    return infos;
+
+    return true;
 }
 
 bool DemuxNode::Prepare() {
@@ -70,15 +62,12 @@ bool DemuxNode::Prepare() {
         return false;
     }
 
-    FindStreams();
     if (audio_stream_index_ < 0 && video_stream_index_ < 0) {
         SPDLOG_ERROR("DemuxNode: no audio or video streams in '{}'", file_path_);
         avformat_close_input(&format_ctx_);
         state_ = NodeState::kError;
         return false;
     }
-
-    CreateOutputPorts();
 
     SPDLOG_INFO(
         "DemuxNode: opened '{}' — duration {:.2f}s, video={}, audio={}",
@@ -127,26 +116,6 @@ MediaFormat DemuxNode::MakeStreamFormat(int stream_index, MediaType type,
     Rational tb{stream->time_base.num, stream->time_base.den};
     return MediaFormat::FromStream(stream->codecpar->codec_id, tb, frame_rate,
                                    stream->codecpar, type);
-}
-
-void DemuxNode::CreateOutputPorts() {
-    // One output port per selected stream: video first (if any), then audio.
-    output_ports_.clear();
-
-    auto make_port = [this](int stream_index, MediaType type, Rational fr) {
-        auto port = std::make_unique<OutputPort>(this);
-        port->SetFormat(MakeStreamFormat(stream_index, type, fr));
-        output_ports_.push_back(std::move(port));
-    };
-
-    if (video_stream_index_ >= 0) {
-        auto* s = format_ctx_->streams[video_stream_index_];
-        make_port(video_stream_index_, MediaType::kVideo,
-                  {s->avg_frame_rate.num, s->avg_frame_rate.den});
-    }
-    if (audio_stream_index_ >= 0) {
-        make_port(audio_stream_index_, MediaType::kAudio, {0, 1});
-    }
 }
 
 bool DemuxNode::Start() {
@@ -274,8 +243,35 @@ void DemuxNode::RoutePacket(AVPacketPtr pkt, OutputPort* video_port,
     target->Push(MediaBuffer(std::move(pkt), type, ts, flags));
 }
 
+void DemuxNode::InitStreamInfo() { 
+    if (!OpenFile()) {
+        return;
+    }
+    FindStreams();
+
+    double dur = Duration();
+    auto add = [&](int index, MediaType type, Rational fr) {
+        StreamInfo info;
+        info.index = index;
+        info.type = type;
+        info.format = MakeStreamFormat(index, type, fr);
+        info.duration = dur;
+        stream_info_map_[index] = std::move(info);
+    };
+
+    if (video_stream_index_ >= 0) {
+        auto* s = format_ctx_->streams[video_stream_index_];
+        add(video_stream_index_, MediaType::kVideo,
+            {s->avg_frame_rate.num, s->avg_frame_rate.den});
+    }
+    if (audio_stream_index_ >= 0) {
+        add(audio_stream_index_, MediaType::kAudio, {0, 1});
+    }
+}
+
 void DemuxNode::DemuxLoop() {
     // Port index mapping: video port is always [0] if exists, audio follows.
+    
     OutputPort* video_port = nullptr;
     OutputPort* audio_port = nullptr;
     int port_idx = 0;

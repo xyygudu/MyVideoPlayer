@@ -117,17 +117,6 @@ struct StreamInfo {
     double duration{0.0};  // Source duration in seconds
 };
 
-/// A source node can probe its input to discover stream topology BEFORE the
-/// full graph is built. This formalizes the inherent "inspect source first"
-/// constraint (topology depends on source content) as an explicit phase,
-/// distinct from the graph's unified Negotiate/Prepare lifecycle.
-class ISourceNode : public INode {
-  public:
-    /// Open the source and return descriptors for all usable streams.
-    /// Idempotent: repeated calls do not re-open the source.
-    virtual std::vector<StreamInfo> Probe() = 0;
-};
-
 }  // namespace mvp::graph
 
 #endif  // MVP_GRAPH_NODE_H_
