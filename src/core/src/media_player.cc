@@ -270,7 +270,6 @@ bool MediaPlayer::Impl::BuildGraph(const std::string& filepath) {
         }
     }
     
-    auto demux_outputs = demux_node->Outputs();
 
     // --- Graph lifecycle: Negotiate -> Prepare ---
     if (!graph_->Negotiate()) {
