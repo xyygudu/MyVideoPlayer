@@ -51,6 +51,7 @@ class MediaPlayer::Impl {
     // Graph (owns all nodes)
     std::unique_ptr<graph::MediaGraph> graph_;
 
+    // Stream topology discovered by DemuxNode constructor (stream_index -> info).
     std::unordered_map<int, graph::StreamInfo> streams_; 
 
     // Clocks
@@ -269,9 +270,6 @@ bool MediaPlayer::Impl::BuildGraph(const std::string& filepath) {
         }
     }
     
-    if (!demux_node->Prepare()) {
-        return false;
-    }
     auto demux_outputs = demux_node->Outputs();
 
     // --- Graph lifecycle: Negotiate -> Prepare ---

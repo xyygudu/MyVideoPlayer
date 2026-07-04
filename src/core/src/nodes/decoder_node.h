@@ -27,9 +27,11 @@ class MediaGraph;  // Forward declaration to avoid circular include
 ///
 /// - NodeType: kTransform (1 input, 1 output)
 /// - ThreadingMode: kActive (owns decode thread)
-/// - Configure: optional HW acceleration device type via NodeConfig
-/// - Prepare: requires connected input port with Packet format;
-///            creates AVCodecContext from upstream codec_id
+/// - Negotiate: reads codec params from input port format, infers output
+///              format (VideoFormat/AudioFormat) without opening codec
+/// - Prepare: creates AVCodecContext from upstream codec_id;
+///            queries HW device from graph if available
+/// - Flush: flushes codec internal buffers (avcodec_flush_buffers)
 /// - Flush: flushes codec internal buffers (avcodec_flush_buffers)
 ///
 /// Lifecycle notes:

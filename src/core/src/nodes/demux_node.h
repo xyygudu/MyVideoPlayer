@@ -20,15 +20,16 @@ namespace mvp::graph {
 ///
 /// - NodeType: kSource (no input ports)
 /// - ThreadingMode: kActive (owns demux thread)
-/// - Configure: requires NodeConfig::file_path
-/// - Prepare: calls avformat_open_input + avformat_find_stream_info,
-///            creates one OutputPort per discovered stream
+/// - Construction: `DemuxNode(file_path)` — calls InitStreamInfo() to
+///   open the file, discover streams, create one OutputPort per stream,
+///   and fill stream_info_map_ for external query
+/// - Prepare: idempotent (skips if already opened by InitStreamInfo)
 /// - Start: launches DemuxLoop thread
 /// - Flush: marks seek pending; worker thread executes avformat_seek_file
 ///
 /// Lifecycle notes:
-/// - format_ctx_ is allocated in Prepare(), freed in Stop()
-/// - Output ports are created dynamically in Prepare() (count = nb_streams)
+/// - format_ctx_ is allocated in InitStreamInfo() (constructor), freed in Stop()
+/// - Output ports are created in constructor (order: video first, then audio)
 /// - Worker thread blocks on running_ flag + seek_requested_ atomic
 class DemuxNode : public INode {
   public:

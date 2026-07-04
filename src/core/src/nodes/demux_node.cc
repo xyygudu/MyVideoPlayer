@@ -57,7 +57,7 @@ bool DemuxNode::Prepare() {
         return false;
     }
 
-    if (!OpenFile()) {  // Idempotent: skips if Probe already opened the file
+    if (!OpenFile()) {  // Idempotent: skips if InitStreamInfo already opened the file
         state_ = NodeState::kError;
         return false;
     }
@@ -79,7 +79,7 @@ bool DemuxNode::Prepare() {
 
 bool DemuxNode::OpenFile() {
     if (format_ctx_) {
-        return true;  // Already open (e.g. by an earlier Probe call)
+        return true;  // Already open (e.g. by InitStreamInfo in constructor)
     }
     if (avformat_open_input(&format_ctx_, file_path_.c_str(), nullptr,
                             nullptr) < 0) {
@@ -244,6 +244,9 @@ void DemuxNode::RoutePacket(AVPacketPtr pkt, OutputPort* video_port,
 }
 
 void DemuxNode::InitStreamInfo() { 
+    // Open file, discover streams, and fill stream_info_map_ with format
+    // and duration metadata. Called from constructor — subsequent Prepare()
+    // is idempotent and skips the open step.
     if (!OpenFile()) {
         return;
     }
