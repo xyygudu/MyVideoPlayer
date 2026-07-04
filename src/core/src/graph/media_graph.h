@@ -61,10 +61,10 @@ class MediaGraph {
     INode* AddNode(std::unique_ptr<INode> node);
 
     /// Connect an output port to an input port.
-    /// @param link_capacity  Capacity of the internal Link queue.
-    ///                       Use large values (256) for packet links,
-    ///                       small values (4-8) for frame links.
-    bool Connect(OutputPort* src, InputPort* dst, int link_capacity = 4);
+    /// @param capacity  Dual-dimension Link capacity (max_bytes + max_count).
+    ///                  Packet links: ~{15MB, 256}, frame links: ~{unlimited, 3/9}.
+    bool Connect(OutputPort* src, InputPort* dst,
+                 LinkCapacity capacity = {});
 
     // --- Lifecycle (cascades to all nodes in topo order) ---
 

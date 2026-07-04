@@ -19,12 +19,13 @@ INode* MediaGraph::AddNode(std::unique_ptr<INode> node) {
     return ptr;
 }
 
-bool MediaGraph::Connect(OutputPort* src, InputPort* dst, int link_capacity) {
+bool MediaGraph::Connect(OutputPort* src, InputPort* dst,
+                         LinkCapacity capacity) {
     if (!src || !dst) {
         SPDLOG_ERROR("MediaGraph::Connect: null port");
         return false;
     }
-    return src->Connect(dst, link_capacity);
+    return src->Connect(dst, capacity);
 }
 
 bool MediaGraph::TopologicalSort() {

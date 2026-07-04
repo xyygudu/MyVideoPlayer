@@ -1,6 +1,7 @@
 #include "mvp/media_player.h"
 
 #include <algorithm>
+#include <limits>
 
 #include <spdlog/spdlog.h>
 
@@ -262,18 +263,22 @@ bool MediaPlayer::Impl::BuildGraph(const std::string& filepath) {
 
     if (video_decoder_node && video_sink_node) {
         if (demux_node->Outputs().size() > 0 && video_decoder_node->Inputs().size() > 0) {
-            graph_->Connect(demux_node->Outputs()[0], video_decoder_node->Inputs()[0]);
+            graph_->Connect(demux_node->Outputs()[0], video_decoder_node->Inputs()[0],
+                            {15 * 1024 * 1024, 256});
         }
         if (video_decoder_node->Outputs().size() > 0 && video_sink_node->Inputs().size() > 0) {
-            graph_->Connect(video_decoder_node->Outputs()[0], video_sink_node->Inputs()[0]);
+            graph_->Connect(video_decoder_node->Outputs()[0], video_sink_node->Inputs()[0],
+                            {std::numeric_limits<int64_t>::max(), 3});
         }
     }
     if (audio_decoder_node && audio_sink_node) {
         if (demux_node->Outputs().size() > 1 && audio_decoder_node->Inputs().size() > 0) {
-            graph_->Connect(demux_node->Outputs()[1], audio_decoder_node->Inputs()[0]);
+            graph_->Connect(demux_node->Outputs()[1], audio_decoder_node->Inputs()[0],
+                            {15 * 1024 * 1024, 256});
         }
         if (audio_decoder_node->Outputs().size() > 0 && audio_sink_node->Inputs().size() > 0) {
-            graph_->Connect(audio_decoder_node->Outputs()[0], audio_sink_node->Inputs()[0]);
+            graph_->Connect(audio_decoder_node->Outputs()[0], audio_sink_node->Inputs()[0],
+                            {std::numeric_limits<int64_t>::max(), 9});
         }
     }
     

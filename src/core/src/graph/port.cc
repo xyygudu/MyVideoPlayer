@@ -15,7 +15,7 @@ std::optional<MediaBuffer> InputPort::Pull() {
 
 // --- OutputPort ---
 
-bool OutputPort::Connect(InputPort* peer, int link_capacity) {
+bool OutputPort::Connect(InputPort* peer, LinkCapacity capacity) {
     if (!peer) {
         SPDLOG_ERROR("OutputPort::Connect: peer is null");
         return false;
@@ -39,7 +39,7 @@ bool OutputPort::Connect(InputPort* peer, int link_capacity) {
     // Create a Link only if the downstream node is Active.
     // Passive downstream nodes are called synchronously via Process().
     if (peer->Owner()->Threading() == ThreadingMode::kActive) {
-        link_ = std::make_unique<FrameLink>(CountCapacity{link_capacity});
+        link_ = std::make_unique<Link>(capacity);
         peer->link_ = link_.get();
     }
 

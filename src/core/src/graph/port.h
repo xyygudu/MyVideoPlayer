@@ -45,7 +45,7 @@ class InputPort {
     FormatCaps caps_;
     MediaFormat format_;
     // Link is owned by the OutputPort that created it.
-    FrameLink* link_{nullptr};
+    Link* link_{nullptr};
 };
 
 /// Output port — data production endpoint of a node.
@@ -56,10 +56,10 @@ class OutputPort {
 
     /// Connect this output to a downstream input port.
     /// Creates a Link between them if both nodes are Active.
-    /// @param link_capacity  Max items in the Link (default 4 for frames,
-    ///                       use 256+ for packet links to avoid backpressure).
+    /// @param capacity  Dual-dimension capacity (max_bytes + max_count).
+    ///                  Packet links: ~{15MB, 256}, frame links: ~{unlimited, 3/9}.
     /// Returns false if format caps are incompatible.
-    bool Connect(InputPort* peer, int link_capacity = 4);
+    bool Connect(InputPort* peer, LinkCapacity capacity = {});
 
     /// Push a buffer to the downstream node.
     /// - If downstream is Passive: calls Process() synchronously
@@ -86,7 +86,7 @@ class OutputPort {
     bool IsConnected() const { return peer_ != nullptr; }
 
     /// Access the underlying link (only exists for Active downstream).
-    FrameLink* GetLink() const { return link_.get(); }
+    Link* GetLink() const { return link_.get(); }
 
     /// Flush the link if it exists.
     void FlushLink();
@@ -99,7 +99,7 @@ class OutputPort {
     InputPort* peer_{nullptr};
     FormatCaps caps_;
     MediaFormat format_;
-    std::unique_ptr<FrameLink> link_;
+    std::unique_ptr<Link> link_;
 };
 
 }  // namespace mvp::graph

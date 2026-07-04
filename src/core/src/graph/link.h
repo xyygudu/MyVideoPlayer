@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <optional>
 
@@ -13,53 +14,50 @@
 
 namespace mvp::graph {
 
-/// Capacity policy: limit by total byte size of payloads.
-struct ByteCapacity {
-    int64_t max_bytes{15 * 1024 * 1024};  // Default 15 MB
+/// Dual-dimension capacity limits for a Link.
+///
+/// Both `max_bytes` and `max_count` are enforced simultaneously:
+/// Push blocks when EITHER limit is reached.
+/// Use `INT64_MAX` / `INT_MAX` sentinels to leave a dimension unlimited.
+struct LinkCapacity {
+    int64_t max_bytes{std::numeric_limits<int64_t>::max()};
+    int     max_count{std::numeric_limits<int>::max()};
 
-    static int64_t Size(const MediaBuffer& buf) {
+    /// Compute the byte contribution of a buffer toward the byte limit.
+    static int64_t ByteSize(const MediaBuffer& buf) {
         if (buf.IsPacket() && buf.AsPacket().get()) {
             return buf.AsPacket()->size;
         }
-        // Frames: estimate from linesize * height (approximate).
-        // For simplicity, count each frame as 1 unit in byte mode
-        // since exact size depends on pixel format. In practice, byte
-        // capacity is used for packet links.
+        // Frames: count as 1 byte each (byte limit is typically disabled
+        // via INT64_MAX for frame links, so this value is irrelevant).
         return 1;
     }
 };
 
-/// Capacity policy: limit by number of items.
-struct CountCapacity {
-    int max_count{4};
-
-    static int64_t Size(const MediaBuffer& /*buf*/) { return 1; }
-};
-
 /// Thread-safe bounded queue connecting two Active nodes.
 ///
-/// Template parameter CapacityPolicy determines how capacity is measured:
-/// - ByteCapacity: total byte size (for compressed packet streams)
-/// - CountCapacity: number of items (for decoded frame streams)
-///
-/// Push blocks when full; Pop blocks when empty. Both wake on Abort().
+/// Enforces dual-dimension capacity (byte count + item count):
+/// Push blocks when EITHER limit is exceeded.
+/// Pop blocks when empty. Both wake on Abort().
 /// Serial tracks flush epochs for stale-frame detection.
-template <typename CapacityPolicy>
 class Link {
   public:
-    explicit Link(CapacityPolicy policy = {})
-        : policy_(policy), serial_(0), current_size_(0), abort_(false) {}
+    explicit Link(LinkCapacity capacity = {})
+        : capacity_(capacity),
+          serial_(0),
+          total_bytes_(0),
+          count_(0),
+          abort_(false) {}
 
     ~Link() { Abort(); }
 
-    /// Push a buffer into the link. Blocks if at capacity.
+    /// Push a buffer into the link. Blocks if at capacity (byte or count).
     /// Stamps the current serial onto buf.serial before enqueue.
     /// Returns false only if aborted.
     bool Push(MediaBuffer buf) {
         std::unique_lock lock(mutex_);
         cond_push_.wait(lock, [this] {
-            return abort_.load(std::memory_order_relaxed) ||
-                   current_size_ < MaxCapacity();
+            return abort_.load(std::memory_order_relaxed) || !IsFull();
         });
 
         if (abort_.load(std::memory_order_relaxed)) {
@@ -67,7 +65,8 @@ class Link {
         }
 
         buf.set_serial(serial_.load(std::memory_order_acquire));
-        current_size_ += CapacityPolicy::Size(buf);
+        total_bytes_ += LinkCapacity::ByteSize(buf);
+        ++count_;
         queue_.push_back(std::move(buf));
         lock.unlock();
         cond_pop_.notify_one();
@@ -88,7 +87,8 @@ class Link {
 
         MediaBuffer buf = std::move(queue_.front());
         queue_.pop_front();
-        current_size_ -= CapacityPolicy::Size(buf);
+        total_bytes_ -= LinkCapacity::ByteSize(buf);
+        --count_;
         lock.unlock();
         cond_push_.notify_one();
         return buf;
@@ -98,7 +98,8 @@ class Link {
     void Flush() {
         std::lock_guard lock(mutex_);
         queue_.clear();
-        current_size_ = 0;
+        total_bytes_ = 0;
+        count_ = 0;
         serial_.fetch_add(1, std::memory_order_release);
         // Wake both sides: Push waiters can re-enqueue with new serial,
         // Pop waiters will get new data from upstream after seek.
@@ -118,7 +119,8 @@ class Link {
     void Reset() {
         std::lock_guard lock(mutex_);
         queue_.clear();
-        current_size_ = 0;
+        total_bytes_ = 0;
+        count_ = 0;
         abort_.store(false, std::memory_order_release);
         serial_.store(0, std::memory_order_release);
     }
@@ -131,17 +133,16 @@ class Link {
     }
 
   private:
-    int64_t MaxCapacity() const {
-        if constexpr (std::is_same_v<CapacityPolicy, CountCapacity>) {
-            return policy_.max_count;
-        } else {
-            return policy_.max_bytes;
-        }
+    /// Returns true if either dimension has reached its capacity limit.
+    bool IsFull() const {
+        return count_ >= capacity_.max_count ||
+               total_bytes_ >= capacity_.max_bytes;
     }
 
-    CapacityPolicy policy_;
+    LinkCapacity capacity_;
     std::atomic<int> serial_;
-    int64_t current_size_;
+    int64_t total_bytes_;
+    int count_;
     std::atomic<bool> abort_;
 
     mutable std::mutex mutex_;
@@ -149,10 +150,6 @@ class Link {
     std::condition_variable cond_pop_;
     std::deque<MediaBuffer> queue_;
 };
-
-/// Type aliases for common Link configurations.
-using PacketLink = Link<ByteCapacity>;
-using FrameLink = Link<CountCapacity>;
 
 }  // namespace mvp::graph
 
