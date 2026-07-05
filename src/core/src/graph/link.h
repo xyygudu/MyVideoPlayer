@@ -39,7 +39,9 @@ struct LinkCapacity {
 /// Enforces dual-dimension capacity (byte count + item count):
 /// Push blocks when EITHER limit is exceeded.
 /// Pop blocks when empty. Both wake on Abort().
-/// Serial tracks flush epochs for stale-frame detection.
+///
+/// Serial tracks flush epochs; producers stamp buffers at read time,
+/// consumers should discard buffers whose serial != this Link's serial().
 class Link {
   public:
     explicit Link(LinkCapacity capacity = {})
@@ -52,7 +54,7 @@ class Link {
     ~Link() { Abort(); }
 
     /// Push a buffer into the link. Blocks if at capacity (byte or count).
-    /// Stamps the current serial onto buf.serial before enqueue.
+    /// Does not stamp buf's serial — producer must set it beforehand.
     /// Returns false only if aborted.
     bool Push(MediaBuffer buf) {
         std::unique_lock lock(mutex_);
@@ -64,7 +66,6 @@ class Link {
             return false;
         }
 
-        buf.set_serial(serial_.load(std::memory_order_acquire));
         total_bytes_ += LinkCapacity::ByteSize(buf);
         ++count_;
         queue_.push_back(std::move(buf));

@@ -126,7 +126,7 @@ bool DemuxNode::Start() {
     }
 
     running_ = true;
-    seek_requested_ = false;
+    pending_seek_.store(kNoSeekPending, std::memory_order_release);
     demux_thread_ = std::thread(&DemuxNode::DemuxLoop, this);
     state_ = NodeState::kRunning;
     return true;
@@ -145,15 +145,11 @@ void DemuxNode::Stop() {
 }
 
 void DemuxNode::Flush() {
-    // Signal seek to worker thread. The actual avformat_seek_file
-    // is executed in DemuxLoop on next iteration.
-    // Seek position must be set before calling Flush via RequestSeek().
-    seek_requested_ = true;
+    // Reposition happens in OnCommand(kSeek) -> RequestSeek() instead.
 }
 
 void DemuxNode::RequestSeek(double position_seconds) {
-    seek_position_.store(position_seconds, std::memory_order_release);
-    seek_requested_.store(true, std::memory_order_release);
+    pending_seek_.store(position_seconds, std::memory_order_release);
 }
 
 void DemuxNode::OnCommand(const Command& cmd) {
@@ -189,23 +185,37 @@ void DemuxNode::CloseFormatContext() {
 }
 
 bool DemuxNode::HandlePendingSeek() {
-    if (!seek_requested_.load(std::memory_order_acquire)) {
+    double pos = pending_seek_.exchange(kNoSeekPending, std::memory_order_acq_rel);
+    if (pos == kNoSeekPending) {
         return false;
     }
-    double pos = seek_position_.load(std::memory_order_acquire);
     int64_t timestamp = static_cast<int64_t>(pos * AV_TIME_BASE);
     av_seek_frame(format_ctx_, -1, timestamp, AVSEEK_FLAG_BACKWARD);
-    seek_requested_.store(false, std::memory_order_release);
     SPDLOG_DEBUG("DemuxNode: seek to {:.2f}s", pos);
     return true;
 }
 
+bool DemuxNode::HasPendingSeek() const {
+    return pending_seek_.load(std::memory_order_acquire) != kNoSeekPending;
+}
+
+void DemuxNode::RefreshLocalSerial(OutputPort* video_port, OutputPort* audio_port) {
+    OutputPort* port = video_port ? video_port : audio_port;
+    if (port && port->GetLink()) {
+        local_serial_ = port->GetLink()->serial();
+    }
+}
+
 void DemuxNode::EmitEos(OutputPort* video_port, OutputPort* audio_port) {
     if (video_port && video_port->IsConnected()) {
-        video_port->Push(MediaBuffer::MakeEos(MediaType::kVideo));
+        MediaBuffer buf = MediaBuffer::MakeEos(MediaType::kVideo);
+        buf.set_serial(local_serial_);
+        video_port->Push(std::move(buf));
     }
     if (audio_port && audio_port->IsConnected()) {
-        audio_port->Push(MediaBuffer::MakeEos(MediaType::kAudio));
+        MediaBuffer buf = MediaBuffer::MakeEos(MediaType::kAudio);
+        buf.set_serial(local_serial_);
+        audio_port->Push(std::move(buf));
     }
 }
 
@@ -240,7 +250,9 @@ void DemuxNode::RoutePacket(AVPacketPtr pkt, OutputPort* video_port,
     if (pkt->flags & AV_PKT_FLAG_KEY) {
         flags = flags | BufferFlags::kKeyFrame;
     }
-    target->Push(MediaBuffer(std::move(pkt), type, ts, flags));
+    MediaBuffer buf(std::move(pkt), type, ts, flags);
+    buf.set_serial(local_serial_);
+    target->Push(std::move(buf));
 }
 
 void DemuxNode::InitStreamInfo() { 
@@ -286,7 +298,9 @@ void DemuxNode::DemuxLoop() {
     }
 
     while (running_.load(std::memory_order_relaxed)) {
-        HandlePendingSeek();
+        if (HandlePendingSeek()) {
+            RefreshLocalSerial(video_port, audio_port);
+        }
 
         AVPacketPtr pkt;
         int ret = av_read_frame(format_ctx_, pkt.get());
@@ -299,7 +313,7 @@ void DemuxNode::DemuxLoop() {
             }
             // Wait for a seek request or stop.
             while (running_.load(std::memory_order_relaxed) &&
-                   !seek_requested_.load(std::memory_order_relaxed)) {
+                   !HasPendingSeek()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
             continue;

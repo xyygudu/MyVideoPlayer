@@ -13,6 +13,10 @@ std::optional<MediaBuffer> InputPort::Pull() {
     return link_->Pop();
 }
 
+int InputPort::CurrentSerial() const {
+    return link_ ? link_->serial() : 0;
+}
+
 // --- OutputPort ---
 
 bool OutputPort::Connect(InputPort* peer, LinkCapacity capacity) {

@@ -25,6 +25,9 @@ class InputPort {
     /// Returns nullopt if the link is aborted.
     std::optional<MediaBuffer> Pull();
 
+    /// Current serial of the upstream Link, or 0 if unconnected.
+    int CurrentSerial() const;
+
     /// Set the format capabilities this port accepts.
     void SetCaps(FormatCaps caps) { caps_ = std::move(caps); }
     const FormatCaps& Caps() const { return caps_; }

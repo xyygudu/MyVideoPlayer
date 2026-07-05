@@ -151,10 +151,9 @@ void DecoderNode::Flush() {
 }
 
 void DecoderNode::SetDropUntilPts(double pts) {
+    // codec_ctx_ is decode-thread-owned; skip_frame is set there instead,
+    // in MaybeFlushOnSerialChange.
     drop_until_pts_.store(pts, std::memory_order_release);
-    if (codec_ctx_ && pts > 0) {
-        codec_ctx_->skip_frame = AVDISCARD_NONREF;
-    }
 }
 
 void DecoderNode::OnCommand(const Command& cmd) {
@@ -265,6 +264,10 @@ void DecoderNode::DecodeLoop() {
             break;  // Link aborted
         }
         MediaBuffer& buf = *opt_buf;
+
+        if (buf.serial() != input_port_->CurrentSerial()) {
+            continue;  // stale pre-seek buffer, discard
+        }
 
         MaybeFlushOnSerialChange(buf.serial());
 

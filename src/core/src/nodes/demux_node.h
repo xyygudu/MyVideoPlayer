@@ -80,9 +80,11 @@ class DemuxNode : public INode {
 
     // DemuxLoop helpers
     bool HandlePendingSeek();
+    bool HasPendingSeek() const;
     void EmitEos(OutputPort* video_port, OutputPort* audio_port);
     void RoutePacket(AVPacketPtr pkt, OutputPort* video_port,
                      OutputPort* audio_port);
+    void RefreshLocalSerial(OutputPort* video_port, OutputPort* audio_port);
 
     NodeState state_{NodeState::kIdle};
     std::string file_path_;
@@ -98,8 +100,15 @@ class DemuxNode : public INode {
     // Worker thread
     std::thread demux_thread_;
     std::atomic<bool> running_{false};
-    std::atomic<bool> seek_requested_{false};
-    std::atomic<double> seek_position_{0.0};
+
+    // Pending seek request; -1 means none. exchange() makes read+clear
+    // atomic, avoiding lost-update races between rapid seeks.
+    static constexpr double kNoSeekPending = -1.0;
+    std::atomic<double> pending_seek_{kNoSeekPending};
+
+    // Serial mirrored from the output Links after each seek.
+    int local_serial_{0};
+
     std::unordered_map<int, StreamInfo> stream_info_map_;  // stream_index -> StreamInfo
 };
 
