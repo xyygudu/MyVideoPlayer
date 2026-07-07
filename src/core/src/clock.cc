@@ -150,16 +150,11 @@ void Clock::SetSpeed(double speed) {
     EndWrite();
 }
 
-// ---------------------------------------------------------------------------
-// Reset — equivalent to Set(pts) but semantically indicates a full reset.
-// ---------------------------------------------------------------------------
-
 void Clock::Reset(double pts) {
     BeginWrite();
     pts_ = pts;
     last_updated_ = Now();
     speed_ = 1.0;
-    paused_ = false;
     EndWrite();
 }
 

@@ -7,8 +7,10 @@
 
 #include "clock.h"
 #include "frame_impl.h"
+#include "graph/graph_command.h"
 #include "sync_constants.h"
 #include "video_renderer.h"
+#include "video_sink_node.h"
 
 namespace mvp::graph {
 
@@ -66,6 +68,19 @@ void VideoSinkNode::Flush() {
     frame_timer_ = 0.0;
 }
 
+void VideoSinkNode::OnCommand(const Command& cmd) {
+    if (cmd.type == CommandType::kSeek) {
+        awating_preview_frame_.store(true, std::memory_order_relaxed);
+    }
+}
+
+
+void VideoSinkNode::SetPaused(bool paused) {
+    paused_ = paused;
+    if (!paused) {
+        awating_preview_frame_.store(false, std::memory_order_relaxed);
+    }
+}
 void VideoSinkNode::SetRenderer(mvp::VideoRenderer* renderer) {
     renderer_ = renderer;
 }
@@ -135,13 +150,6 @@ double VideoSinkNode::ComputeVideoMasterDelay(double pts, double last_pts,
                : 0.0;
 }
 
-void VideoSinkNode::HoldLastFrameUntilStop() {
-    // After EOS, keep the last frame visible until the node is stopped.
-    while (running_.load(std::memory_order_relaxed)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-}
-
 void VideoSinkNode::SyncAndRender(MediaFrame& mf, double& last_pts,
                                   double& last_display_time) {
     double pts = mf.pts();
@@ -154,8 +162,12 @@ void VideoSinkNode::SyncAndRender(MediaFrame& mf, double& last_pts,
 
     last_display_time = Clock::Now();
     last_pts = pts;
+    RenderFrame(mf);
+}
+
+void VideoSinkNode::RenderFrame(const MediaFrame& mf) {
     if (video_clock_) {
-        video_clock_->Set(pts);
+        video_clock_->Set(mf.pts());
     }
 
     VideoFrame vf = MakeVideoFrame(mf);
@@ -171,7 +183,9 @@ void VideoSinkNode::RenderLoop() {
     frame_timer_ = Clock::Now();
 
     while (running_.load(std::memory_order_relaxed)) {
-        if (paused_.load(std::memory_order_relaxed)) {
+        bool paused = paused_.load(std::memory_order_relaxed);
+        bool preview_pending = awating_preview_frame_.load(std::memory_order_relaxed);
+        if (paused && !preview_pending) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
@@ -186,8 +200,8 @@ void VideoSinkNode::RenderLoop() {
             if (graph_) {
                 graph_->ReportEvent(GraphEvent::kEos);
             }
-            HoldLastFrameUntilStop();
-            break;
+            
+            continue;
         }
 
         if (!buf.IsFrame()) {
@@ -198,7 +212,13 @@ void VideoSinkNode::RenderLoop() {
             continue;
         }
 
-        SyncAndRender(mf, last_pts, last_display_time);
+        if (paused_.load(std::memory_order_relaxed)) {
+            last_pts = mf.pts();
+            last_display_time = Clock::Now();
+            RenderFrame(mf);
+        } else {
+            SyncAndRender(mf, last_pts, last_display_time);
+        }
     }
 }
 

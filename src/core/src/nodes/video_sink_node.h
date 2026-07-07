@@ -51,6 +51,7 @@ class VideoSinkNode : public INode {
     bool Start() override;
     void Stop() override;
     void Flush() override;
+    void OnCommand(const Command& cmd) override;
 
     void Process(MediaBuffer, OutputCallback) override {}
 
@@ -83,13 +84,13 @@ class VideoSinkNode : public INode {
     void SetGraph(MediaGraph* graph) { graph_ = graph; }
 
     /// Set paused state (freezes render loop).
-    void SetPaused(bool paused) { paused_ = paused; }
+    void SetPaused(bool paused) override;
+
 
   private:
     void RenderLoop();
-    void SyncAndRender(MediaFrame& mf, double& last_pts,
-                       double& last_display_time);
-    void HoldLastFrameUntilStop();
+    void SyncAndRender(MediaFrame& mf, double& last_pts, double& last_display_time);
+    void RenderFrame(const MediaFrame& mf);
     double ComputeDisplayDelay(double pts, double last_pts,
                                double last_display_time);
     double ComputeAudioMasterDelay(double pts, double last_pts);
@@ -116,7 +117,7 @@ class VideoSinkNode : public INode {
     std::thread render_thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> paused_{false};
-
+    std::atomic<bool> awating_preview_frame_{false};
     // App callback
     VideoFrameCallback frame_cb_;
 };

@@ -246,7 +246,7 @@ void AudioSinkNode::AudioLoop() {
 
         if (HasFlag(buf.flags(), BufferFlags::kEos)) {
             DrainAndReportEos();
-            break;
+            continue;
         }
         if (!buf.IsFrame()) {
             continue;

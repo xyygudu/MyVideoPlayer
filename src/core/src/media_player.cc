@@ -109,6 +109,9 @@ void MediaPlayer::Impl::Close() {
 
     audio_clock_.Reset();
     video_clock_.Reset();
+
+    audio_clock_.SetPaused(false);
+    video_clock_.SetPaused(false);
     state_ = PlaybackState::kIdle;
 }
 
@@ -211,6 +214,8 @@ bool MediaPlayer::Impl::BuildGraph(const std::string& filepath) {
         }
     }
 
+    sink_count_ = (video_sink ? 1 : 0) + (audio_sink ? 1 : 0);
+
     auto* demux_node = static_cast<graph::DemuxNode*>(graph_->AddNode(std::move(demux)));
     graph::DecoderNode* video_decoder_node = nullptr;
     graph::DecoderNode* audio_decoder_node = nullptr;
@@ -301,6 +306,8 @@ void MediaPlayer::Impl::OnGraphEvent(graph::GraphEvent event) {
         eos_count_++;
         if (eos_count_ >= sink_count_) {
             state_ = PlaybackState::kFinished;
+            audio_clock_.SetPaused(true);
+            video_clock_.SetPaused(true);
             if (finished_cb_) finished_cb_();
         }
     } else if (event == graph::GraphEvent::kError) {

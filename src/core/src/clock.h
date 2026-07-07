@@ -41,8 +41,7 @@ class Clock {
     /// Set playback speed multiplier (default 1.0).
     void SetSpeed(double speed);
 
-    /// Reset clock to a given PTS (default 0). Equivalent to Set(pts) but
-    /// semantically indicates a full reset (e.g., after Close or Seek).
+    /// Reset clock to a given PTS (default 0).
     void Reset(double pts = 0.0);
 
     /// Returns the current system time in seconds (steady_clock based).
