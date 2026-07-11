@@ -10,6 +10,49 @@ extern "C" {
 
 namespace mvp {
 
+namespace {
+
+void FillContainerMeta(AVFormatContext* fmt_ctx, SourceInfo& info) {
+    if (fmt_ctx->duration != AV_NOPTS_VALUE) {
+        info.duration = static_cast<double>(fmt_ctx->duration) / AV_TIME_BASE;
+    }
+    if (fmt_ctx->iformat && fmt_ctx->iformat->name) {
+        info.format_name = fmt_ctx->iformat->name;
+    }
+    info.bit_rate = fmt_ctx->bit_rate;
+}
+
+void FillVideoStream(AVStream* st, int index, SourceInfo& info) {
+    AVCodecParameters* codecpar = st->codecpar;
+    VideoStream vs;
+    vs.index = index;
+    const AVCodecDescriptor* desc = avcodec_descriptor_get(codecpar->codec_id);
+    if (desc) vs.codec_name = desc->name;
+    vs.width = codecpar->width;
+    vs.height = codecpar->height;
+    vs.frame_rate_num = st->avg_frame_rate.num;
+    vs.frame_rate_den = st->avg_frame_rate.den;
+    vs.pix_fmt = static_cast<int>(codecpar->format);
+    vs.bit_rate = codecpar->bit_rate;
+    info.video_streams.push_back(std::move(vs));
+}
+
+void FillAudioStream(AVStream* st, int index, SourceInfo& info) {
+    AVCodecParameters* codecpar = st->codecpar;
+    AudioStream as_;
+    as_.index = index;
+    const AVCodecDescriptor* desc = avcodec_descriptor_get(codecpar->codec_id);
+    if (desc) as_.codec_name = desc->name;
+    as_.sample_rate = codecpar->sample_rate;
+    as_.channels = codecpar->ch_layout.nb_channels;
+    as_.channel_layout = codecpar->ch_layout.u.mask;
+    as_.sample_fmt = static_cast<int>(codecpar->format);
+    as_.bit_rate = codecpar->bit_rate;
+    info.audio_streams.push_back(std::move(as_));
+}
+
+}  // namespace
+
 SourceInfo SourceProbe::Probe(const std::string& filepath) {
     SourceInfo info;
     info.filepath = filepath;
@@ -26,51 +69,15 @@ SourceInfo SourceProbe::Probe(const std::string& filepath) {
         return info;
     }
 
-    // Container-level metadata
-    if (fmt_ctx->duration != AV_NOPTS_VALUE) {
-        info.duration = static_cast<double>(fmt_ctx->duration) / AV_TIME_BASE;
-    }
-    if (fmt_ctx->iformat && fmt_ctx->iformat->name) {
-        info.format_name = fmt_ctx->iformat->name;
-    }
-    info.bit_rate = fmt_ctx->bit_rate;
+    FillContainerMeta(fmt_ctx, info);
 
-    // Iterate all streams
     for (unsigned int i = 0; i < fmt_ctx->nb_streams; ++i) {
         AVStream* st = fmt_ctx->streams[i];
         AVCodecParameters* codecpar = st->codecpar;
-
         if (codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            VideoStream vs;
-            vs.index = static_cast<int>(i);
-            const AVCodecDescriptor* desc = avcodec_descriptor_get(codecpar->codec_id);
-            if (desc) vs.codec_name = desc->name;
-            vs.width = codecpar->width;
-            vs.height = codecpar->height;
-            vs.frame_rate_num = st->avg_frame_rate.num;
-            vs.frame_rate_den = st->avg_frame_rate.den;
-            vs.pix_fmt = static_cast<int>(codecpar->format);
-            vs.bit_rate = codecpar->bit_rate;
-            info.video_streams.push_back(std::move(vs));
+            FillVideoStream(st, static_cast<int>(i), info);
         } else if (codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-            AudioStream as_;
-            as_.index = static_cast<int>(i);
-            const AVCodecDescriptor* desc = avcodec_descriptor_get(codecpar->codec_id);
-            if (desc) as_.codec_name = desc->name;
-            as_.sample_rate = codecpar->sample_rate;
-#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(60, 0, 0)
-            as_.channels = codecpar->ch_layout.nb_channels;
-#else
-            as_.channels = codecpar->channels;
-#endif
-#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(60, 0, 0)
-            as_.channel_layout = codecpar->ch_layout.u.mask;
-#else
-            as_.channel_layout = codecpar->channel_layout;
-#endif
-            as_.sample_fmt = static_cast<int>(codecpar->format);
-            as_.bit_rate = codecpar->bit_rate;
-            info.audio_streams.push_back(std::move(as_));
+            FillAudioStream(st, static_cast<int>(i), info);
         }
     }
 
