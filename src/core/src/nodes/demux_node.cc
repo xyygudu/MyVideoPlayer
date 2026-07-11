@@ -40,24 +40,20 @@ bool DemuxNode::Negotiate() {
     }
     if (video_stream_index_ >= 0) {
         if (video_stream_index_ >= static_cast<int>(format_ctx_->nb_streams)) {
-            SPDLOG_ERROR(
-                "DemuxNode: video index {} out of range (nb_streams={})",
-                video_stream_index_, format_ctx_->nb_streams);
+            SPDLOG_ERROR("DemuxNode: video index {} out of range (nb_streams={})",
+                         video_stream_index_, format_ctx_->nb_streams);
             return false;
         }
         auto* s = format_ctx_->streams[video_stream_index_];
-        output_ports_[0]->SetFormat(MakeStreamFormat(
-            video_stream_index_, MediaType::kVideo, {s->avg_frame_rate.num, s->avg_frame_rate.den}));
+        output_ports_[0]->SetFormat(MakeStreamFormat(video_stream_index_, MediaType::kVideo, {s->avg_frame_rate.num, s->avg_frame_rate.den}));
     }
     if (audio_stream_index_ >= 0) {
         if (audio_stream_index_ >= static_cast<int>(format_ctx_->nb_streams)) {
-            SPDLOG_ERROR(
-                "DemuxNode: audio index {} out of range (nb_streams={})",
-                audio_stream_index_, format_ctx_->nb_streams);
+            SPDLOG_ERROR("DemuxNode: audio index {} out of range (nb_streams={})",
+                         audio_stream_index_, format_ctx_->nb_streams);
             return false;
         }
-        output_ports_[1]->SetFormat(MakeStreamFormat(
-            audio_stream_index_, MediaType::kAudio, {0, 1}));
+        output_ports_[1]->SetFormat(MakeStreamFormat(audio_stream_index_, MediaType::kAudio, {0, 1}));
     }
 
     return true;

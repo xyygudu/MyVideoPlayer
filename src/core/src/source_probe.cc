@@ -21,8 +21,7 @@ SourceInfo SourceProbe::Probe(const std::string& filepath) {
     }
 
     if (avformat_find_stream_info(fmt_ctx, nullptr) < 0) {
-        SPDLOG_ERROR("SourceProbe: failed to find stream info for '{}'",
-                     filepath);
+        SPDLOG_ERROR("SourceProbe: failed to find stream info for '{}'", filepath);
         avformat_close_input(&fmt_ctx);
         return info;
     }
@@ -44,11 +43,8 @@ SourceInfo SourceProbe::Probe(const std::string& filepath) {
         if (codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
             VideoStream vs;
             vs.index = static_cast<int>(i);
-            const AVCodecDescriptor* desc =
-                avcodec_descriptor_get(codecpar->codec_id);
-            if (desc) {
-                vs.codec_name = desc->name;
-            }
+            const AVCodecDescriptor* desc = avcodec_descriptor_get(codecpar->codec_id);
+            if (desc) vs.codec_name = desc->name;
             vs.width = codecpar->width;
             vs.height = codecpar->height;
             vs.frame_rate_num = st->avg_frame_rate.num;
@@ -59,11 +55,8 @@ SourceInfo SourceProbe::Probe(const std::string& filepath) {
         } else if (codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
             AudioStream as_;
             as_.index = static_cast<int>(i);
-            const AVCodecDescriptor* desc =
-                avcodec_descriptor_get(codecpar->codec_id);
-            if (desc) {
-                as_.codec_name = desc->name;
-            }
+            const AVCodecDescriptor* desc = avcodec_descriptor_get(codecpar->codec_id);
+            if (desc) as_.codec_name = desc->name;
             as_.sample_rate = codecpar->sample_rate;
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(60, 0, 0)
             as_.channels = codecpar->ch_layout.nb_channels;

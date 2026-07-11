@@ -96,14 +96,9 @@ bool MediaPlayer::Impl::Open(const std::string& filepath) {
     }
 
     // 2. Select default streams (first of each type).
-    video_stream_index_ = info_.video_streams.empty()
-                              ? -1
-                              : info_.video_streams[0].index;
-    audio_stream_index_ = info_.audio_streams.empty()
-                              ? -1
-                              : info_.audio_streams[0].index;
-    sink_count_ = (video_stream_index_ >= 0 ? 1 : 0) +
-                  (audio_stream_index_ >= 0 ? 1 : 0);
+    video_stream_index_ = info_.video_streams.empty() ? -1 : info_.video_streams[0].index;
+    audio_stream_index_ = info_.audio_streams.empty() ? -1 : info_.audio_streams[0].index;
+    sink_count_ = (video_stream_index_ >= 0 ? 1 : 0) + (audio_stream_index_ >= 0 ? 1 : 0);
 
     // 3. Build the playback graph.
     if (!BuildGraph()) {
@@ -204,9 +199,7 @@ double MediaPlayer::Impl::CurrentPosition() const {
 double MediaPlayer::Impl::VideoFps() const {
     if (info_.video_streams.empty()) return 30.0;
     const auto& vs = info_.video_streams[0];
-    return (vs.frame_rate_den > 0)
-               ? static_cast<double>(vs.frame_rate_num) / vs.frame_rate_den
-               : 30.0;
+    return (vs.frame_rate_den > 0) ? static_cast<double>(vs.frame_rate_num) / vs.frame_rate_den : 30.0;
 }
 
 void MediaPlayer::Impl::NotifyWindowResized(int w, int h) {
@@ -260,17 +253,13 @@ bool MediaPlayer::Impl::BuildGraph() {
 
     // 3. Wire pipeline (inline).
     if (vdec && vsink) {
-        graph_->Connect(demux->Outputs()[0], vdec->Inputs()[0],
-                        {15 * 1024 * 1024, 256});
-        graph_->Connect(vdec->Outputs()[0], vsink->Inputs()[0],
-                        {std::numeric_limits<int64_t>::max(), 3});
+        graph_->Connect(demux->Outputs()[0], vdec->Inputs()[0], {15 * 1024 * 1024, 256});
+        graph_->Connect(vdec->Outputs()[0], vsink->Inputs()[0], {std::numeric_limits<int64_t>::max(), 3});
     }
     if (adec && asink) {
         int audio_port = (video_stream_index_ >= 0) ? 1 : 0;
-        graph_->Connect(demux->Outputs()[audio_port], adec->Inputs()[0],
-                        {15 * 1024 * 1024, 256});
-        graph_->Connect(adec->Outputs()[0], asink->Inputs()[0],
-                        {std::numeric_limits<int64_t>::max(), 9});
+        graph_->Connect(demux->Outputs()[audio_port], adec->Inputs()[0], {15 * 1024 * 1024, 256});
+        graph_->Connect(adec->Outputs()[0], asink->Inputs()[0], {std::numeric_limits<int64_t>::max(), 9});
     }
 
     // 4. Finalize.
