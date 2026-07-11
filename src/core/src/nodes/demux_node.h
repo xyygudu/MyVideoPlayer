@@ -20,20 +20,22 @@ namespace mvp::graph {
 ///
 /// - NodeType: kSource (no input ports)
 /// - ThreadingMode: kActive (owns demux thread)
-/// - Construction: `DemuxNode(file_path)` — calls InitStreamInfo() to
-///   open the file, discover streams, create one OutputPort per stream,
-///   and fill stream_info_map_ for external query
-/// - Prepare: idempotent (skips if already opened by InitStreamInfo)
+/// - Construction: `DemuxNode(file_path, video_idx, audio_idx)` —
+///   stream indices come from a prior SourceProbe::Probe() call.
+///   -1 means no stream of that type. Output ports are created immediately.
+/// - Prepare: calls OpenFile() (always a fresh open since constructor no
+///   longer opens the file)
 /// - Start: launches DemuxLoop thread
 /// - Flush: marks seek pending; worker thread executes avformat_seek_file
 ///
 /// Lifecycle notes:
-/// - format_ctx_ is allocated in InitStreamInfo() (constructor), freed in Stop()
+/// - format_ctx_ is allocated in Prepare() (OpenFile), freed in Stop()
 /// - Output ports are created in constructor (order: video first, then audio)
 /// - Worker thread blocks on running_ flag + seek_requested_ atomic
 class DemuxNode : public INode {
   public:
-    explicit DemuxNode(std::string file_path);
+    explicit DemuxNode(std::string file_path, int video_stream_idx = -1,
+                        int audio_stream_idx = -1);
     ~DemuxNode() override;
 
     // --- INode interface ---
@@ -65,10 +67,8 @@ class DemuxNode : public INode {
     double Duration() const;
     int AudioStreamIndex() const { return audio_stream_index_; }
     int VideoStreamIndex() const { return video_stream_index_; }
-    std::unordered_map<int, StreamInfo> StreamInfoMap() const { return stream_info_map_; }
 
   private:
-    void InitStreamInfo();
     void DemuxLoop();
     void CloseFormatContext();
 
@@ -108,8 +108,6 @@ class DemuxNode : public INode {
 
     // Serial mirrored from the output Links after each seek.
     int local_serial_{0};
-
-    std::unordered_map<int, StreamInfo> stream_info_map_;  // stream_index -> StreamInfo
 };
 
 }  // namespace mvp::graph

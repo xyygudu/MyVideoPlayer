@@ -13,10 +13,11 @@ extern "C" {
 
 namespace mvp::graph {
 
-DemuxNode::DemuxNode(std::string file_path)
-    : file_path_(std::move(file_path)) {
-    InitStreamInfo();
-
+DemuxNode::DemuxNode(std::string file_path, int video_stream_idx,
+                     int audio_stream_idx)
+    : file_path_(std::move(file_path)),
+      video_stream_index_(video_stream_idx),
+      audio_stream_index_(audio_stream_idx) {
     // 暂定output_ports_的顺序为video port在前，audio port在后
     if (video_stream_index_ >= 0) {
         auto video_port = std::make_unique<OutputPort>(this);
@@ -34,12 +35,27 @@ DemuxNode::~DemuxNode() {
 }
 
 bool DemuxNode::Negotiate() {
+    if (!OpenFile()) {
+        return false;
+    }
     if (video_stream_index_ >= 0) {
+        if (video_stream_index_ >= static_cast<int>(format_ctx_->nb_streams)) {
+            SPDLOG_ERROR(
+                "DemuxNode: video index {} out of range (nb_streams={})",
+                video_stream_index_, format_ctx_->nb_streams);
+            return false;
+        }
         auto* s = format_ctx_->streams[video_stream_index_];
         output_ports_[0]->SetFormat(MakeStreamFormat(
             video_stream_index_, MediaType::kVideo, {s->avg_frame_rate.num, s->avg_frame_rate.den}));
     }
     if (audio_stream_index_ >= 0) {
+        if (audio_stream_index_ >= static_cast<int>(format_ctx_->nb_streams)) {
+            SPDLOG_ERROR(
+                "DemuxNode: audio index {} out of range (nb_streams={})",
+                audio_stream_index_, format_ctx_->nb_streams);
+            return false;
+        }
         output_ports_[1]->SetFormat(MakeStreamFormat(
             audio_stream_index_, MediaType::kAudio, {0, 1}));
     }
@@ -57,7 +73,7 @@ bool DemuxNode::Prepare() {
         return false;
     }
 
-    if (!OpenFile()) {  // Idempotent: skips if InitStreamInfo already opened the file
+    if (!OpenFile()) {
         state_ = NodeState::kError;
         return false;
     }
@@ -79,7 +95,7 @@ bool DemuxNode::Prepare() {
 
 bool DemuxNode::OpenFile() {
     if (format_ctx_) {
-        return true;  // Already open (e.g. by InitStreamInfo in constructor)
+        return true;  // Already open (Prepare may be called multiple times)
     }
     if (avformat_open_input(&format_ctx_, file_path_.c_str(), nullptr,
                             nullptr) < 0) {
@@ -253,35 +269,6 @@ void DemuxNode::RoutePacket(AVPacketPtr pkt, OutputPort* video_port,
     MediaBuffer buf(std::move(pkt), type, ts, flags);
     buf.set_serial(local_serial_);
     target->Push(std::move(buf));
-}
-
-void DemuxNode::InitStreamInfo() { 
-    // Open file, discover streams, and fill stream_info_map_ with format
-    // and duration metadata. Called from constructor — subsequent Prepare()
-    // is idempotent and skips the open step.
-    if (!OpenFile()) {
-        return;
-    }
-    FindStreams();
-
-    double dur = Duration();
-    auto add = [&](int index, MediaType type, Rational fr) {
-        StreamInfo info;
-        info.index = index;
-        info.type = type;
-        info.format = MakeStreamFormat(index, type, fr);
-        info.duration = dur;
-        stream_info_map_[index] = std::move(info);
-    };
-
-    if (video_stream_index_ >= 0) {
-        auto* s = format_ctx_->streams[video_stream_index_];
-        add(video_stream_index_, MediaType::kVideo,
-            {s->avg_frame_rate.num, s->avg_frame_rate.den});
-    }
-    if (audio_stream_index_ >= 0) {
-        add(audio_stream_index_, MediaType::kAudio, {0, 1});
-    }
 }
 
 void DemuxNode::DemuxLoop() {

@@ -12,6 +12,8 @@ extern "C" {
 #include "clock.h"
 #include "graph/media_graph.h"
 #include "graph/port.h"
+#include "mvp/source_info.h"
+#include "mvp/source_probe.h"
 #include "nodes/demux_node.h"
 #include "nodes/audio_sink_node.h"
 #include "nodes/decoder_node.h"
@@ -46,14 +48,20 @@ class MediaPlayer::Impl {
     }
 
   private:
-    bool BuildGraph(const std::string& filepath);
+    bool BuildGraph();
     void OnGraphEvent(graph::GraphEvent event);
+
+    // Source meta (populated by SourceProbe in Open, consumed by BuildGraph)
+    SourceInfo info_;
+
+    // Selected stream indices (default: first of each type, -1 = none)
+    int video_stream_index_{-1};
+    int audio_stream_index_{-1};
+    int sink_count_{0};      // number of active sinks (for EOS counting)
+    int eos_count_{0};
 
     // Graph (owns all nodes)
     std::unique_ptr<graph::MediaGraph> graph_;
-
-    // Stream topology discovered by DemuxNode constructor (stream_index -> info).
-    std::unordered_map<int, graph::StreamInfo> streams_; 
 
     // Clocks
     Clock audio_clock_;
@@ -68,11 +76,6 @@ class MediaPlayer::Impl {
 
     // State
     PlaybackState state_{PlaybackState::kIdle};
-    double video_fps_{30.0};
-    double duration_{0.0};   // Cached from source probe
-    bool has_audio_{false};  // Whether the source has an audio stream
-    int eos_count_{0};
-    int sink_count_{0};
 
     // Callbacks
     MediaPlayer::VideoFrameCallback video_frame_cb_;
@@ -84,12 +87,31 @@ class MediaPlayer::Impl {
 bool MediaPlayer::Impl::Open(const std::string& filepath) {
     Close();
 
-    if (!BuildGraph(filepath)) {
+    // 1. Probe source independently of Graph construction.
+    info_ = SourceProbe::Probe(filepath);
+    if (info_.video_streams.empty() && info_.audio_streams.empty()) {
+        SPDLOG_ERROR("MediaPlayer: source probe found no streams");
         state_ = PlaybackState::kError;
         return false;
     }
 
-    video_renderer_.Open(window_handle_, window_width_, window_height_); 
+    // 2. Select default streams (first of each type).
+    video_stream_index_ = info_.video_streams.empty()
+                              ? -1
+                              : info_.video_streams[0].index;
+    audio_stream_index_ = info_.audio_streams.empty()
+                              ? -1
+                              : info_.audio_streams[0].index;
+    sink_count_ = (video_stream_index_ >= 0 ? 1 : 0) +
+                  (audio_stream_index_ >= 0 ? 1 : 0);
+
+    // 3. Build the playback graph.
+    if (!BuildGraph()) {
+        state_ = PlaybackState::kError;
+        return false;
+    }
+
+    video_renderer_.Open(window_handle_, window_width_, window_height_);
 
     state_ = PlaybackState::kReady;
     return true;
@@ -102,10 +124,11 @@ void MediaPlayer::Impl::Close() {
     }
     video_renderer_.Close();
 
+    info_ = SourceInfo{};
+    video_stream_index_ = -1;
+    audio_stream_index_ = -1;
     eos_count_ = 0;
     sink_count_ = 0;
-    duration_ = 0.0;
-    has_audio_ = false;
 
     audio_clock_.Reset();
     video_clock_.Reset();
@@ -170,16 +193,20 @@ PlaybackState MediaPlayer::Impl::State() const {
 }
 
 double MediaPlayer::Impl::Duration() const {
-    return duration_;
+    return info_.duration;
 }
 
 double MediaPlayer::Impl::CurrentPosition() const {
     // AudioMaster: audio clock is the primary reference.
-    return has_audio_ ? audio_clock_.Get() : video_clock_.Get();
+    return audio_stream_index_ >= 0 ? audio_clock_.Get() : video_clock_.Get();
 }
 
 double MediaPlayer::Impl::VideoFps() const {
-    return video_fps_;
+    if (info_.video_streams.empty()) return 30.0;
+    const auto& vs = info_.video_streams[0];
+    return (vs.frame_rate_den > 0)
+               ? static_cast<double>(vs.frame_rate_num) / vs.frame_rate_den
+               : 30.0;
 }
 
 void MediaPlayer::Impl::NotifyWindowResized(int w, int h) {
@@ -188,107 +215,65 @@ void MediaPlayer::Impl::NotifyWindowResized(int w, int h) {
     video_renderer_.Resize(w, h);
 }
 
-bool MediaPlayer::Impl::BuildGraph(const std::string& filepath) {
+bool MediaPlayer::Impl::BuildGraph() {
+    // Precondition: info_ populated by Open(), stream indices selected.
+
+    // 1. Create graph and nodes.
     graph_ = std::make_unique<graph::MediaGraph>();
     graph_->SetEventCallback([this](graph::GraphEvent e) { OnGraphEvent(e); });
 
-    std::unique_ptr<graph::DemuxNode> demux = std::make_unique<graph::DemuxNode>(filepath);
-    std::unique_ptr<graph::DecoderNode> video_decoder = nullptr;
-    std::unique_ptr<graph::VideoSinkNode> video_sink = nullptr;
-    std::unique_ptr<graph::DecoderNode> audio_decoder = nullptr;
-    std::unique_ptr<graph::AudioSinkNode> audio_sink = nullptr;
+    auto* demux = static_cast<graph::DemuxNode*>(
+        graph_->AddNode(std::make_unique<graph::DemuxNode>(
+            info_.filepath, video_stream_index_, audio_stream_index_)));
 
-    streams_ = demux->StreamInfoMap();
-    if (streams_.empty()) {
-        SPDLOG_ERROR("MediaPlayer: source probe found no streams");
-        return false;
-    }
-
-    for (const auto& s : streams_) {
-        if (s.second.type == MediaType::kVideo && !video_decoder) {
-            video_decoder = std::make_unique<graph::DecoderNode>();
-            video_sink = std::make_unique<graph::VideoSinkNode>();
-        } else if (s.second.type == MediaType::kAudio && !audio_decoder) {
-            audio_decoder = std::make_unique<graph::DecoderNode>();
-            audio_sink = std::make_unique<graph::AudioSinkNode>();
-        }
+    graph::DecoderNode* vdec = nullptr;
+    graph::VideoSinkNode* vsink = nullptr;
+    if (video_stream_index_ >= 0) {
+        vdec = static_cast<graph::DecoderNode*>(graph_->AddNode(std::make_unique<graph::DecoderNode>()));
+        vsink = static_cast<graph::VideoSinkNode*>(graph_->AddNode(std::make_unique<graph::VideoSinkNode>()));
     }
 
-    sink_count_ = (video_sink ? 1 : 0) + (audio_sink ? 1 : 0);
-
-    auto* demux_node = static_cast<graph::DemuxNode*>(graph_->AddNode(std::move(demux)));
-    graph::DecoderNode* video_decoder_node = nullptr;
-    graph::DecoderNode* audio_decoder_node = nullptr;
-    graph::VideoSinkNode* video_sink_node = nullptr;
-    graph::AudioSinkNode* audio_sink_node = nullptr;
-
-    if (video_decoder) {
-        video_decoder_node = static_cast<graph::DecoderNode*>(graph_->AddNode(std::move(video_decoder)));
-    }
-    if (audio_decoder) {
-        audio_decoder_node = static_cast<graph::DecoderNode*>(graph_->AddNode(std::move(audio_decoder)));
-    }
-    if (video_sink) {
-        video_sink_node = static_cast<graph::VideoSinkNode*>(graph_->AddNode(std::move(video_sink)));
-    }
-    if (audio_sink) {
-        audio_sink_node = static_cast<graph::AudioSinkNode*>(graph_->AddNode(std::move(audio_sink)));
-    }
-    
-    for (const auto& s : streams_) {
-        if (s.second.type == MediaType::kVideo) {
-            const auto& enc = s.second.format.AsEncoded();
-            video_fps_ = (enc.frame_rate.den > 0)
-                             ? static_cast<double>(enc.frame_rate.num) /
-                                   enc.frame_rate.den
-                             : 30.0;
-        }
-    }
-    duration_ = streams_.begin()->second.duration;
-    has_audio_ = std::any_of(streams_.begin(), streams_.end(), [](const auto& s) {
-        return s.second.type == MediaType::kAudio;
-    });
-
-    if (video_sink_node) {
-        video_sink_node->SetRenderer(&video_renderer_);
-        video_sink_node->SetAudioClock(&audio_clock_);
-        video_sink_node->SetVideoClock(&video_clock_);
-        video_sink_node->SetVideoFps(video_fps_);
-        video_sink_node->SetFrameCallback(video_frame_cb_);
-        video_sink_node->SetSyncMode(has_audio_
-                          ? graph::VideoSinkNode::SyncMode::kAudioMaster
-                          : graph::VideoSinkNode::SyncMode::kVideoMaster);
-        video_sink_node->SetGraph(graph_.get());
+    graph::DecoderNode* adec = nullptr;
+    graph::AudioSinkNode* asink = nullptr;
+    if (audio_stream_index_ >= 0) {
+        adec = static_cast<graph::DecoderNode*>(graph_->AddNode(std::make_unique<graph::DecoderNode>()));
+        asink = static_cast<graph::AudioSinkNode*>(graph_->AddNode(std::make_unique<graph::AudioSinkNode>()));
     }
 
-    if (audio_sink_node) {
-        audio_sink_node->SetAudioClock(&audio_clock_);
-        audio_sink_node->SetGraph(graph_.get());
+    // 2. Configure sink nodes.
+    double fps = VideoFps();
+    bool has_audio = (audio_stream_index_ >= 0);
+    if (vsink) {
+        vsink->SetRenderer(&video_renderer_);
+        vsink->SetAudioClock(&audio_clock_);
+        vsink->SetVideoClock(&video_clock_);
+        vsink->SetVideoFps(fps);
+        vsink->SetFrameCallback(video_frame_cb_);
+        vsink->SetSyncMode(has_audio ? graph::VideoSinkNode::SyncMode::kAudioMaster
+                                     : graph::VideoSinkNode::SyncMode::kVideoMaster);
+        vsink->SetGraph(graph_.get());
+    }
+    if (asink) {
+        asink->SetAudioClock(&audio_clock_);
+        asink->SetGraph(graph_.get());
     }
 
-    if (video_decoder_node && video_sink_node) {
-        if (demux_node->Outputs().size() > 0 && video_decoder_node->Inputs().size() > 0) {
-            graph_->Connect(demux_node->Outputs()[0], video_decoder_node->Inputs()[0],
-                            {15 * 1024 * 1024, 256});
-        }
-        if (video_decoder_node->Outputs().size() > 0 && video_sink_node->Inputs().size() > 0) {
-            graph_->Connect(video_decoder_node->Outputs()[0], video_sink_node->Inputs()[0],
-                            {std::numeric_limits<int64_t>::max(), 3});
-        }
+    // 3. Wire pipeline (inline).
+    if (vdec && vsink) {
+        graph_->Connect(demux->Outputs()[0], vdec->Inputs()[0],
+                        {15 * 1024 * 1024, 256});
+        graph_->Connect(vdec->Outputs()[0], vsink->Inputs()[0],
+                        {std::numeric_limits<int64_t>::max(), 3});
     }
-    if (audio_decoder_node && audio_sink_node) {
-        if (demux_node->Outputs().size() > 1 && audio_decoder_node->Inputs().size() > 0) {
-            graph_->Connect(demux_node->Outputs()[1], audio_decoder_node->Inputs()[0],
-                            {15 * 1024 * 1024, 256});
-        }
-        if (audio_decoder_node->Outputs().size() > 0 && audio_sink_node->Inputs().size() > 0) {
-            graph_->Connect(audio_decoder_node->Outputs()[0], audio_sink_node->Inputs()[0],
-                            {std::numeric_limits<int64_t>::max(), 9});
-        }
+    if (adec && asink) {
+        int audio_port = (video_stream_index_ >= 0) ? 1 : 0;
+        graph_->Connect(demux->Outputs()[audio_port], adec->Inputs()[0],
+                        {15 * 1024 * 1024, 256});
+        graph_->Connect(adec->Outputs()[0], asink->Inputs()[0],
+                        {std::numeric_limits<int64_t>::max(), 9});
     }
-    
 
-    // --- Graph lifecycle: Negotiate -> Prepare ---
+    // 4. Finalize.
     if (!graph_->Negotiate()) {
         SPDLOG_ERROR("MediaPlayer: graph Negotiate failed");
         return false;
