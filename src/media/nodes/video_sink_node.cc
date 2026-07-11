@@ -108,18 +108,18 @@ double VideoSinkNode::ComputeDisplayDelay(double pts, double last_pts,
 double VideoSinkNode::ComputeAudioMasterDelay(double pts, double last_pts) {
     // 1. Frame interval
     double delay = pts - last_pts;
-    if (delay <= sync::kFrameDelayMin || delay > sync::kFrameDelayMax) {
+    if (delay <= kFrameDelayMin || delay > kFrameDelayMax) {
         delay = (video_fps_ > 0) ? (1.0 / video_fps_) : 0.04;
     }
 
     // 2. Audio/video difference + 3. adaptive sync threshold
     double diff = pts - audio_clock_->Get();
     double sync_threshold =
-        std::clamp(delay, sync::kSyncThresholdMin, sync::kSyncThresholdMax);
+        std::clamp(delay, kSyncThresholdMin, kSyncThresholdMax);
 
     // 4. Correct delay
     if (diff > sync_threshold) {
-        delay = (delay > sync::kSyncThresholdMax) ? (delay + diff) : (2 * delay);
+        delay = (delay > kSyncThresholdMax) ? (delay + diff) : (2 * delay);
     } else if (diff < -sync_threshold) {
         delay = 0.0;  // Video behind: display immediately
     }
@@ -130,23 +130,23 @@ double VideoSinkNode::ComputeAudioMasterDelay(double pts, double last_pts) {
     double actual_wait = frame_timer_ - now;
 
     // 7. Reset on large discontinuity
-    if (actual_wait < -sync::kMaxSleepSeconds) {
+    if (actual_wait < -kMaxSleepSeconds) {
         frame_timer_ = now;
         return 0.0;
     }
-    return (actual_wait > 0.0) ? std::min(actual_wait, sync::kMaxSleepSeconds)
+    return (actual_wait > 0.0) ? std::min(actual_wait, kMaxSleepSeconds)
                                : 0.0;
 }
 
 double VideoSinkNode::ComputeVideoMasterDelay(double pts, double last_pts,
                                               double last_display_time) {
     double delay = pts - last_pts;
-    if (delay <= sync::kFrameDelayMin || delay > sync::kFrameDelayMax) {
+    if (delay <= kFrameDelayMin || delay > kFrameDelayMax) {
         delay = (video_fps_ > 0) ? (1.0 / video_fps_) : 0.04;
     }
     double wait = (last_display_time + delay) - Clock::Now();
-    return (wait > sync::kFrameDelayMin)
-               ? std::min(wait, sync::kMaxSleepSeconds)
+    return (wait > kFrameDelayMin)
+               ? std::min(wait, kMaxSleepSeconds)
                : 0.0;
 }
 

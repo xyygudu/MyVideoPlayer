@@ -3,7 +3,7 @@
 
 #include <cstdint>
 
-namespace mvp::sync {
+namespace mvp {
 
 // A/V sync threshold lower bound (aligned with FFplay AV_SYNC_THRESHOLD_MIN).
 // ~40ms ≈ 1 frame at 25fps. Below this, diff is imperceptible.
@@ -40,6 +40,6 @@ inline constexpr int64_t kDefaultMaxQueueBytes = 15 * 1024 * 1024;
 // Seek target sentinel: indicates no seek is in progress.
 inline constexpr double kNoSeekTarget = -1.0;
 
-}  // namespace mvp::sync
+}  // namespace mvp
 
 #endif  // MVP_SYNC_CONSTANTS_H_

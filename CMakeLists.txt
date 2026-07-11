@@ -40,5 +40,5 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 # Append custom cmake module path
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
-add_subdirectory(src/core)
+add_subdirectory(src/media)
 add_subdirectory(src/app)
