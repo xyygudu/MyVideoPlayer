@@ -13,8 +13,6 @@ extern "C" {
 
 #include "graph/media_buffer.h"
 #include "media_frame.h"
-#include "mvp/audio_frame.h"
-#include "mvp/video_frame.h"
 
 namespace mvp::graph {
 

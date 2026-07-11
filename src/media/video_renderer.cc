@@ -12,9 +12,26 @@ extern "C" {
 #include <spdlog/spdlog.h>
 
 #include "ffmpeg_utils.h"
-#include "frame_impl.h"
 
 namespace mvp {
+
+namespace {
+
+inline PixelFormat MapPixelFormat(int av_pix_fmt) {
+    switch (av_pix_fmt) {
+        case 0:  return PixelFormat::kYUV420P;
+        case 4:  return PixelFormat::kYUV422P;
+        case 5:  return PixelFormat::kYUV444P;
+        case 23: return PixelFormat::kNV12;
+        case 26: return PixelFormat::kRGB32;
+        default:
+            if (av_pix_fmt == AV_PIX_FMT_D3D11)
+                return PixelFormat::kD3D11;
+            return PixelFormat::kUnknown;
+    }
+}
+
+}  // namespace
 
 VideoRenderer::VideoRenderer() = default;
 
@@ -83,10 +100,10 @@ void VideoRenderer::Close() {
     }
 }
 
-void VideoRenderer::Render(const VideoFrame& frame) {
+void VideoRenderer::Render(const MediaFrame& frame) {
     if (!renderer_ || !frame.IsValid()) return;
 
-    switch (frame.format()) {
+    switch (MapPixelFormat(frame.RawFrame()->format)) {
         case PixelFormat::kD3D11:
             RenderHWFrame(frame);
             break;
@@ -102,33 +119,35 @@ void VideoRenderer::Render(const VideoFrame& frame) {
     }
 }
 
-void VideoRenderer::RenderYUV420P(const VideoFrame& frame) {
-    int fw = frame.width();
-    int fh = frame.height();
+void VideoRenderer::RenderYUV420P(const MediaFrame& frame) {
+    AVFrame* av = frame.RawFrame();
+    int fw = av->width;
+    int fh = av->height;
     EnsureTexture(fw, fh, SDL_PIXELFORMAT_IYUV);
     if (!texture_) return;
 
     SDL_UpdateYUVTexture(texture_, nullptr,
-                         frame.data(0), frame.linesize(0),
-                         frame.data(1), frame.linesize(1),
-                         frame.data(2), frame.linesize(2));
+                         av->data[0], av->linesize[0],
+                         av->data[1], av->linesize[1],
+                         av->data[2], av->linesize[2]);
     Present(fw, fh);
 }
 
-void VideoRenderer::RenderNV12(const VideoFrame& frame) {
-    int fw = frame.width();
-    int fh = frame.height();
+void VideoRenderer::RenderNV12(const MediaFrame& frame) {
+    AVFrame* av = frame.RawFrame();
+    int fw = av->width;
+    int fh = av->height;
     EnsureTexture(fw, fh, SDL_PIXELFORMAT_NV12);
     if (!texture_) return;
 
     SDL_UpdateNVTexture(texture_, nullptr,
-                        frame.data(0), frame.linesize(0),
-                        frame.data(1), frame.linesize(1));
+                        av->data[0], av->linesize[0],
+                        av->data[1], av->linesize[1]);
     Present(fw, fh);
 }
 
-void VideoRenderer::RenderHWFrame(const VideoFrame& frame) {
-    AVFrame* hw_frame = GetInternalFrame(frame);
+void VideoRenderer::RenderHWFrame(const MediaFrame& frame) {
+    AVFrame* hw_frame = frame.RawFrame();
     if (!hw_frame || !hw_frame->hw_frames_ctx) {
         RenderFallback(frame);
         return;
@@ -154,26 +173,25 @@ void VideoRenderer::RenderHWFrame(const VideoFrame& frame) {
     Present(fw, fh);
 }
 
-void VideoRenderer::RenderFallback(const VideoFrame& frame) {
-    int fw = frame.width();
-    int fh = frame.height();
+void VideoRenderer::RenderFallback(const MediaFrame& frame) {
+    AVFrame* av = frame.RawFrame();
+    int fw = av->width;
+    int fh = av->height;
     EnsureTexture(fw, fh, SDL_PIXELFORMAT_IYUV);
     if (!texture_) return;
 
-    AVFrame* src_frame = GetInternalFrame(frame);
+    AVFrame* src_frame = av;
     if (!src_frame) return;
 
     // 硬件帧需要先 transfer 到系统内存
     AVFrame* sw_frame = src_frame;
     AVFramePtr tmp_frame;
-    bool transferred = false;
     if (src_frame->hw_frames_ctx) {
         if (av_hwframe_transfer_data(tmp_frame.get(), src_frame, 0) < 0) {
             SPDLOG_ERROR("VideoRenderer: hw frame transfer failed");
             return;
         }
         sw_frame = tmp_frame.get();
-        transferred = true;
     }
 
     // 使用 sws_scale 转为 YUV420P

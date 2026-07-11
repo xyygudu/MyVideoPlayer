@@ -15,6 +15,27 @@ enum class MediaType {
     kSubtitle,  // Reserved for future use
 };
 
+/// Pixel format tag for decoded video frames.
+enum class PixelFormat {
+    kUnknown = 0,
+    kYUV420P,
+    kYUV422P,
+    kYUV444P,
+    kNV12,
+    kRGB32,
+    kD3D11,  // Hardware frame (D3D11VA output), data[0] is ID3D11Texture2D*
+};
+
+/// Sample format tag for decoded audio frames.
+enum class SampleFormat {
+    kUnknown = 0,
+    kS16,
+    kS32,
+    kFloat,
+    kS16Planar,
+    kFloatPlanar,
+};
+
 /// Internal unified frame type for pipeline transport.
 /// Wraps an AVFrame with PTS and MediaType tag. Move-only.
 /// Used between Decoder → FrameQueue → Renderer boundary.

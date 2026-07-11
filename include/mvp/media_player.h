@@ -6,7 +6,6 @@
 #include <string>
 
 #include "mvp/export.h"
-#include "mvp/video_frame.h"
 
 namespace mvp {
 
@@ -68,10 +67,8 @@ class MVP_CORE_EXPORT MediaPlayer {
 
     // --- Callbacks ---
 
-    using VideoFrameCallback = std::function<void(const VideoFrame& frame)>;
     using FinishedCallback = std::function<void()>;
 
-    void SetVideoFrameCallback(VideoFrameCallback cb);
     void SetPlaybackFinishedCallback(FinishedCallback cb);
 
     // --- Filter chain (Stop→Rebuild→Start) ---

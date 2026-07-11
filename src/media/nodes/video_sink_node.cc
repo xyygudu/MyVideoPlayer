@@ -6,7 +6,6 @@
 #include <spdlog/spdlog.h>
 
 #include "clock.h"
-#include "frame_impl.h"
 #include "graph/graph_command.h"
 #include "sync_constants.h"
 #include "video_renderer.h"
@@ -169,12 +168,7 @@ void VideoSinkNode::RenderFrame(const MediaFrame& mf) {
     if (video_clock_) {
         video_clock_->Set(mf.pts());
     }
-
-    VideoFrame vf = MakeVideoFrame(mf);
-    renderer_->Render(vf);
-    if (frame_cb_) {
-        frame_cb_(vf);
-    }
+    renderer_->Render(mf);
 }
 
 void VideoSinkNode::RenderLoop() {

@@ -1,7 +1,7 @@
 #ifndef MVP_VIDEO_RENDERER_H_
 #define MVP_VIDEO_RENDERER_H_
 
-#include "mvp/video_frame.h"
+#include "media_frame.h"
 
 struct SDL_Window;
 struct SDL_Renderer;
@@ -29,7 +29,7 @@ class VideoRenderer {
     void Close();
 
     /// Render a video frame. Dispatches to hw/nv12/yuv420p/fallback paths.
-    void Render(const VideoFrame& frame);
+    void Render(const MediaFrame& frame);
 
     /// Notify that the parent window was resized.
     void Resize(int width, int height);
@@ -38,13 +38,13 @@ class VideoRenderer {
 
   private:
     // Software path: YUV420P direct upload
-    void RenderYUV420P(const VideoFrame& frame);
+    void RenderYUV420P(const MediaFrame& frame);
     // Software path: format conversion fallback
-    void RenderFallback(const VideoFrame& frame);
+    void RenderFallback(const MediaFrame& frame);
     // NV12 direct upload (used for hw_transfer or native NV12)
-    void RenderNV12(const VideoFrame& frame);
+    void RenderNV12(const MediaFrame& frame);
     // D3D11VA zero-copy path
-    void RenderHWFrame(const VideoFrame& frame);
+    void RenderHWFrame(const MediaFrame& frame);
 
     void Present(int frame_width, int frame_height);
     void EnsureTexture(int frame_width, int frame_height, int sdl_format);

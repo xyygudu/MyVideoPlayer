@@ -40,9 +40,6 @@ class MediaPlayer::Impl {
 
     void SetWindowHandle(void* handle) { window_handle_ = handle; }
     void NotifyWindowResized(int w, int h);
-    void SetVideoFrameCallback(MediaPlayer::VideoFrameCallback cb) {
-        video_frame_cb_ = std::move(cb);
-    }
     void SetFinishedCallback(MediaPlayer::FinishedCallback cb) {
         finished_cb_ = std::move(cb);
     }
@@ -78,7 +75,6 @@ class MediaPlayer::Impl {
     PlaybackState state_{PlaybackState::kIdle};
 
     // Callbacks
-    MediaPlayer::VideoFrameCallback video_frame_cb_;
     MediaPlayer::FinishedCallback finished_cb_;
 };
 
@@ -241,7 +237,6 @@ bool MediaPlayer::Impl::BuildGraph() {
         vsink->SetAudioClock(&audio_clock_);
         vsink->SetVideoClock(&video_clock_);
         vsink->SetVideoFps(fps);
-        vsink->SetFrameCallback(video_frame_cb_);
         vsink->SetSyncMode(has_audio ? graph::VideoSinkNode::SyncMode::kAudioMaster
                                      : graph::VideoSinkNode::SyncMode::kVideoMaster);
         vsink->SetGraph(graph_.get());
@@ -317,10 +312,6 @@ void MediaPlayer::SetWindowHandle(void* native_handle) {
 
 void MediaPlayer::NotifyWindowResized(int width, int height) {
     impl_->NotifyWindowResized(width, height);
-}
-
-void MediaPlayer::SetVideoFrameCallback(VideoFrameCallback cb) {
-    impl_->SetVideoFrameCallback(std::move(cb));
 }
 
 void MediaPlayer::SetPlaybackFinishedCallback(FinishedCallback cb) {

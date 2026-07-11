@@ -12,7 +12,6 @@
 #include "graph/media_graph.h"
 #include "graph/node.h"
 #include "graph/port.h"
-#include "mvp/video_frame.h"
 
 namespace mvp {
 class VideoRenderer;
@@ -20,9 +19,6 @@ class Clock;
 }  // namespace mvp
 
 namespace mvp::graph {
-
-/// Callback to deliver rendered VideoFrame to app layer.
-using VideoFrameCallback = std::function<void(const VideoFrame&)>;
 
 /// Sink node: renders decoded video frames to a window via SDL3.
 ///
@@ -77,9 +73,6 @@ class VideoSinkNode : public INode {
     void SetSyncMode(SyncMode mode) { sync_mode_ = mode; }
     void SetVideoFps(double fps) { video_fps_ = fps; }
 
-    /// Callback for delivering rendered frames to app layer.
-    void SetFrameCallback(VideoFrameCallback cb) { frame_cb_ = std::move(cb); }
-
     /// Set the graph reference for EOS reporting.
     void SetGraph(MediaGraph* graph) { graph_ = graph; }
 
@@ -118,8 +111,6 @@ class VideoSinkNode : public INode {
     std::atomic<bool> running_{false};
     std::atomic<bool> paused_{false};
     std::atomic<bool> awating_preview_frame_{false};
-    // App callback
-    VideoFrameCallback frame_cb_;
 };
 
 }  // namespace mvp::graph
