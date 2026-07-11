@@ -216,6 +216,7 @@ void VideoSinkNode::RenderLoop() {
             last_pts = mf.pts();
             last_display_time = Clock::Now();
             RenderFrame(mf);
+            awating_preview_frame_.store(false, std::memory_order_relaxed);
         } else {
             SyncAndRender(mf, last_pts, last_display_time);
         }
