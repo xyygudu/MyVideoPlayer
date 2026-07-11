@@ -25,6 +25,7 @@ CMakeUserPresets.json
 # Visual Studio / MSVC
 # =============================================================================
 .vs/
+.VSCodeCounter/
 *.user
 *.suo
 *.aps
