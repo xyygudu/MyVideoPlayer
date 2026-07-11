@@ -321,3 +321,125 @@
   MPV 将此称为 **hr-seek（high-resolution seek）**，原理完全一致，区别在于 MPV 用硬解加速了阶段2。
 
 - **效果/验证**：能精确定位到任意帧（精度取决于 PTS 粒度），代价是 seek 延迟正比于 GOP 大小 × 单帧解码时间
+
+---
+
+## Pipeline 架构与背压机制
+
+### Q: 你的播放器暂停时，后台线程是真的"停下来了"还是空转？整个 Pipeline 的暂停是怎么传播的？
+
+**简要描述：** 暂停从 SinkNode 向上游逐级反向传播。SinkNode 停止 Pull → Link 满 → 上游 Push 阻塞 → 整个 Pipeline 自然"冻结"，无需显式停止每个线程。
+
+**详细解析：**
+
+- **暂停的起点 — SinkNode 局部自旋**：
+
+  暂停命令通过 Graph 广播到所有节点。VideoSinkNode 收到 `kPause` 后设置 `paused_ = true`，RenderLoop 中检测到暂停时：
+
+  ```cpp
+  if (paused && !preview_pending) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      continue;  // 跳过 input_port_->Pull()
+  }
+  ```
+
+  SinkNode 进入 10ms 周期自旋，不再从 Link Pull 帧。
+
+- **背压的反向传播链**：
+
+  ```
+  Sink 不 Pull → Link(3帧) 迅速满 → Decoder Push 阻塞(cond_push_.wait)
+      → Decoder 不 Pull → Link(256包) 满 → Demux Push 阻塞(cond_push_.wait)
+  ```
+
+  暂停指令只需到达 SinkNode，背压通过 Link 的条件变量自动向上游传播。Demux、Decoder 都在各自的 `Push()` 调用上被 `cond_push_` 阻塞，CPU 占用接近零——不是空转，是真正的等待。
+
+- **恢复播放**：设置 `paused_ = false`，SinkNode 退出自旋开始 Pull → Link 出现空位 → `cond_push_` 唤醒 Decoder → Decoder Pull → 唤醒 Demux → Pipeline 自然恢复。
+
+- **与 FFplay 的对比**：FFplay 的 `read_thread`（demuxer 线程）在暂停时也是在 `SDL_cond_wait` 上阻塞，但用的是显式的 `continue_read_thread` 信号量而非纯背压。本项目的纯背压方案更简洁——不需要额外的暂停信号路径，利用已有 Link 的流控机制自然实现。
+
+- **效果/验证**：暂停时所有 Pipeline 线程 CPU 占用为 0%，恢复播放响应在 10ms 以内（SinkNode 自旋周期）。
+
+---
+
+### Q: 播放到文件末尾（EOF）后，你的 Pipeline 各线程处于什么状态？如何恢复？
+
+**简要描述：** EOF 后 Demux 进入局部等待循环，Decoder/Sink 被 EOS 唤醒后阻塞在空 Link 的 Pull 上。通过 EOS 传播机制通知下游，并依赖 Seek 或 Stop 命令恢复。
+
+**详细解析：**
+
+- **Demux 的 EOF 处理**：
+
+  `av_read_frame()` 返回 `AVERROR_EOF` 后，DemuxNode 先调用 `EmitEos()` 向所有输出 Link 推入带 `kEos` 标记的 buffer，然后进入局部等待：
+
+  ```cpp
+  while (running_.load(...) && !HasPendingSeek()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ```
+
+  Demux 不再读取文件、不再推新包，等待 Seek 命令（重播）或 Stop 命令。
+
+- **下游的 EOF 传递**：
+
+  Decoder Pull 到 EOS buffer → 解码线程退出 → 向 Sink Link 推 EOS。SinkNode Pull 到 EOS → 通知 Graph 报告 `kEos` 事件 → Player 收到后切换状态为 `kFinished`。
+
+  如果 SinkNode 在 EOS 之后继续 Pull（取决于实现），会在空 Link 上被 `cond_pop_.wait()` 阻塞。
+
+- **EOF 后的恢复**：
+
+  Player 在 `kFinished` 状态下收到 Play/Seek 请求 → `StopPipeline()`（join 已退出线程）→ `ResetPipeline()`（重置队列和标志）→ `StartPipeline()`（重新创建线程），完整重建 Pipeline。
+
+- **关键设计点**：Demux 在 EOF 后**不退线程**，保持存活等待 seek。这是因为文件读完不等于"播放器生命周期结束"——用户可能拖动进度条回到中间位置重播，如果 Demux 线程退出，重建成本更高。
+
+- **效果/验证**：EOF 后可正常重播、拖动进度条，状态转换无异常。
+
+---
+
+### Q: Seek 操作时，Flush 和 serial 递增之间存在竞态窗口吗？你是怎么用 serial 机制解决的？
+
+**简要描述：** Flush 清空 Link 后、Demux 唤醒并 Push 旧包的窗口确实存在。serial 机制通过 epoch 递增 + 消费者逐包校验，让旧包自动被丢弃，无需加锁或显式失效通知。
+
+**详细解析：**
+
+- **竞态窗口的精确时序**：
+
+  暂停状态下 Seek 是一个典型的竞态场景：
+
+  ```
+  T0: 暂停态 — Demux Push 阻塞在 Link 满 (cond_push_.wait)
+  T1: Seek → MediaGraph::Flush() 获取 Link mutex
+      ├── queue_.clear()           // 清空队列
+      ├── serial_.fetch_add(1)     // epoch +1 (如 5 → 6)
+      └── cond_push_.notify_all()  // 唤醒 Demux
+  T2: Demux 从 Push() 醒来，将旧包推入空 Link
+      — 这个包的 serial 是 5（旧 epoch）  ← 竞态窗口！
+  T3: DemuxLoop 下一轮迭代 → HandlePendingSeek()
+      → av_seek_frame() → RefreshLocalSerial()
+      → local_serial_ 更新为 6
+  T4: Decoder Pull 到 serial=5 的旧包
+  ```
+
+- **serial 机制的兜底作用**：
+
+  `MediaBuffer` 在 Push 时打上生产者的当前 serial（`buf.set_serial(local_serial_)`）。Decoder 在 `DecodeLoop()` 中对每个 Pull 出的 buffer 做校验：
+
+  ```cpp
+  if (buf.serial() != input_port_->CurrentSerial()) {
+      continue;  // 旧 epoch 的包，直接丢弃
+  }
+  ```
+
+  `CurrentSerial()` 返回 Link 的 `serial_`（T1 时已递增为 6）。旧包的 serial=5 ≠ 6 → 丢弃。
+
+- **为什么不做"先 increment serial 再 clear queue"**：
+
+  如果先 ++serial 再 clear queue，队列中还没来得及 Pull 的旧包 serial 已经和当前 serial 不匹配，会被误丢弃。正确的顺序是：先 clear（物理移走旧包），再 ++serial（逻辑标记新 epoch）。竞态窗口中漏入的旧包通过 serial 校验兜底。
+
+- **双保险设计**：Flush（物理清除）处理队列中的存量旧包，serial 校验（逻辑过滤）处理竞态窗口中的增量旧包。两者互补，不依赖时序假设。
+
+- **与 FFplay 的对比**：FFplay 的 `packet_queue_flush()` 同样在 mutex 内清空队列 + 递增 serial，下游 `packet_queue_get()` 中对比 serial。原理一致，本项目实现上通过 `Link` 类封装了队列 + serial，比 FFplay 的分离设计更内聚。
+
+- **效果/验证**：快速连续 Seek 不再出现旧帧闪现，代码从分散的多个 flag + 三次 Flush 调用简化为统一的 Link::Flush() + serial 匹配逻辑。
+
+---
