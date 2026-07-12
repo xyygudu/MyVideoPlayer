@@ -1,10 +1,4 @@
-## Purpose
-
-Defines how MediaPlayer::BuildGraph constructs a playback graph directly
-without a separate Builder class. Inline Connect calls keep pipeline wiring
-flexible for future filter insertion.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: PlaybackGraphBuilder 封装播放图构建
 系统 SHALL 不引入独立的 `PlaybackGraphBuilder` 类或 `PlaybackContext` 结构体。

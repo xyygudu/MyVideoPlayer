@@ -5,12 +5,14 @@
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QMouseEvent>
+#include <QSplitter>
 #include <QStyle>
 #include <QStyleOptionSlider>
 #include <QVBoxLayout>
 
 #include <spdlog/spdlog.h>
 
+#include "effect_panel.h"
 #include "video_widget.h"
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), slider_pressed_(false) {
@@ -38,21 +40,23 @@ MainWindow::~MainWindow() {
 
 void MainWindow::SetupUi() {
     setWindowTitle("MyVideoPlayer");
-    resize(800, 600);
+    resize(1000, 600);
 
-    auto* central = new QWidget(this);
-    setCentralWidget(central);
+    auto* splitter = new QSplitter(Qt::Horizontal, this);
+    setCentralWidget(splitter);
 
-    auto* main_layout = new QVBoxLayout(central);
+    // --- Left: video canvas + playback controls (unchanged layout) ---
+    auto* left = new QWidget(splitter);
+    auto* main_layout = new QVBoxLayout(left);
     main_layout->setContentsMargins(0, 0, 0, 0);
     main_layout->setSpacing(0);
 
     // Video area
-    video_widget_ = new VideoWidget(central);
+    video_widget_ = new VideoWidget(left);
     main_layout->addWidget(video_widget_, 1);
 
     // Control bar
-    auto* control_widget = new QWidget(central);
+    auto* control_widget = new QWidget(left);
     auto* control_layout = new QHBoxLayout(control_widget);
     control_layout->setContentsMargins(8, 4, 8, 4);
 
@@ -81,6 +85,14 @@ void MainWindow::SetupUi() {
     control_layout->addWidget(time_label_);
 
     main_layout->addWidget(control_widget);
+
+    // --- Right: effect panel ---
+    effect_panel_ = new EffectPanel(splitter);
+
+    splitter->addWidget(left);
+    splitter->addWidget(effect_panel_);
+    splitter->setStretchFactor(0, 1);
+    splitter->setStretchFactor(1, 0);
 }
 
 void MainWindow::OnOpenFile() {
@@ -95,6 +107,7 @@ void MainWindow::OnOpenFile() {
         player_->Play();
         play_pause_btn_->setText(QStringLiteral("\u23F8"));  // "⏸"
     }
+    effect_panel_->RefreshFromPlayer(player_.get());
 }
 
 void MainWindow::OnPlayPause() {

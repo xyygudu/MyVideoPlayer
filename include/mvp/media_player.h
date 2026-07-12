@@ -4,7 +4,9 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "mvp/effect_types.h"
 #include "mvp/export.h"
 
 namespace mvp {
@@ -71,12 +73,21 @@ class MVP_CORE_EXPORT MediaPlayer {
 
     void SetPlaybackFinishedCallback(FinishedCallback cb);
 
-    // --- Filter chain (Stop→Rebuild→Start) ---
+    // --- Effect chain ---
 
-    /// Apply a filter description (e.g., "scale=1280:720,eq=brightness=0.1").
-    /// Stops the current graph, rebuilds with filter, seeks to saved position.
-    /// Pass empty string to remove filter.
-    void SetFilter(const std::string& filter_desc);
+    /// Snapshot of every effect currently wired into the video pipeline
+    /// (id, display name, enabled state, and parameters). Empty if no
+    /// source is open.
+    std::vector<EffectInfo> EffectInfos() const;
+
+    /// Sets a single parameter of the named effect. Unknown effect_id or
+    /// param_id is logged and ignored, never crashes.
+    void SetEffectParam(const std::string& effect_id, const std::string& param_id,
+                        EffectParamValue value);
+
+    /// Enables or disables the named effect (bypasses it when disabled).
+    /// Unknown effect_id is logged and ignored.
+    void SetEffectEnabled(const std::string& effect_id, bool enabled);
 
   private:
     class Impl;

@@ -4,6 +4,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
+#include <libavutil/pixfmt.h>
 }
 
 namespace mvp {
@@ -74,6 +75,57 @@ class AVPacketPtr {
   private:
     AVPacket* pkt_;
 };
+
+// Whether `av_pix_fmt` is one of the planar/semi-planar YUV formats the
+// hand-written effect nodes (TransformEffectNode, ColorEffectNode) know how
+// to process. Other formats (e.g. RGB32) are passed through unmodified by
+// those nodes rather than mis-interpreted as YUV.
+inline bool IsPlanarYuvPixelFormat(int av_pix_fmt) {
+    switch (av_pix_fmt) {
+        case AV_PIX_FMT_YUV420P:
+        case AV_PIX_FMT_YUV422P:
+        case AV_PIX_FMT_YUV444P:
+        case AV_PIX_FMT_NV12:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Layout of a YUV chroma plane, in the units the effect nodes operate on.
+//
+// `interleaved` is true only for NV12, where a single plane (data[1]) holds
+// alternating U/V bytes; planar formats (420/422/444) instead use two
+// independent planes (data[1]=U, data[2]=V) and this struct describes the
+// (identical) layout of either one.
+//
+// `width`/`height` are the plane's own dimensions: for interleaved formats,
+// `width` counts *component pairs* (i.e. matches the U-only/V-only sample
+// count per row, not raw bytes) so callers can address individual U/V
+// samples with a component stride of 2, offset 0 (U) or 1 (V).
+struct ChromaPlaneLayout {
+    bool interleaved{false};
+    int width{0};
+    int height{0};
+};
+
+// Returns {false, 0, 0} for formats IsPlanarYuvPixelFormat() rejects —
+// callers should treat that as "no chroma plane to process".
+inline ChromaPlaneLayout ComputeChromaPlaneLayout(int av_pix_fmt, int luma_width,
+                                                  int luma_height) {
+    switch (av_pix_fmt) {
+        case AV_PIX_FMT_YUV420P:
+            return {false, (luma_width + 1) / 2, (luma_height + 1) / 2};
+        case AV_PIX_FMT_YUV422P:
+            return {false, (luma_width + 1) / 2, luma_height};
+        case AV_PIX_FMT_YUV444P:
+            return {false, luma_width, luma_height};
+        case AV_PIX_FMT_NV12:
+            return {true, (luma_width + 1) / 2, (luma_height + 1) / 2};
+        default:
+            return {false, 0, 0};
+    }
+}
 
 }  // namespace mvp
 

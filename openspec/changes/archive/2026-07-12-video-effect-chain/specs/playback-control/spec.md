@@ -1,25 +1,4 @@
-﻿## Requirements
-
-### Requirement: Play starts graph execution
-Play() 操作 SHALL 通过 MediaGraph::Start() 级联启动所有节点。
-
-### Requirement: Pause pauses graph execution
-Pause() 操作 SHALL 通过冻结 Clock 实现，GraphState 转为 Paused。
-
-### Requirement: Seek flushes graph and repositions
-Seek() 操作 SHALL 调用 MediaGraph::Flush() + SendCommand(kSeek)。
-
-### Requirement: Duration and position queries
-系统 SHALL 提供 Duration() / CurrentPosition() / VideoFps() / State() 查询接口。
-
-### Requirement: Close releases resources
-Close() SHALL 调用 MediaGraph::Stop() 释放所有资源。
-
-### Requirement: StepFrame advances one frame while paused
-StepFrame() 仅在 Paused 状态下有效。
-
-### Requirement: Playback finished callback
-SetPlaybackFinishedCallback 在状态转为 Finished 时触发。
+## ADDED Requirements
 
 ### Requirement: Effect info query
 系统 SHALL 提供 `MediaPlayer::EffectInfos() const`，委托给内部 `EffectManager::Describe()`，返回当前 graph 中所有已注册特效节点的描述列表（`std::vector<EffectInfo>`），每项包含 `effect_id`、`display_name`、`enabled` 和该节点的 `params`（`std::vector<EffectParam>`，含每个参数的类型与当前值）。未 `Open()` 或 graph 未构建时 SHALL 返回空列表。

@@ -11,6 +11,7 @@
 #include "mvp/media_player.h"
 
 class VideoWidget;
+class EffectPanel;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -33,6 +34,7 @@ class MainWindow : public QMainWindow {
     QString FormatTime(double seconds) const;
 
     VideoWidget* video_widget_;
+    EffectPanel* effect_panel_;
     QPushButton* play_pause_btn_;
     QPushButton* open_btn_;
     QSlider* progress_slider_;
