@@ -56,7 +56,16 @@ class MediaFrame {
     bool IsValid() const;
     MediaType type() const;
 
-    /// Access the underlying AVFrame. Internal use only.
+    int width() const;
+    int height() const;
+    int format() const;
+    const uint8_t* PlaneData(int plane) const;
+    uint8_t* PlaneData(int plane);
+    int PlaneLinesize(int plane) const;
+
+    [[nodiscard]] MediaFrame MakeWritable() const;
+    static MediaFrame CreateSameFormat(const MediaFrame& ref, double pts);
+
     AVFrame* RawFrame() const;
 
   private:

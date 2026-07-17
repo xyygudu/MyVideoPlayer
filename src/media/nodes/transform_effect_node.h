@@ -77,9 +77,11 @@ class TransformEffectNode : public IEffectNode {
     void SetEnabled(bool enabled) override { enabled_.store(enabled); }
 
   private:
-    /// Reads all seven atomics once per frame into a plain-data snapshot.
     TransformAffineParams SnapshotParams() const;
-    bool AllocateOutputFrame(const AVFrame* src, AVFrame* dst) const;
+    bool TryApplyPermute(const MediaFrame& src, MediaFrame& dst,
+                         MediaBuffer& input, OutputCallback& emit);
+    void ApplyBilinear(const MediaFrame& src, MediaFrame& dst,
+                       MediaBuffer& input, OutputCallback& emit);
 
     NodeState state_{NodeState::kIdle};
 

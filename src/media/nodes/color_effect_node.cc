@@ -1,7 +1,6 @@
 #include "nodes/color_effect_node.h"
 
 #include <algorithm>
-#include <cmath>
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -10,18 +9,9 @@ extern "C" {
 
 #include "ffmpeg_utils.h"
 #include "media_frame.h"
+#include "pixel_ops.h"
 
 namespace mvp::graph {
-
-namespace {
-
-/// Applies `(v - 128) * scale + 128 + offset`, clamped to [0, 255].
-inline uint8_t ApplyLinear(uint8_t v, float scale, float offset) {
-    float result = (static_cast<float>(v) - 128.0f) * scale + 128.0f + offset;
-    return static_cast<uint8_t>(std::clamp(result, 0.0f, 255.0f) + 0.5f);
-}
-
-}  // namespace
 
 ColorEffectNode::ColorEffectNode() {
     input_port_ = std::make_unique<InputPort>(this);
@@ -35,122 +25,81 @@ bool ColorEffectNode::Negotiate() {
         SPDLOG_ERROR("ColorEffectNode: input port not connected");
         return false;
     }
-    // Color adjustment does not change resolution or pixel format.
     output_port_->SetFormat(input_port_->Format());
     return true;
 }
 
 bool ColorEffectNode::Prepare() {
-    if (state_ == NodeState::kPrepared || state_ == NodeState::kRunning) {
-        return true;
-    }
+    if (state_ == NodeState::kPrepared || state_ == NodeState::kRunning) return true;
     state_ = NodeState::kPrepared;
     return true;
 }
 
 bool ColorEffectNode::Start() {
     if (state_ != NodeState::kPrepared) {
-        SPDLOG_ERROR("ColorEffectNode: Start called in invalid state {}",
-                     static_cast<int>(state_));
+        SPDLOG_ERROR("ColorEffectNode: Start called in invalid state {}", static_cast<int>(state_));
         return false;
     }
     state_ = NodeState::kRunning;
     return true;
 }
 
-void ColorEffectNode::Stop() {
-    state_ = NodeState::kIdle;
-}
-
-void ColorEffectNode::Flush() {
-    // No internal buffering; parameters persist across seeks.
-}
+void ColorEffectNode::Stop() { state_ = NodeState::kIdle; }
+void ColorEffectNode::Flush() {}
 
 std::vector<EffectParam> ColorEffectNode::Params() const {
     return {
-        {"brightness", "亮度", EffectParamType::kFloat, brightness_.load(),
-         0.0f, -1.0f, 1.0f, {}},
-        {"contrast", "对比度", EffectParamType::kFloat, contrast_.load(),
-         1.0f, 0.0f, 3.0f, {}},
-        {"saturation", "饱和度", EffectParamType::kFloat, saturation_.load(),
-         1.0f, 0.0f, 3.0f, {}},
+        {"brightness", "亮度", EffectParamType::kFloat, brightness_.load(), 0.0f, -1.0f, 1.0f, {}},
+        {"contrast", "对比度", EffectParamType::kFloat, contrast_.load(), 1.0f, 0.0f, 3.0f, {}},
+        {"saturation", "饱和度", EffectParamType::kFloat, saturation_.load(), 1.0f, 0.0f, 3.0f, {}},
     };
 }
 
 void ColorEffectNode::SetParam(const std::string& id, EffectParamValue value) {
     if (!std::holds_alternative<float>(value)) {
-        SPDLOG_WARN("ColorEffectNode: param '{}' expects a float value", id);
+        SPDLOG_WARN("ColorEffectNode: param '{}' expects float", id);
         return;
     }
-    if (id == "brightness") {
-        brightness_.store(value);
-    } else if (id == "contrast") {
-        contrast_.store(value);
-    } else if (id == "saturation") {
-        saturation_.store(value);
-    } else {
-        SPDLOG_WARN("ColorEffectNode: unknown param id '{}'", id);
-    }
+    if (id == "brightness") brightness_.store(value);
+    else if (id == "contrast") contrast_.store(value);
+    else if (id == "saturation") saturation_.store(value);
+    else SPDLOG_WARN("ColorEffectNode: unknown param '{}'", id);
 }
 
 void ColorEffectNode::Process(MediaBuffer input, OutputCallback emit) {
-    if (!enabled_.load() || !input.IsFrame()) {
-        emit(std::move(input));
-        return;
-    }
+    if (!enabled_.load() || !input.IsFrame()) { emit(std::move(input)); return; }
 
-    AVFrame* frame = input.AsFrame().RawFrame();
-    if (!frame || !frame->data[0]) {
-        emit(std::move(input));
-        return;
-    }
+    float b = std::get<float>(brightness_.load());
+    float c = std::get<float>(contrast_.load());
+    float s = std::get<float>(saturation_.load());
+    if (b == 0.0f && c == 1.0f && s == 1.0f) { emit(std::move(input)); return; }
 
-    if (!IsPlanarYuvPixelFormat(frame->format)) {
+    MediaFrame mf = input.AsFrame().MakeWritable();
+    if (!mf.IsValid()) { emit(std::move(input)); return; }
+
+    if (!IsPlanarYuvPixelFormat(mf.format())) {
         if (!logged_unsupported_format_) {
-            SPDLOG_WARN(
-                "ColorEffectNode: unsupported pixel format {}, passing "
-                "frames through unmodified",
-                frame->format);
+            SPDLOG_WARN("ColorEffectNode: unsupported pixel format {}, passing through", mf.format());
             logged_unsupported_format_ = true;
         }
         emit(std::move(input));
         return;
     }
 
-    if (av_frame_make_writable(frame) < 0) {
-        SPDLOG_WARN("ColorEffectNode: frame not writable, passing through");
-        emit(std::move(input));
-        return;
+    auto lut = pixel_ops::BuildColorLut(b, c, s);
+    pixel_ops::ApplyLut(mf.PlaneData(0), mf.PlaneLinesize(0), mf.width(), mf.height(), lut.y);
+
+    ChromaPlaneLayout layout = ComputeChromaPlaneLayout(mf.format(), mf.width(), mf.height());
+    int row_bytes = layout.interleaved ? layout.width * 2 : layout.width;
+    int plane_count = layout.interleaved ? 1 : 2;
+    for (int p = 0; p < plane_count; ++p) {
+        pixel_ops::ApplyLut(mf.PlaneData(1 + p), mf.PlaneLinesize(1 + p),
+                            layout.width, layout.height, lut.uv);
     }
 
-    // Snapshot all parameters once per frame — not inside the pixel loop.
-    const float brightness_offset = std::get<float>(brightness_.load()) * 255.0f;
-    const float contrast = std::get<float>(contrast_.load());
-    const float saturation = std::get<float>(saturation_.load());
-
-    for (int y = 0; y < frame->height; ++y) {
-        uint8_t* row = frame->data[0] + static_cast<ptrdiff_t>(y) * frame->linesize[0];
-        for (int x = 0; x < frame->width; ++x) {
-            row[x] = ApplyLinear(row[x], contrast, brightness_offset);
-        }
-    }
-
-    ChromaPlaneLayout layout =
-        ComputeChromaPlaneLayout(frame->format, frame->width, frame->height);
-    int chroma_row_bytes = layout.interleaved ? layout.width * 2 : layout.width;
-    int chroma_plane_count = layout.interleaved ? 1 : 2;
-    for (int plane = 0; plane < chroma_plane_count; ++plane) {
-        uint8_t* base = frame->data[1 + plane];
-        int linesize = frame->linesize[1 + plane];
-        for (int y = 0; y < layout.height; ++y) {
-            uint8_t* row = base + static_cast<ptrdiff_t>(y) * linesize;
-            for (int x = 0; x < chroma_row_bytes; ++x) {
-                row[x] = ApplyLinear(row[x], saturation, 0.0f);
-            }
-        }
-    }
-
-    emit(std::move(input));
+    MediaBuffer out(std::move(mf), input.timestamp(), input.flags());
+    out.set_serial(input.serial());
+    emit(std::move(out));
 }
 
 }  // namespace mvp::graph
