@@ -93,6 +93,7 @@ void MainWindow::SetupUi() {
     splitter->addWidget(effect_panel_);
     splitter->setStretchFactor(0, 1);
     splitter->setStretchFactor(1, 0);
+    splitter->setSizes({740, 260});
 }
 
 void MainWindow::OnOpenFile() {
