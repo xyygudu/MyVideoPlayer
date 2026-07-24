@@ -17,13 +17,6 @@ inline uint8_t ApplyLinear(uint8_t v, float scale, float offset) {
     return static_cast<uint8_t>(std::clamp(r, 0.0f, 255.0f) + 0.5f);
 }
 
-void InverseMap(const AffineMapping& m, float dst_x, float dst_y, float* src_x, float* src_y) {
-    float ux = dst_x - m.cx - m.tx;
-    float uy = dst_y - m.cy - m.ty;
-    *src_x = m.inv[0] * ux + m.inv[1] * uy + m.cx;
-    *src_y = m.inv[2] * ux + m.inv[3] * uy + m.cy;
-}
-
 uint8_t SampleBilinear(const uint8_t* plane, int linesize, int width, int height,
                        int comp_stride, int comp_offset, float x, float y, uint8_t fill) {
     auto texel = [&](int ix, int iy) -> float {
@@ -42,6 +35,24 @@ uint8_t SampleBilinear(const uint8_t* plane, int linesize, int width, int height
     float v = (1.0f - fx) * (1.0f - fy) * p00 + fx * (1.0f - fy) * p10 +
               (1.0f - fx) * fy * p01 + fx * fy * p11;
     return static_cast<uint8_t>(std::clamp(v, 0.0f, 255.0f) + 0.5f);
+}
+
+// For a fixed destination row y, InverseMap(m, x, y, ...) is an affine
+// (linear) function of x alone: sx(x) = inv0*x + row_off_x,
+// sy(x) = inv2*x + row_off_y. Precomputing the row offset once avoids
+// recomputing the full inverse-mapping formula (2 subtracts + 4 mults + 4
+// adds) for every pixel -- this is a plain scalar win, no SIMD needed.
+struct RowOffsets {
+    float off_x;
+    float off_y;
+};
+
+RowOffsets ComputeRowOffsets(const AffineMapping& m, float dst_y) {
+    float uy = dst_y - m.cy - m.ty;
+    RowOffsets r;
+    r.off_x = m.inv[1] * uy + m.cx - m.inv[0] * (m.cx + m.tx);
+    r.off_y = m.inv[3] * uy + m.cy - m.inv[2] * (m.cx + m.tx);
+    return r;
 }
 
 int QuantizeRotation(float deg) {
@@ -83,6 +94,11 @@ ColorLut BuildColorLut(float brightness, float contrast, float saturation) {
     return lut;
 }
 
+// Plain scalar LUT apply. A SIMD (SSSE3/AVX2 nibble-split pshufb) version
+// was measured and reverted: this operation is memory-bandwidth-bound (a
+// 256-entry LUT stays L1-resident), and the extra shuffle/compare/blend
+// arithmetic per byte did not pay for itself -- see
+// docs/improvements/pixel-ops-simd.md.
 void ApplyLut(uint8_t* plane, int linesize, int width, int height, const uint8_t lut[256]) {
     for (int y = 0; y < height; ++y) {
         uint8_t* row = plane + y * linesize;
@@ -111,14 +127,21 @@ AffineMapping ComputeAffineMapping(const graph::TransformAffineParams& p, int pl
     return m;
 }
 
+// Plain scalar affine remap. A SIMD version (vectorized coordinate/weight
+// math, scalar texel gather + blend) was measured and reverted: the gather
+// and blend -- left scalar by design -- dominate the cost, so vectorizing
+// only the coordinate math barely moved the needle, and the extra
+// dispatch/stack-roundtrip layers were a net loss under a Debug build. See
+// docs/improvements/pixel-ops-simd.md.
 void RemapPlane(const uint8_t* src, int src_linesize, uint8_t* dst, int dst_linesize,
                 int width, int height, int comp_stride, int comp_offset,
                 uint8_t fill, const AffineMapping& m) {
     for (int y = 0; y < height; ++y) {
+        const RowOffsets ro = ComputeRowOffsets(m, static_cast<float>(y));
         uint8_t* d = dst + static_cast<ptrdiff_t>(y) * dst_linesize;
         for (int x = 0; x < width; ++x) {
-            float sx, sy;
-            InverseMap(m, static_cast<float>(x), static_cast<float>(y), &sx, &sy);
+            float sx = m.inv[0] * static_cast<float>(x) + ro.off_x;
+            float sy = m.inv[2] * static_cast<float>(x) + ro.off_y;
             d[x * comp_stride + comp_offset] =
                 SampleBilinear(src, src_linesize, width, height, comp_stride, comp_offset, sx, sy, fill);
         }
@@ -129,10 +152,11 @@ void RemapInterleavedPlane(const uint8_t* src, int src_linesize,
                            uint8_t* dst, int dst_linesize,
                            int width, int height, uint8_t fill, const AffineMapping& m) {
     for (int y = 0; y < height; ++y) {
+        const RowOffsets ro = ComputeRowOffsets(m, static_cast<float>(y));
         uint8_t* d = dst + static_cast<ptrdiff_t>(y) * dst_linesize;
         for (int x = 0; x < width; ++x) {
-            float sx, sy;
-            InverseMap(m, static_cast<float>(x), static_cast<float>(y), &sx, &sy);
+            float sx = m.inv[0] * static_cast<float>(x) + ro.off_x;
+            float sy = m.inv[2] * static_cast<float>(x) + ro.off_y;
             d[x * 2]     = SampleBilinear(src, src_linesize, width, height, 2, 0, sx, sy, fill);
             d[x * 2 + 1] = SampleBilinear(src, src_linesize, width, height, 2, 1, sx, sy, fill);
         }

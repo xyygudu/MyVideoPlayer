@@ -126,7 +126,9 @@ void TransformEffectNode::Process(MediaBuffer input, OutputCallback emit) {
         return;
     }
 
-    MediaFrame out_mf = MediaFrame::CreateSameFormat(src_mf, src_mf.pts());
+    MediaFrame out_mf = output_pool_.Acquire(src_mf.width(), src_mf.height(), src_mf.format(),
+                                             src_mf.pts());
+    if (!out_mf.IsValid()) { emit(std::move(input)); return; }
     if (TryApplyPermute(src_mf, out_mf, input, emit)) return;
     ApplyBilinear(src_mf, out_mf, input, emit);
 }
@@ -156,6 +158,7 @@ bool TransformEffectNode::TryApplyPermute(const MediaFrame& src, MediaFrame& dst
                                    dst.PlaneData(2), dst.PlaneLinesize(2),
                                    layout.width, layout.height, 1, 0, params);
     }
+
     MediaBuffer out_buf(std::move(dst), input.timestamp(), input.flags());
     out_buf.set_serial(input.serial());
     emit(std::move(out_buf));
@@ -186,6 +189,7 @@ void TransformEffectNode::ApplyBilinear(const MediaFrame& src, MediaFrame& dst,
                               dst.PlaneData(2), dst.PlaneLinesize(2),
                               layout.width, layout.height, 1, 0, 128, chroma_map);
     }
+
     MediaBuffer out_buf(std::move(dst), input.timestamp(), input.flags());
     out_buf.set_serial(input.serial());
     emit(std::move(out_buf));

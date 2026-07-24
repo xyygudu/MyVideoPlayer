@@ -4,6 +4,7 @@
 #include "ffmpeg_utils.h"
 
 struct AVFrame;
+struct AVBufferPool;
 
 namespace mvp {
 
@@ -63,15 +64,52 @@ class MediaFrame {
     uint8_t* PlaneData(int plane);
     int PlaneLinesize(int plane) const;
 
-    [[nodiscard]] MediaFrame MakeWritable() const;
+    // Consumes *this. If the underlying AVFrame is uniquely referenced,
+    // ownership is moved out directly (zero-copy). Otherwise falls back to
+    // a deep copy, same as the const& overload below.
+    [[nodiscard]] MediaFrame MakeWritable() &&;
+    // Leaves *this unchanged. Always returns an independent deep copy,
+    // since the caller keeps using the original frame afterward.
+    [[nodiscard]] MediaFrame MakeWritable() const&;
     static MediaFrame CreateSameFormat(const MediaFrame& ref, double pts);
 
     AVFrame* RawFrame() const;
 
   private:
+    friend class MediaFramePool;  // Acquire() assembles a MediaFrame's AVFrame directly
+
     AVFramePtr frame_;
     double pts_{0.0};
     MediaType type_{MediaType::kUnknown};
+};
+
+/// Reusable allocator for same-size/format output frames.
+/// Wraps an AVBufferPool so repeated calls with the same width/height/format
+/// (the common case for a node that re-processes the same video stream)
+/// reuse already-allocated buffers instead of hitting the system allocator
+/// every frame. Move-only, mirrors AVFramePtr's RAII style.
+/// NOT thread-safe: intended for use by a single kPassive/kActive node that
+/// calls Acquire() from one thread only (matches how effect nodes run today).
+class MediaFramePool {
+  public:
+    MediaFramePool() = default;
+    ~MediaFramePool();
+
+    MediaFramePool(MediaFramePool&& other) noexcept;
+    MediaFramePool& operator=(MediaFramePool&& other) noexcept;
+
+    MediaFramePool(const MediaFramePool&) = delete;
+    MediaFramePool& operator=(const MediaFramePool&) = delete;
+
+    /// Returns a frame of the given size/format. Rebuilds the internal pool
+    /// only when width/height/format differ from the last call.
+    MediaFrame Acquire(int width, int height, int format, double pts);
+
+  private:
+    AVBufferPool* pool_{nullptr};
+    int width_{0};
+    int height_{0};
+    int format_{-1};
 };
 
 }  // namespace mvp

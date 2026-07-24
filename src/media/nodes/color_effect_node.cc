@@ -1,6 +1,7 @@
 #include "nodes/color_effect_node.h"
 
 #include <algorithm>
+#include <utility>
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -74,7 +75,7 @@ void ColorEffectNode::Process(MediaBuffer input, OutputCallback emit) {
     float s = std::get<float>(saturation_.load());
     if (b == 0.0f && c == 1.0f && s == 1.0f) { emit(std::move(input)); return; }
 
-    MediaFrame mf = input.AsFrame().MakeWritable();
+    MediaFrame mf = std::move(input.AsFrame()).MakeWritable();
     if (!mf.IsValid()) { emit(std::move(input)); return; }
 
     if (!IsPlanarYuvPixelFormat(mf.format())) {

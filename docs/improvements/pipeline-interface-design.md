@@ -102,3 +102,51 @@ void Start(PacketQueue* queue, DecoderCallbacks callbacks);
 ```
 
 或改为 Set 方式（但需确保 Start 前所有 required 回调已设置，增加运行时检查成本）。
+
+---
+
+## 4. MediaBuffer 构造函数成员初始化顺序读到 move 后的值
+
+> 记录时间：2026-07-23
+> 关联变更：openspec/changes/effect-alloc-simd-opt（排查 CPU 效果节点性能问题时顺带发现，不在该变更范围内修复）
+
+### 问题
+
+`MediaBuffer::MediaBuffer(MediaFrame frame, Timestamp ts, BufferFlags flags)` 的成员初始化列表写作：
+
+```cpp
+MediaBuffer::MediaBuffer(MediaFrame frame, Timestamp ts, BufferFlags flags)
+    : payload_(std::move(frame)),
+      media_type_(frame.type()),  // 在 payload_ 之后按声明顺序求值
+      ...
+```
+
+C++ 成员初始化顺序按**声明顺序**（而非初始化列表书写顺序）执行。`media_buffer.h` 中 `payload_` 声明在 `media_type_` 之前，因此 `payload_(std::move(frame))` 先执行——这一步通过 `std::variant` 转换构造函数移动构造出 `MediaFrame`，触发 `MediaFrame` 的移动构造函数，其中会把源对象的 `type_` 重置为 `MediaType::kUnknown`。等到 `media_type_(frame.type())` 求值时，`frame` 已经是移动后的状态，读到的 `type()` 恒为 `kUnknown`，而不是调用方传入帧的真实类型。
+
+### 影响场景
+
+- **所有携带 `MediaFrame` payload 的 `MediaBuffer` 构造**：`media_type_` 字段实际上从未被正确设置为 `kVideo`/`kAudio`，无论传入什么类型的帧
+- **依赖 `MediaBuffer::media_type()` 做路由/校验的逻辑**：如果未来新增基于 `media_type()` 的分支判断（当前代码路径主要靠 graph 连接拓扑区分音视频，可能尚未被这个 bug 影响到实际行为，但这是运气而非设计保证）
+
+### 改进建议（参考 GStreamer GstBuffer 的字段初始化顺序）
+
+在成员初始化列表里避免"先移动、后读取同一个源对象"的顺序依赖。最直接的修复是提前缓存要读取的值：
+
+```cpp
+MediaBuffer::MediaBuffer(MediaFrame frame, Timestamp ts, BufferFlags flags)
+    : payload_(std::move(frame)),
+      media_type_(std::get<MediaFrame>(payload_).type()),  // 从移动后的目标读取，而非移动前的源
+      ...
+```
+
+或者更根本地，在初始化列表之外、构造函数体之前用一个局部变量固定住 `type()`：
+
+```cpp
+MediaBuffer::MediaBuffer(MediaFrame frame, Timestamp ts, BufferFlags flags)
+    : media_type_(frame.type()),   // 依赖声明顺序调整：media_type_ 需要声明在 payload_ 之前
+      payload_(std::move(frame)),
+      ...
+```
+
+（后者要求同步调整 `media_buffer.h` 里 `payload_`/`media_type_` 的声明顺序，属于跨越声明处的改动，需要一并修改头文件。）
+

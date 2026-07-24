@@ -88,6 +88,11 @@ class TransformEffectNode : public IEffectNode {
     std::unique_ptr<InputPort> input_port_;
     std::unique_ptr<OutputPort> output_port_;
 
+    // Reusable output-frame allocator: avoids a fresh system allocation on
+    // every Process() call when consecutive frames share the same size/
+    // format (the common case). See media_frame.h / frame-abstraction spec.
+    MediaFramePool output_pool_;
+
     std::atomic<EffectParamValue> rotate_deg_{0.0f};
     std::atomic<EffectParamValue> flip_h_{false};
     std::atomic<EffectParamValue> flip_v_{false};
