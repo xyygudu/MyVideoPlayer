@@ -1,9 +1,4 @@
-## Purpose
-
-Defines the Transcoder class and MuxNode for transcode scenarios —
-building transcode graphs that process media from source to encoded output.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Transcoder builds transcode graph
 系统 SHALL 定义 `Transcoder` 类，作为转码场景的预设图构建器。
