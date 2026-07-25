@@ -1,213 +1,127 @@
 #include "main_window.h"
 
-#include <cmath>
-
-#include <QFileDialog>
 #include <QHBoxLayout>
 #include <QMouseEvent>
-#include <QSplitter>
-#include <QStyle>
-#include <QStyleOptionSlider>
+#include <QStackedWidget>
 #include <QVBoxLayout>
+#include <QWindow>
 
 #include <spdlog/spdlog.h>
 
-#include "effect_panel.h"
-#include "video_widget.h"
+#include "home_page.h"
+#include "player_page.h"
+#include "title_bar.h"
+#include "transcoder_page.h"
+#include "app_theme.h"
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), slider_pressed_(false) {
-    player_ = std::make_unique<mvp::MediaPlayer>();
+MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     SetupUi();
-
-    // Wire native window handle to player for SDL3 rendering
-    player_->SetWindowHandle(reinterpret_cast<void*>(video_widget_->winId()));
-
-    // Forward resize events to player/renderer
-    video_widget_->SetResizeCallback([this](int w, int h) {
-        player_->NotifyWindowResized(w, h);
-    });
-
-    // Timer for updating progress
-    timer_ = new QTimer(this);
-    connect(timer_, &QTimer::timeout, this, &MainWindow::OnTimerTick);
-    timer_->start(100);  // 100ms interval
-}
-
-MainWindow::~MainWindow() {
-    timer_->stop();
-    player_->Close();
 }
 
 void MainWindow::SetupUi() {
-    setWindowTitle("MyVideoPlayer");
-    resize(1000, 600);
+    setWindowTitle(QStringLiteral("MyVideoPlayer"));
+    resize(ui_theme::kDefaultWindowWidth, ui_theme::kDefaultWindowHeight);
+    setMinimumSize(ui_theme::kDefaultWindowWidth, ui_theme::kDefaultWindowHeight);
+    setWindowFlag(Qt::FramelessWindowHint);
+    setMouseTracking(true);
 
-    auto* splitter = new QSplitter(Qt::Horizontal, this);
-    setCentralWidget(splitter);
+    // NavigationBar spans the full window height; TitleBar sits only above
+    // the content column (never over the nav bar) — see app-shell-ui spec.
+    auto* outer = new QHBoxLayout(this);
+    outer->setContentsMargins(ui_theme::kResizeMargin, ui_theme::kResizeMargin,
+                              ui_theme::kResizeMargin, ui_theme::kResizeMargin);
+    outer->setSpacing(0);
 
-    // --- Left: video canvas + playback controls (unchanged layout) ---
-    auto* left = new QWidget(splitter);
-    auto* main_layout = new QVBoxLayout(left);
-    main_layout->setContentsMargins(0, 0, 0, 0);
-    main_layout->setSpacing(0);
+    nav_bar_ = new NavigationBar(this);
+    connect(nav_bar_, &NavigationBar::PageRequested, this, &MainWindow::NavigateTo);
+    outer->addWidget(nav_bar_);
 
-    // Video area
-    video_widget_ = new VideoWidget(left);
-    main_layout->addWidget(video_widget_, 1);
-
-    // Control bar
-    auto* control_widget = new QWidget(left);
-    auto* control_layout = new QHBoxLayout(control_widget);
-    control_layout->setContentsMargins(8, 4, 8, 4);
-
-    open_btn_ = new QPushButton(QStringLiteral("\u6253\u5F00"), control_widget);  // "打开"
-    connect(open_btn_, &QPushButton::clicked, this, &MainWindow::OnOpenFile);
-    control_layout->addWidget(open_btn_);
-
-    play_pause_btn_ = new QPushButton(QStringLiteral("\u25B6"), control_widget);  // "▶"
-    play_pause_btn_->setFixedWidth(40);
-    connect(play_pause_btn_, &QPushButton::clicked, this, &MainWindow::OnPlayPause);
-    control_layout->addWidget(play_pause_btn_);
-
-    progress_slider_ = new QSlider(Qt::Horizontal, control_widget);
-    progress_slider_->setRange(0, 1000);
-    progress_slider_->installEventFilter(this);
-    connect(progress_slider_, &QSlider::sliderPressed, this, [this] { slider_pressed_ = true; });
-    connect(progress_slider_, &QSlider::sliderReleased, this, [this] {
-        OnSliderMoved(progress_slider_->value());
-        // slider_pressed_ stays true — timer clears it when video catches up
-    });
-    connect(progress_slider_, &QSlider::sliderMoved, this, &MainWindow::OnSliderMoved);
-    control_layout->addWidget(progress_slider_, 1);
-
-    time_label_ = new QLabel("00:00:00.00 / 00:00:00", control_widget);
-    time_label_->setFixedWidth(180);
-    control_layout->addWidget(time_label_);
-
-    main_layout->addWidget(control_widget);
-
-    // --- Right: effect panel ---
-    effect_panel_ = new EffectPanel(splitter);
-
-    splitter->addWidget(left);
-    splitter->addWidget(effect_panel_);
-    splitter->setStretchFactor(0, 1);
-    splitter->setStretchFactor(1, 0);
-    splitter->setSizes({740, 260});
+    outer->addLayout(BuildContentColumn(), 1);
 }
 
-void MainWindow::OnOpenFile() {
-    QString filepath = QFileDialog::getOpenFileName(
-        this, QStringLiteral("\u6253\u5F00\u89C6\u9891\u6587\u4EF6"), QString(),
-        "Video Files (*.mp4 *.avi *.mkv *.mov *.flv *.wmv);;All Files (*)");
-    if (filepath.isEmpty()) return;
+QVBoxLayout* MainWindow::BuildContentColumn() {
+    auto* column = new QVBoxLayout();
+    column->setContentsMargins(0, 0, 0, 0);
+    column->setSpacing(0);
 
-    SPDLOG_INFO("UI: open file '{}'", filepath.toStdString());
-    player_->Close();
-    if (player_->Open(filepath.toStdString())) {
-        player_->Play();
-        play_pause_btn_->setText(QStringLiteral("\u23F8"));  // "⏸"
+    title_bar_ = new TitleBar(this);
+    connect(title_bar_, &TitleBar::AvatarClicked, this,
+            [] { SPDLOG_INFO("UI: avatar clicked (no-op placeholder)"); });
+    column->addWidget(title_bar_);
+
+    stacked_widget_ = new QStackedWidget(this);
+    home_page_ = new HomePage(stacked_widget_);
+    connect(home_page_, &HomePage::NavigateRequested, this, &MainWindow::NavigateTo);
+    player_page_ = new PlayerPage(stacked_widget_);
+    transcoder_page_ = new TranscoderPage(stacked_widget_);
+
+    stacked_widget_->addWidget(home_page_);
+    stacked_widget_->addWidget(player_page_);
+    stacked_widget_->addWidget(transcoder_page_);
+    column->addWidget(stacked_widget_, 1);
+
+    return column;
+}
+
+void MainWindow::NavigateTo(NavigationBar::Page page) {
+    QWidget* target = home_page_;
+    QString title = QStringLiteral("\u4E3B\u9875");  // 主页
+    if (page == NavigationBar::Page::kPlayer) {
+        target = player_page_;
+        title = QStringLiteral("\u64AD\u653E\u5668");  // 播放器
+    } else if (page == NavigationBar::Page::kTranscoder) {
+        target = transcoder_page_;
+        title = QStringLiteral("\u8F6C\u7801\u5668");  // 转码器
     }
-    effect_panel_->RefreshFromPlayer(player_.get());
+
+    stacked_widget_->setCurrentWidget(target);
+    title_bar_->SetPageTitle(title);
+    nav_bar_->SetSelectedPage(page);
 }
 
-void MainWindow::OnPlayPause() {
-    if (player_->IsPlaying()) {
-        SPDLOG_INFO("UI: pause");
-        player_->Pause();
-        play_pause_btn_->setText(QStringLiteral("\u25B6"));  // "▶"
+Qt::Edges MainWindow::ResizeEdgesAt(const QPoint& pos) const {
+    const int m = ui_theme::kResizeMargin;
+    Qt::Edges edges;
+    if (pos.x() <= m) edges |= Qt::LeftEdge;
+    if (pos.x() >= width() - m) edges |= Qt::RightEdge;
+    if (pos.y() <= m) edges |= Qt::TopEdge;
+    if (pos.y() >= height() - m) edges |= Qt::BottomEdge;
+    return edges;
+}
+
+void MainWindow::UpdateCursor(Qt::Edges edges) {
+    bool top_left_or_bottom_right = (edges & Qt::LeftEdge && edges & Qt::TopEdge) ||
+                                    (edges & Qt::RightEdge && edges & Qt::BottomEdge);
+    bool top_right_or_bottom_left = (edges & Qt::RightEdge && edges & Qt::TopEdge) ||
+                                    (edges & Qt::LeftEdge && edges & Qt::BottomEdge);
+
+    if (top_left_or_bottom_right) {
+        setCursor(Qt::SizeFDiagCursor);
+    } else if (top_right_or_bottom_left) {
+        setCursor(Qt::SizeBDiagCursor);
+    } else if (edges & (Qt::LeftEdge | Qt::RightEdge)) {
+        setCursor(Qt::SizeHorCursor);
+    } else if (edges & (Qt::TopEdge | Qt::BottomEdge)) {
+        setCursor(Qt::SizeVerCursor);
     } else {
-        SPDLOG_INFO("UI: play");
-        player_->Play();
-        play_pause_btn_->setText(QStringLiteral("\u23F8"));  // "⏸"
+        unsetCursor();
     }
 }
 
-void MainWindow::OnSliderMoved(int value) {
-    double duration = player_->Duration();
-    if (duration <= 0) return;
-    double pos = static_cast<double>(value) / 1000.0 * duration;
-    player_->Seek(pos);
+void MainWindow::mouseMoveEvent(QMouseEvent* event) {
+    UpdateCursor(ResizeEdgesAt(event->pos()));
+    QWidget::mouseMoveEvent(event);
 }
 
-void MainWindow::OnTimerTick() {
-    double duration = player_->Duration();
-    double position = player_->CurrentPosition();
-    double video_pos = position;  // MediaPlayer uses unified clock
-    double fps = player_->VideoFps();
-    auto state = player_->State();
-
-    // When finished, update button and stop advancing
-    if (state == mvp::PlaybackState::kFinished) {
-        play_pause_btn_->setText(QStringLiteral("\u25B6"));  // "▶"
-    }
-
-    // slider_pressed_ stays true after release until video catches up
-    if (slider_pressed_ && !progress_slider_->isSliderDown() && duration > 0) {
-        double slider_seconds = progress_slider_->value() / 1000.0 * duration;
-        if (std::abs(video_pos - slider_seconds) < 1.0) {
-            slider_pressed_ = false;
+void MainWindow::mousePressEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton) {
+        Qt::Edges edges = ResizeEdgesAt(event->pos());
+        if (edges && windowHandle()) {
+            windowHandle()->startSystemResize(edges);
+            event->accept();
+            return;
         }
     }
-    if (!slider_pressed_ && duration > 0) {
-        int slider_pos = static_cast<int>(video_pos / duration * 1000.0);
-        progress_slider_->setValue(slider_pos);
-    }
-
-    // Time label: "HH:MM:SS.FF / HH:MM:SS" where FF is frame-in-second
-    if (fps > 0 && duration > 0) {
-        int frame_in_second = static_cast<int>((video_pos - static_cast<int>(video_pos)) * fps);
-        QString pos_str = FormatTime(video_pos) + QString(".%1").arg(frame_in_second, 2, 10, QChar('0'));
-        time_label_->setText(pos_str + " / " + FormatTime(duration));
-    } else {
-        time_label_->setText(FormatTime(position) + " / " + FormatTime(duration));
-    }
+    QWidget::mousePressEvent(event);
 }
 
-QString MainWindow::FormatTime(double seconds) const {
-    int total = static_cast<int>(seconds);
-    int h = total / 3600;
-    int m = (total % 3600) / 60;
-    int s = total % 60;
-    return QString("%1:%2:%3")
-        .arg(h, 2, 10, QChar('0'))
-        .arg(m, 2, 10, QChar('0'))
-        .arg(s, 2, 10, QChar('0'));
-}
-
-bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
-    if (obj == progress_slider_) {
-        if (event->type() == QEvent::MouseButtonPress) {
-            auto* mouse_event = static_cast<QMouseEvent*>(event);
-            if (mouse_event->button() == Qt::LeftButton) {
-                int value = QStyle::sliderValueFromPosition(
-                    progress_slider_->minimum(), progress_slider_->maximum(),
-                    mouse_event->pos().x(), progress_slider_->width());
-                progress_slider_->setValue(value);
-                slider_pressed_ = true;
-                // Don't seek on press — wait for drag or release
-                return true;
-            }
-        } else if (event->type() == QEvent::MouseMove && slider_pressed_) {
-            auto* mouse_event = static_cast<QMouseEvent*>(event);
-            int value = QStyle::sliderValueFromPosition(
-                progress_slider_->minimum(), progress_slider_->maximum(),
-                mouse_event->pos().x(), progress_slider_->width());
-            progress_slider_->setValue(value);
-            OnSliderMoved(value);
-            return true;
-        } else if (event->type() == QEvent::MouseButtonRelease && slider_pressed_) {
-            auto* mouse_event = static_cast<QMouseEvent*>(event);
-            if (mouse_event->button() == Qt::LeftButton) {
-                int value = QStyle::sliderValueFromPosition(
-                    progress_slider_->minimum(), progress_slider_->maximum(),
-                    mouse_event->pos().x(), progress_slider_->width());
-                progress_slider_->setValue(value);
-                OnSliderMoved(value);
-                // slider_pressed_ stays true — timer clears it when video catches up
-                return true;
-            }
-        }
-    }
-    return QMainWindow::eventFilter(obj, event);
-}
