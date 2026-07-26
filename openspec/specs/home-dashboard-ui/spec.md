@@ -17,20 +17,24 @@ resized, rather than using a fixed-column grid.
   to card count/order
 
 ### Requirement: Dashboard card content and dimensions
-Each `DashboardCard` SHALL be 260×200px with an 8px corner radius, 1px
-`kBorder` border, white background: a 160px-tall custom-painted thumbnail
-area on top, and a ~40px text area below showing a title and a one-line
-description.
+Each `DashboardCard` SHALL be 280×240px with an 8px corner radius, 1px
+`kBorder` border, white background: a 140px-tall thumbnail area on top
+filled by a cover image (`.png` from `:/images/`), and a ~60px text area
+below showing a title and a one-line description. The cover image SHALL
+be scaled to fill the thumbnail area while preserving aspect ratio, with
+overflow cropped from center (equivalent to CSS `object-fit: cover`).
 
 #### Scenario: Player card content
 - **WHEN** the Home page is shown
 - **THEN** one card reads "播放器" with a short description of the
-  playback feature, and a custom-painted play-glyph thumbnail
+  playback feature, and its thumbnail shows `player_cover.png`
+  center-cropped to fill the 280×140px thumbnail area
 
 #### Scenario: Transcoder card content
 - **WHEN** the Home page is shown
 - **THEN** one card reads "转码器" with a short description of the
-  transcode feature, and a custom-painted conversion-arrows thumbnail
+  transcode feature, and its thumbnail shows `trancoder_cover.png`
+  center-cropped to fill the 280×140px thumbnail area
 
 ### Requirement: Card hover and click behavior
 A `DashboardCard` SHALL deepen its shadow and shift 2px upward on hover.

@@ -1,0 +1,13 @@
+<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- App icon container -->
+  <rect x="6" y="6" width="88" height="88" rx="22" fill="currentColor" opacity="0.10"/>
+  <rect x="6" y="6" width="88" height="88" rx="22" stroke="currentColor" stroke-width="3.5"/>
+  <!-- Sound wave ring (outer) -->
+  <path d="M 16 30 A 35 35 0 0 1 84 30" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" opacity="0.35"/>
+  <!-- Sound wave ring (inner) -->
+  <path d="M 24 36 A 24 24 0 0 1 76 36" stroke="currentColor" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.5"/>
+  <!-- Main play triangle -->
+  <path d="M 40 32 L 72 50 L 40 68 Z" fill="currentColor" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/>
+  <!-- Accent dot -->
+  <circle cx="78" cy="22" r="3.5" fill="currentColor" opacity="0.45"/>
+</svg>

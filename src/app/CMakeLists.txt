@@ -1,4 +1,4 @@
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Svg)
 find_package(spdlog REQUIRED)
 qt_standard_project_setup()
 
@@ -6,10 +6,22 @@ file(GLOB_RECURSE MVP_APP_SOURCES *.cc)
 file(GLOB_RECURSE MVP_APP_HEADERS *.h)
 
 qt_add_executable(mvp_app ${MVP_APP_SOURCES} ${MVP_APP_HEADERS})
+# Compile .qrc with rcc (qt_add_resources not available in this Qt version).
+set(qrc_file "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons.qrc")
+set(rcc_output "${CMAKE_CURRENT_BINARY_DIR}/qrc_icons.cpp")
+add_custom_command(
+    OUTPUT ${rcc_output}
+    COMMAND Qt6::rcc
+    ARGS -name icons ${qrc_file} -o ${rcc_output}
+    DEPENDS ${qrc_file}
+    COMMENT "Compiling Qt resources (icons.qrc)"
+)
+target_sources(mvp_app PRIVATE ${rcc_output})
 
 target_link_libraries(mvp_app PRIVATE
   mvp_core
   Qt6::Widgets
+  Qt6::Svg
   spdlog::spdlog
 )
 

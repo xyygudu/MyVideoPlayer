@@ -39,8 +39,11 @@ void TitleBar::SetupUi() {
     layout->addSpacing(12);
 
     minimize_button_ = new IconButton(IconButton::IconKind::kMinimize, this);
+    minimize_button_->SetGlyphScale(0.28);
     maximize_button_ = new IconButton(IconButton::IconKind::kMaximize, this);
+    maximize_button_->SetGlyphScale(0.28);
     close_button_ = new IconButton(IconButton::IconKind::kClose, this);
+    close_button_->SetGlyphScale(0.28);
     close_button_->SetCloseStyle(true);
 
     for (auto* btn : {minimize_button_, maximize_button_, close_button_}) {

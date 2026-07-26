@@ -3,6 +3,9 @@
 #include <QFont>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPalette>
+
+#include <spdlog/spdlog.h>
 
 #include "app_theme.h"
 
@@ -10,6 +13,13 @@ NavItem::NavItem(const QString& text, QWidget* parent) : QWidget(parent), text_(
     setFixedHeight(ui_theme::kNavItemHeight);
     setCursor(Qt::PointingHandCursor);
     setAttribute(Qt::WA_Hover, true);
+
+    // Palette for mask-icon rendering: QIcon::setIsMask(true) uses
+    // WindowText (Normal mode) and HighlightedText (Selected mode).
+    QPalette pal = palette();
+    pal.setColor(QPalette::WindowText, ui_theme::kTextPrimary);
+    pal.setColor(QPalette::HighlightedText, ui_theme::kAccent);
+    setPalette(pal);
 }
 
 void NavItem::SetSelected(bool selected) {
@@ -40,9 +50,13 @@ void NavItem::paintEvent(QPaintEvent* /*event*/) {
     const int text_left = icon_left + ui_theme::kNavIconSize + ui_theme::kNavIconTextGap;
 
     if (!icon_.isNull()) {
+        SPDLOG_DEBUG("NavItem::paintEvent: painting icon for '{}' (selected={})",
+                     text_.toStdString(), selected_);
         QRect icon_rect(icon_left, (height() - ui_theme::kNavIconSize) / 2, ui_theme::kNavIconSize,
                        ui_theme::kNavIconSize);
         icon_.paint(&painter, icon_rect);
+    } else {
+        SPDLOG_DEBUG("NavItem::paintEvent: icon is NULL for '{}'", text_.toStdString());
     }
 
     painter.setPen(selected_ ? ui_theme::kAccent : ui_theme::kTextPrimary);

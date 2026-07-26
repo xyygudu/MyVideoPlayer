@@ -32,8 +32,9 @@ inline constexpr int kWindowButtonWidth = 40;
 
 // --- Navigation bar ---
 inline constexpr int kNavWidth = 200;
-inline constexpr int kLogoAreaHeight = 56;
-inline constexpr int kNavItemHeight = 40;
+inline constexpr int kLogoAreaHeight = 72;
+inline constexpr int kLogoIconSize = 26;      // app logo icon next to "MyVideoPlayer" text
+inline constexpr int kNavItemHeight = 48;
 inline constexpr int kNavSelectedBarWidth = 3;
 inline constexpr int kNavItemLeftPadding = 12;
 inline constexpr int kNavIconSize = 18;       // reserved icon slot — blank until real icons are supplied

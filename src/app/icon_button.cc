@@ -120,13 +120,20 @@ void IconButton::paintEvent(QPaintEvent* /*event*/) {
 
     PaintBackground(painter);
 
+    if (!custom_icon_.isNull()) {
+        qreal side = std::min(width(), height()) * glyph_scale_;
+        QRectF glyph_rect(width() / 2.0 - side / 2.0, height() / 2.0 - side / 2.0, side, side);
+        custom_icon_.paint(&painter, glyph_rect.toRect());
+        return;
+    }
+
     QColor glyph_color = (close_style_ && (underMouse() || isDown()))
                              ? Qt::white
                              : ui_theme::kTextPrimary;
     painter.setPen(QPen(glyph_color, 1.3));
     painter.setBrush(glyph_color);
 
-    qreal side = std::min(width(), height()) * 0.28;
+    qreal side = std::min(width(), height()) * glyph_scale_;
     QRectF glyph_rect(width() / 2.0 - side / 2.0, height() / 2.0 - side / 2.0, side, side);
     PaintGlyph(painter, glyph_rect);
 }

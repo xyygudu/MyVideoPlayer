@@ -52,16 +52,11 @@ void DashboardCard::paintEvent(QPaintEvent* /*event*/) {
 
 void DashboardCard::PaintThumbnail(QPainter& painter) const {
     QRectF thumb_rect(0, 0, width(), ui_theme::kCardThumbnailHeight);
-    painter.fillRect(thumb_rect, ui_theme::kAccentSoft);
     if (!thumbnail_painter_) {
+        painter.fillRect(thumb_rect, ui_theme::kAccentSoft);
         return;
     }
-    QRectF glyph_rect = thumb_rect.adjusted(thumb_rect.width() * 0.32, thumb_rect.height() * 0.22,
-                                            -thumb_rect.width() * 0.32,
-                                            -thumb_rect.height() * 0.22);
-    painter.setPen(QPen(ui_theme::kAccent, 2));
-    painter.setBrush(ui_theme::kAccent);
-    thumbnail_painter_(painter, glyph_rect);
+    thumbnail_painter_(painter, thumb_rect);
 }
 
 void DashboardCard::PaintTextArea(QPainter& painter) const {

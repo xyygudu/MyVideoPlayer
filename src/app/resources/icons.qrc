@@ -1,0 +1,24 @@
+<RCC>
+    <qresource prefix="/">
+        <file>icons/chevron_up.svg</file>
+        <file>icons/app_logo.svg</file>
+        <file>icons/chevron_down.svg</file>
+        <file>icons/chevron_right.svg</file>
+        <file>icons/converter.svg</file>
+        <file>icons/file_open.svg</file>
+        <file>icons/home.svg</file>
+        <file>icons/pause.svg</file>
+        <file>icons/play.svg</file>
+        <file>icons/player.svg</file>
+        <file>icons/settings.svg</file>
+        <file>icons/skip_next.svg</file>
+        <file>icons/skip_prev.svg</file>
+        <file>icons/spin_down.svg</file>
+        <file>icons/spin_up.svg</file>
+        <file>icons/stop.svg</file>
+        <file>icons/volume.svg</file>
+        <file>images/logo.png</file>
+        <file>images/player_cover.png</file>
+        <file>images/trancoder_cover.png</file>
+    </qresource>
+</RCC>

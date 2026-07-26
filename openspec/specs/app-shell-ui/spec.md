@@ -3,9 +3,7 @@
 Defines the frameless application shell: custom title bar (drag-to-move,
 drag-to-resize, window control buttons), the left navigation bar, and the
 page-routing container that hosts the Home/Player/Transcoder pages.
-
 ## Requirements
-
 ### Requirement: Frameless top-level window
 `MainWindow` SHALL be a top-level `QWidget` with `Qt::FramelessWindowHint`
 (no native OS title bar/border). Default size SHALL be 1200×720; minimum
@@ -68,10 +66,15 @@ custom-painted via `IconButton`. (Dimensions were reduced from the original
 
 ### Requirement: Left navigation bar
 The navigation bar SHALL be a 200px-wide fixed-width column spanning the
-full window height, background `kBgNav`. It SHALL contain a 56px logo area
-(app icon + name) followed by a vertical menu: "主页" (Home), and an
-expandable "快速访问" group (default expanded) containing "播放器" and
-"转码器" sub-items. Each item is 40px tall.
+full window height, background `kBgNav`. It SHALL contain a 72px logo area
+with a 50×50 app logo icon (loaded from `:/images/logo.png`) and the text
+"音视频工具箱" at 13pt bold, followed by a vertical menu: "主页" (Home),
+and an expandable "快速访问" group (default expanded) containing "播放器"
+and "转码器" sub-items. Each item is 48px tall. Each nav item SHALL display
+an 18×18px SVG icon in its reserved slot (home.svg / player.svg /
+converter.svg), tinted with `kTextPrimary` at rest, rendered via
+`CreateNavIcon()` which pre-colors the SVG to `kTextPrimary` before
+creating the QIcon pixmap.
 
 #### Scenario: Selected item visual state
 - **WHEN** a nav item corresponds to the currently displayed page
@@ -103,3 +106,30 @@ never destroyed while `MainWindow` is alive. Navigation SHALL only call
 - **WHEN** the user clicks "播放器" in the navigation bar
 - **THEN** the content area shows `PlayerPage` and the title bar's page
   title updates to "播放器"
+
+### Requirement: Navigation item icons
+Each navigation item in the left bar SHALL display a 18×18px SVG icon in the reserved icon slot, loaded from the application's Qt resource system at `:/icons/<name>.svg`. The icon SHALL be rendered at `kNavItemLeftPadding` (12px) from the left edge, with the text label starting at `icon_left + kNavIconSize + kNavIconTextGap` (38px) to maintain alignment with the existing layout.
+
+#### Scenario: Home nav item shows home icon
+- **WHEN** the navigation bar is rendered
+- **THEN** the "主页" item shows the home SVG icon in its 18×18px slot, tinted with `kAccent` when selected and `kTextPrimary` otherwise
+
+#### Scenario: Player nav item shows player icon
+- **WHEN** the navigation bar is rendered
+- **THEN** the "播放器" item shows the player SVG icon in its 18×18px slot
+
+#### Scenario: Transcoder nav item shows converter icon
+- **WHEN** the navigation bar is rendered
+- **THEN** the "转码器" item shows the converter SVG icon in its 18×18px slot
+
+### Requirement: Home card thumbnail icons
+The two `DashboardCard` widgets on the Home page SHALL use SVG icons as their thumbnail content, rendered at 48×48px centered on the `kAccentSoft` background, replacing the custom `QPainter` lambdas.
+
+#### Scenario: Player card shows player SVG thumbnail
+- **WHEN** the Home page displays the "播放器" card
+- **THEN** the thumbnail area shows the player SVG icon centered on a `kAccentSoft` rounded rectangle background
+
+#### Scenario: Transcoder card shows converter SVG thumbnail
+- **WHEN** the Home page displays the "转码器" card
+- **THEN** the thumbnail area shows the converter SVG icon centered on a `kAccentSoft` rounded rectangle background
+
