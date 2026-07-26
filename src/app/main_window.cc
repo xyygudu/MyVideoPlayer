@@ -60,6 +60,14 @@ QVBoxLayout* MainWindow::BuildContentColumn() {
     stacked_widget_->addWidget(transcoder_page_);
     column->addWidget(stacked_widget_, 1);
 
+    // Prevent child widgets from inheriting MainWindow's edge cursor.
+    // Without these, moving from a resize edge directly into a child
+    // leaves the resize cursor stuck — the child has no cursor of its
+    // own, so it inherits MainWindow's last setCursor() call.
+    nav_bar_->setCursor(Qt::ArrowCursor);
+    title_bar_->setCursor(Qt::ArrowCursor);
+    stacked_widget_->setCursor(Qt::ArrowCursor);
+
     return column;
 }
 
