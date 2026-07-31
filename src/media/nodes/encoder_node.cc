@@ -4,8 +4,10 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/audio_fifo.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/dict.h>
+#include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
@@ -107,6 +109,11 @@ bool EncoderNode::OpenCodec() {
         ConfigureAudioContext(fmt.AsAudio());
     }
     codec_ctx_->time_base = time_base_;
+    // Global header (extradata) only if the negotiated container requires it
+    // (AVFMT_GLOBALHEADER, decided in MuxNode::Negotiate); in-band otherwise.
+    if (output_port_->Peer() && output_port_->Peer()->NeedsGlobalHeader()) {
+        codec_ctx_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    }
 
     AVDictionary* opts = nullptr;
     ApplyRateControl(&opts);
@@ -210,6 +217,11 @@ void EncoderNode::CloseCodec() {
     if (swr_ctx_) {
         swr_free(&swr_ctx_);
     }
+    if (audio_fifo_) {
+        av_audio_fifo_free(audio_fifo_);
+        audio_fifo_ = nullptr;
+        audio_pts_valid_ = false;
+    }
     if (codec_ctx_) {
         avcodec_free_context(&codec_ctx_);
     }
@@ -268,6 +280,102 @@ AVFramePtr EncoderNode::ConvertAudioFrame(const MediaFrame& src) {
     return dst;
 }
 
+bool EncoderNode::EnsureAudioFifo() {
+    if (audio_fifo_) {
+        return true;
+    }
+    int initial = codec_ctx_->frame_size > 0 ? codec_ctx_->frame_size * 2 : 4096;
+    audio_fifo_ = av_audio_fifo_alloc(codec_ctx_->sample_fmt,
+                                      codec_ctx_->ch_layout.nb_channels, initial);
+    if (!audio_fifo_) {
+        SPDLOG_ERROR("EncoderNode: failed to allocate audio fifo");
+        return false;
+    }
+    return true;
+}
+
+void EncoderNode::ProcessAudioFrame(MediaFrame& mf, int64_t pts_ticks) {
+    AVFramePtr converted = ConvertAudioFrame(mf);
+    if (!converted->data[0]) {
+        return;
+    }
+    if (!EnsureAudioFifo()) {
+        return;
+    }
+    // The first buffered sample carries the timestamp of the frame it came
+    // from; each full frame read out later advances by frame_size in time_base
+    // units (audio time_base is 1/sample_rate, so PTS == sample index).
+    if (!audio_pts_valid_) {
+        audio_next_pts_ = pts_ticks;
+        audio_pts_valid_ = true;
+    }
+    int written = av_audio_fifo_write(
+        audio_fifo_, reinterpret_cast<void**>(converted->data),
+        converted->nb_samples);
+    if (written < converted->nb_samples) {
+        SPDLOG_WARN("EncoderNode: audio fifo write short ({}/{})", written,
+                    converted->nb_samples);
+    }
+    SendCompleteAudioFrames();
+}
+
+void EncoderNode::SendCompleteAudioFrames() {
+    if (!audio_fifo_) {
+        return;
+    }
+    int frame_size = codec_ctx_->frame_size;
+    if (frame_size <= 0) {
+        return;
+    }
+    while (av_audio_fifo_size(audio_fifo_) >= frame_size) {
+        AVFramePtr frame;
+        frame->format = codec_ctx_->sample_fmt;
+        frame->sample_rate = codec_ctx_->sample_rate;
+        av_channel_layout_copy(&frame->ch_layout, &codec_ctx_->ch_layout);
+        frame->nb_samples = frame_size;
+        if (av_frame_get_buffer(frame.get(), 0) < 0) {
+            SPDLOG_ERROR("EncoderNode: failed to allocate audio frame buffer");
+            return;
+        }
+        int read = av_audio_fifo_read(
+            audio_fifo_, reinterpret_cast<void**>(frame->data), frame_size);
+        if (read < frame_size) {
+            SPDLOG_ERROR("EncoderNode: av_audio_fifo_read short ({}/{})", read,
+                         frame_size);
+            return;
+        }
+        frame->pts = audio_next_pts_;
+        audio_next_pts_ += frame_size;
+        SendFrameAndDrain(frame.get());
+    }
+}
+
+void EncoderNode::FlushAudioFifo() {
+    if (!audio_fifo_) {
+        return;
+    }
+    int frame_size = codec_ctx_->frame_size;
+    int remaining = av_audio_fifo_size(audio_fifo_);
+    if (frame_size > 0 && remaining > 0) {
+        // Pad the trailing partial frame with silence so the encoder gets a
+        // complete frame_size frame (required by fixed-frame encoders like AAC).
+        int pad = frame_size - remaining;
+        AVFramePtr silence;
+        silence->format = codec_ctx_->sample_fmt;
+        silence->sample_rate = codec_ctx_->sample_rate;
+        av_channel_layout_copy(&silence->ch_layout, &codec_ctx_->ch_layout);
+        silence->nb_samples = pad;
+        if (av_frame_get_buffer(silence.get(), 0) == 0) {
+            av_samples_set_silence(silence->data, 0, pad,
+                                   silence->ch_layout.nb_channels,
+                                   static_cast<AVSampleFormat>(silence->format));
+            av_audio_fifo_write(audio_fifo_,
+                                reinterpret_cast<void**>(silence->data), pad);
+        }
+    }
+    SendCompleteAudioFrames();
+}
+
 void EncoderNode::SendFrameAndDrain(AVFrame* frame) {
     int ret = avcodec_send_frame(codec_ctx_, frame);
     if (ret < 0 && ret != AVERROR(EAGAIN)) {
@@ -299,14 +407,14 @@ void EncoderNode::ProcessFrame(MediaBuffer& buf) {
         converted.RawFrame()->pts = pts_ticks;
         SendFrameAndDrain(converted.RawFrame());
     } else if (media_type_ == MediaType::kAudio) {
-        AVFramePtr converted = ConvertAudioFrame(mf);
-        if (!converted->data[0]) return;
-        converted->pts = pts_ticks;
-        SendFrameAndDrain(converted.get());
+        ProcessAudioFrame(mf, pts_ticks);
     }
 }
 
 void EncoderNode::HandleEos() {
+    if (media_type_ == MediaType::kAudio) {
+        FlushAudioFifo();
+    }
     avcodec_send_frame(codec_ctx_, nullptr);
     DrainPackets();
     output_port_->Push(MediaBuffer::MakeEos(media_type_));

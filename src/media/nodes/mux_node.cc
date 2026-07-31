@@ -29,6 +29,20 @@ MuxNode::MuxNode(std::string output_path, bool has_video, bool has_audio)
     }
 }
 
+void MuxNode::ResolveOutputRequirements() {
+    const AVOutputFormat* fmt =
+        av_guess_format(nullptr, output_path_.c_str(), nullptr);
+    if (!fmt) {
+        SPDLOG_WARN("MuxNode: cannot guess output format for '{}'",
+                    output_path_);
+        needs_global_header_ = false;
+        return;
+    }
+    needs_global_header_ = (fmt->flags & AVFMT_GLOBALHEADER) != 0;
+    SPDLOG_INFO("MuxNode: output format '{}' needs_global_header={}", fmt->name,
+                needs_global_header_);
+}
+
 MuxNode::~MuxNode() {
     Stop();
     CloseOutput();
@@ -40,6 +54,11 @@ bool MuxNode::Negotiate() {
             SPDLOG_ERROR("MuxNode: input port not connected");
             return false;
         }
+    }
+    // Publish container requirement (needs_global_header) to upstream encoders.
+    ResolveOutputRequirements();
+    for (auto& slot : slots_) {
+        slot.port->SetNeedsGlobalHeader(needs_global_header_);
     }
     return true;
 }
@@ -80,8 +99,24 @@ bool MuxNode::OpenOutput() {
             return false;
         }
     }
-    if (avformat_write_header(format_ctx_, nullptr) < 0) {
-        SPDLOG_ERROR("MuxNode: avformat_write_header failed for '{}'", output_path_);
+    int wh_ret = avformat_write_header(format_ctx_, nullptr);
+    if (wh_ret < 0) {
+        char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+        av_strerror(wh_ret, errbuf, sizeof(errbuf));
+        SPDLOG_ERROR("MuxNode: avformat_write_header failed for '{}' (err {}: {})",
+                     output_path_, wh_ret, errbuf);
+        for (auto& slot : slots_) {
+            if (slot.av_stream) {
+                auto* cp = slot.av_stream->codecpar;
+                SPDLOG_ERROR("  stream[{}] codec_id={} type={} extradata_size={} "
+                             "w={} h={} sr={} ch={}",
+                             slot.av_stream->index,
+                             static_cast<int>(cp->codec_id),
+                             static_cast<int>(cp->codec_type),
+                             cp->extradata_size, cp->width, cp->height,
+                             cp->sample_rate, cp->ch_layout.nb_channels);
+            }
+        }
         return false;
     }
     header_written_ = true;

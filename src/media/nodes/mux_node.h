@@ -19,21 +19,11 @@ struct AVStream;
 
 namespace mvp::graph {
 
-/// Sink node: multiplexes encoded packets from one or more input streams
-/// into a single output file, mirroring DemuxNode's fan-out in reverse.
-///
-/// - NodeType: kSink (N inputs, no output)
-/// - ThreadingMode: kActive — owns a single fan-in worker thread that pulls
-///   from all input Links and calls the FFmpeg muxer API, guaranteeing
-///   single-threaded access (avformat_write_header/av_interleaved_write_frame
-///   are not safe to call concurrently from multiple threads).
-/// - Construction: `MuxNode(output_path, has_video, has_audio)` — port order
-///   mirrors DemuxNode (video port first, then audio port).
-/// - Prepare: avformat_alloc_output_context2 (format inferred from the
-///   output path's extension), one AVStream per input port created from the
-///   upstream EncoderNode's negotiated EncodedFormat, avformat_write_header.
-/// - Trailer/EOS: once every input port has reported EOS, av_write_trailer
-///   is called and GraphEvent::kEos is reported via the graph reference.
+/// Sink node: multiplexes encoded packets into a file (kSink, kActive).
+/// Fan-in thread pulls from all input links and calls the FFmpeg muxer API
+/// single-threaded. Container inferred from output path extension; the
+/// negotiated global-header requirement is published onto input ports.
+/// On all-input EOS: av_write_trailer + GraphEvent::kEos.
 class MuxNode : public INode {
   public:
     explicit MuxNode(std::string output_path, bool has_video, bool has_audio);
@@ -83,6 +73,9 @@ class MuxNode : public INode {
     bool OpenOutput();
     bool CreateStreams();
 
+    // Negotiate-time container probe (av_guess_format, no allocation).
+    void ResolveOutputRequirements();
+
     // MuxLoop helpers
     void FillPendingSlots(PendingSlots& pending);
     int PickNextSlot(const PendingSlots& pending) const;
@@ -93,6 +86,7 @@ class MuxNode : public INode {
 
     NodeState state_{NodeState::kIdle};
     std::string output_path_;
+    bool needs_global_header_{false};
 
     AVFormatContext* format_ctx_{nullptr};
     std::vector<StreamSlot> slots_;

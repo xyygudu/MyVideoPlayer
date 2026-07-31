@@ -36,6 +36,11 @@ class InputPort {
     void SetFormat(MediaFormat format) { format_ = std::move(format); }
     const MediaFormat& Format() const { return format_; }
 
+    /// Downstream requires global headers (extradata); set in Negotiate(),
+    /// read by the upstream encoder in Prepare().
+    void SetNeedsGlobalHeader(bool need) { needs_global_header_ = need; }
+    bool NeedsGlobalHeader() const { return needs_global_header_; }
+
     INode* Owner() const { return owner_; }
     OutputPort* Peer() const { return peer_; }
     bool IsConnected() const { return peer_ != nullptr; }
@@ -47,6 +52,7 @@ class InputPort {
     OutputPort* peer_{nullptr};
     FormatCaps caps_;
     MediaFormat format_;
+    bool needs_global_header_{false};  // set by downstream in Negotiate()
     // Link is owned by the OutputPort that created it.
     Link* link_{nullptr};
 };

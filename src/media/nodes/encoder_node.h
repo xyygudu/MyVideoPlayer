@@ -20,31 +20,18 @@ extern "C" {
 
 struct AVCodec;
 struct AVCodecContext;
+struct AVAudioFifo;
 struct SwsContext;
 struct SwrContext;
 
 namespace mvp::graph {
 
-/// Transform node: encodes decoded frames (MediaFrame) into compressed
-/// packets (AVPacket), mirroring DecoderNode's structure in reverse.
-///
-/// - NodeType: kTransform (1 input, 1 output)
-/// - ThreadingMode: kActive (owns encode thread)
-/// - Negotiate: resolves the named encoder (avcodec_find_encoder_by_name)
-///              and declares a preliminary output EncodedFormat (codec_id +
-///              time_base only — real extradata is only known after the
-///              codec is opened). No resource allocation here.
-/// - Prepare: opens the codec with EncodeParams applied, then republishes
-///            the output format with real codec parameters (extradata) so
-///            downstream MuxNode::Prepare() sees the final format.
-/// - Flush: flushes codec internal buffers (avcodec_flush_buffers)
-///
-/// Lifecycle notes:
-/// - codec_ctx_ allocated in Prepare(), freed in Stop()
-/// - EOF handling: null frame -> drain -> push EOS downstream
-/// - Lazily converts pixel/sample format to the encoder's expected input
-///   when the decoded frame doesn't already match (see ConvertVideoFrame/
-///   ConvertAudioFrame).
+/// Transform node: encodes decoded frames into compressed packets, mirroring
+/// DecoderNode in reverse (kTransform, kActive).
+/// - Negotiate: resolve encoder, publish preliminary EncodedFormat (real
+///   extradata only known after open).
+/// - Prepare: avcodec_open2, then republish format with real codec params.
+/// - EOF: null frame -> drain -> push EOS.
 class EncoderNode : public INode {
   public:
     explicit EncoderNode(mvp::EncodeParams params);
@@ -89,6 +76,12 @@ class EncoderNode : public INode {
     AVFramePtr ConvertAudioFrame(const MediaFrame& src);
     void SendFrameAndDrain(AVFrame* frame);
 
+    // Audio FIFO: feed encoders exactly frame_size samples/frame (AAC: 1024).
+    bool EnsureAudioFifo();
+    void ProcessAudioFrame(MediaFrame& mf, int64_t pts_ticks);
+    void SendCompleteAudioFrames();
+    void FlushAudioFifo();
+
     NodeState state_{NodeState::kIdle};
     std::string name_{"EncoderNode"};
 
@@ -100,6 +93,9 @@ class EncoderNode : public INode {
     AVCodecContext* codec_ctx_{nullptr};
     SwsContext* sws_ctx_{nullptr};  // video pixel format conversion, lazy
     SwrContext* swr_ctx_{nullptr};  // audio resample, lazy
+    AVAudioFifo* audio_fifo_{nullptr};  // audio frame-size buffer, lazy
+    int64_t audio_next_pts_{0};  // pts (time_base units) of first unconsumed sample
+    bool audio_pts_valid_{false};
     MediaFramePool video_scratch_pool_;
 
     std::unique_ptr<InputPort> input_port_;
