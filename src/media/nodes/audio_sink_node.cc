@@ -18,6 +18,11 @@ extern "C" {
 #include "media_frame.h"
 
 namespace mvp::graph {
+namespace {
+// Audio is the most stable time base: SDL drains it at a fixed device rate,
+// so it outranks any other offer in the playback graph.
+constexpr int kClockPriority = 100;
+}  // namespace
 
 AudioSinkNode::AudioSinkNode() {
     input_port_ = std::make_unique<InputPort>(this);
@@ -36,8 +41,8 @@ bool AudioSinkNode::Negotiate() {
     return ReadAudioParams();
 }
 
-void AudioSinkNode::SetAudioClock(mvp::Clock* clock) {
-    audio_clock_ = clock;
+ClockOffer AudioSinkNode::ProvideClock() {
+    return {clock_, kClockPriority};
 }
 
 bool AudioSinkNode::Prepare() {
@@ -260,10 +265,7 @@ void AudioSinkNode::AudioLoop() {
             continue;
         }
 
-        // Update audio clock (MasterClock source in AudioMaster mode)
-        if (audio_clock_) {
-            audio_clock_->Set(mf.pts());
-        }
+        clock_->Set(mf.pts());
         ConvertAndFeed(mf.RawFrame());
     }
 

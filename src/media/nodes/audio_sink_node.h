@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 
+#include "clock.h"
 #include "graph/media_buffer.h"
 #include "graph/media_graph.h"
 #include "graph/node.h"
@@ -14,10 +15,6 @@
 
 struct SwrContext;
 struct SDL_AudioStream;
-
-namespace mvp {
-class Clock;
-}
 
 namespace mvp::graph {
 
@@ -32,7 +29,7 @@ namespace mvp::graph {
 ///
 /// Lifecycle:
 /// - AVStream* is needed for Prepare() to configure SDL audio device.
-/// - Clock* is updated with each consumed frame's PTS (MasterClock source).
+/// - Owns the audio time base and offers it for master-clock arbitration.
 /// - Graph reference for EOS reporting.
 ///
 /// Thread safety:
@@ -51,6 +48,7 @@ class AudioSinkNode : public INode {
     void Flush() override;
     void OnCommand(const Command& cmd) override;
     void SetPaused(bool paused) override;
+    ClockOffer ProvideClock() override;
 
     void Process(MediaBuffer, OutputCallback) override {}
 
@@ -63,9 +61,6 @@ class AudioSinkNode : public INode {
     std::string Name() const override { return "AudioSinkNode"; }
 
     // --- AudioSinkNode-specific ---
-
-    /// Set the clock this node updates (audio master clock).
-    void SetAudioClock(mvp::Clock* clock);
 
     /// Set graph reference for EOS reporting.
     void Attach(MediaGraph* graph) override { graph_ = graph; }
@@ -91,8 +86,10 @@ class AudioSinkNode : public INode {
     // Ports
     std::unique_ptr<InputPort> input_port_;
 
+    // Audio time base, written by the audio thread on every consumed frame.
+    std::shared_ptr<mvp::Clock> clock_{std::make_shared<mvp::Clock>()};
+
     // External references (non-owning)
-    mvp::Clock* audio_clock_{nullptr};
     MediaGraph* graph_{nullptr};
 
     // SDL audio state (owned, created in Prepare)

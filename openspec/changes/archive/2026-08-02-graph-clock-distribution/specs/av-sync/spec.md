@@ -1,9 +1,27 @@
-﻿## Requirements
+## REMOVED Requirements
+
+### Requirement: SyncMode determines synchronization strategy
+**Reason**: 主时钟不再由枚举硬编码。"有无音频"这一条件已隐含在"是否存在音频时钟提供者"中，由 `MediaGraph` 按 `ClockOffer` 优先级仲裁，判据只存在一处。
+**Migration**: 由 `Master clock is arbitrated by MediaGraph` 取代。
+
+### Requirement: Clock is managed by MediaGraph
+**Reason**: 时钟由 graph 持有再下发，与"写入者才是拥有者"矛盾——真正写时钟的是 sink 节点。改为节点自持、graph 仲裁并共享引用。
+**Migration**: 由 `Master clock is arbitrated by MediaGraph` 取代。
+
+### Requirement: AudioMaster sync uses frame_timer accumulation
+**Reason**: 策略选择的判据由"音频主/视频主"改为"有无外部参考时基"。
+**Migration**: 由 `Video sink syncs against external reference or free-runs` 取代。
+
+### Requirement: VideoMaster mode uses frame-interval timing
+**Reason**: 同上。
+**Migration**: 由 `Video sink syncs against external reference or free-runs` 取代。
+
+## ADDED Requirements
 
 ### Requirement: Master clock is arbitrated by MediaGraph
 时钟 SHALL 由写入它的节点持有，而非由 facade 持有再注入节点。
 
-`INode::ProvideClock()` SHALL 返回 `ClockOffer{clock, priority}`；不提供时基的节点返回空 offer。`MediaGraph` SHALL 在协商期收集全部 offer，选出优先级最高者作为主时钟（优先级相同时按拓扑序取先者），并 SHALL NOT 依据节点类型或名称推断适任度。
+`INode::ProvideClock()` SHALL 返回 `ClockOffer{clock, priority}`；不提供时基的节点返回空 offer。`MediaGraph` SHALL 在协商期收集全部 offer，取优先级最高者作为主时钟（优先级相同时按拓扑序取先者），并 SHALL NOT 依据节点类型或名称推断适任度。
 
 转码等非实时场景无任何时钟提供者，`MasterClock()` SHALL 返回 nullptr。
 

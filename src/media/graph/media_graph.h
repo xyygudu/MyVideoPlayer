@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 
+#include "clock.h"
 #include "graph/graph_command.h"
 #include "graph/node.h"
 #include "graph/port.h"
@@ -27,16 +28,6 @@ enum class GraphState {
     kPaused,    // Clock frozen, nodes waiting
     kFinished,  // All sinks reported EOS
     kError,     // A node is in error state
-};
-
-/// Abstract clock interface for AV sync.
-class IClock {
-  public:
-    virtual ~IClock() = default;
-    virtual void Set(double pts) = 0;
-    virtual double Get() const = 0;
-    virtual void SetPaused(bool paused) = 0;
-    virtual void SetSpeed(double speed) = 0;
 };
 
 /// The media processing graph: manages node topology and lifecycle.
@@ -73,7 +64,8 @@ class MediaGraph {
     bool Open();
 
     /// Two-pass negotiation: DeclareCaps (Sink→Source) → caps validation →
-    /// Negotiate (Source→Sink). Detects cycles. Returns false if any step fails.
+    /// master clock arbitration → Negotiate (Source→Sink). Detects cycles.
+    /// Returns false if any step fails.
     bool Negotiate();
 
     /// Allocate resources on all nodes.
@@ -90,11 +82,11 @@ class MediaGraph {
 
     // --- Control (high-level operations, decoupled from topology) ---
 
-    /// Seek to a position: flush all links, then broadcast a seek command
-    /// so each node resets its own internal state and repositions.
+    /// Seek to a position: flush all links, broadcast a seek command so each
+    /// node resets its own internal state, then reposition every clock.
     void Seek(double position);
 
-    /// Pause or resume playback (cascades to all nodes).
+    /// Pause or resume playback (cascades to all nodes, then all clocks).
     void SetPaused(bool paused);
 
     /// Dispatch a command to all nodes in topological order. Nodes that do
@@ -105,8 +97,9 @@ class MediaGraph {
 
     GraphState State() const { return state_; }
 
-    void SetClock(std::shared_ptr<IClock> clock) { clock_ = std::move(clock); }
-    std::shared_ptr<IClock> Clock() const { return clock_; }
+    /// The arbitrated master time base, or nullptr when no node offers one
+    /// (e.g. a transcode graph). Non-owning.
+    IClock* MasterClock() const { return master_clock_.get(); }
 
     void SetEventCallback(EventCallback cb) { event_cb_ = std::move(cb); }
 
@@ -124,11 +117,15 @@ class MediaGraph {
     /// Check every connection's caps for contradictions.
     bool ValidateCaps() const;
 
+    /// Collect every node's ClockOffer and elect the highest-priority one.
+    void SelectMasterClock();
+
     std::vector<std::unique_ptr<INode>> nodes_;
     std::vector<INode*> node_ptrs_;       // Raw pointers for convenience
     std::vector<INode*> topo_order_;      // Sorted execution order
     GraphState state_{GraphState::kIdle};
-    std::shared_ptr<IClock> clock_;
+    std::vector<std::shared_ptr<IClock>> clocks_;  // Every offered clock
+    std::shared_ptr<IClock> master_clock_;
     EventCallback event_cb_;
 };
 

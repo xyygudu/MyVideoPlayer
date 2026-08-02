@@ -83,10 +83,6 @@ class MediaPlayer::Impl {
     // be cleared before graph_ is reset (see Close()).
     EffectManager effect_manager_;
 
-    // Clocks
-    Clock audio_clock_;
-    Clock video_clock_;
-
     // Video rendering
     VideoRenderer video_renderer_;
     void* window_handle_{nullptr};
@@ -145,19 +141,12 @@ void MediaPlayer::Impl::Close() {
     eos_count_ = 0;
     sink_count_ = 0;
 
-    audio_clock_.Reset();
-    video_clock_.Reset();
-
-    audio_clock_.SetPaused(false);
-    video_clock_.SetPaused(false);
     state_ = PlaybackState::kIdle;
 }
 
 void MediaPlayer::Impl::Play() {
     if (state_ == PlaybackState::kReady || state_ == PlaybackState::kPaused) {
         if (state_ == PlaybackState::kPaused) {
-            audio_clock_.SetPaused(false);
-            video_clock_.SetPaused(false);
             graph_->SetPaused(false);
             state_ = PlaybackState::kPlaying;
             return;
@@ -180,8 +169,6 @@ void MediaPlayer::Impl::Play() {
 void MediaPlayer::Impl::Pause() {
     if (state_ != PlaybackState::kPlaying) return;
 
-    audio_clock_.SetPaused(true);
-    video_clock_.SetPaused(true);
     graph_->SetPaused(true);
     state_ = PlaybackState::kPaused;
 }
@@ -189,13 +176,10 @@ void MediaPlayer::Impl::Pause() {
 void MediaPlayer::Impl::Seek(double position_seconds) {
     if (!graph_ || state_ == PlaybackState::kIdle) return;
 
-    // Graph coordinates the seek: flush all links, then broadcast a seek
-    // command so each node resets its own state (demux repositions, decoder
-    // drops to target, audio sink clears its buffer).
+    // Graph coordinates the seek: flush all links, broadcast a seek command
+    // so each node resets its own state (demux repositions, decoder drops to
+    // target, audio sink clears its buffer), then reposition every clock.
     graph_->Seek(position_seconds);
-
-    audio_clock_.Reset(position_seconds);
-    video_clock_.Reset(position_seconds);
 
     eos_count_ = 0;
     if (state_ == PlaybackState::kFinished) {
@@ -212,8 +196,8 @@ double MediaPlayer::Impl::Duration() const {
 }
 
 double MediaPlayer::Impl::CurrentPosition() const {
-    // AudioMaster: audio clock is the primary reference.
-    return audio_stream_index_ >= 0 ? audio_clock_.Get() : video_clock_.Get();
+    IClock* clock = graph_ ? graph_->MasterClock() : nullptr;
+    return clock ? clock->Get() : 0.0;
 }
 
 double MediaPlayer::Impl::VideoFps() const {
@@ -254,16 +238,8 @@ bool MediaPlayer::Impl::BuildGraph() {
     }
 
     // 2. Configure sink nodes.
-    bool has_audio = (audio_stream_index_ >= 0);
     if (vsink) {
         vsink->SetRenderer(&video_renderer_);
-        vsink->SetAudioClock(&audio_clock_);
-        vsink->SetVideoClock(&video_clock_);
-        vsink->SetSyncMode(has_audio ? graph::VideoSinkNode::SyncMode::kAudioMaster
-                                     : graph::VideoSinkNode::SyncMode::kVideoMaster);
-    }
-    if (asink) {
-        asink->SetAudioClock(&audio_clock_);
     }
 
     // 3. Wire pipeline (inline).
@@ -315,8 +291,7 @@ void MediaPlayer::Impl::OnGraphEvent(graph::GraphEvent event) {
         eos_count_++;
         if (eos_count_ >= sink_count_) {
             state_ = PlaybackState::kFinished;
-            audio_clock_.SetPaused(true);
-            video_clock_.SetPaused(true);
+            graph_->SetPaused(true);
             if (finished_cb_) finished_cb_();
         }
     } else if (event == graph::GraphEvent::kError) {

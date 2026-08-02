@@ -12,12 +12,21 @@
 #include "video_sink_node.h"
 
 namespace mvp::graph {
+namespace {
+// Video only serves as the reference when nothing better is offered: its
+// pacing is driven by this node's own sleeps, not by an external device.
+constexpr int kClockPriority = 10;
+}  // namespace
 
 VideoSinkNode::VideoSinkNode() {
     input_port_ = std::make_unique<InputPort>(this);
 }
 
 VideoSinkNode::~VideoSinkNode() { Stop(); }
+
+ClockOffer VideoSinkNode::ProvideClock() {
+    return {clock_, kClockPriority};
+}
 
 bool VideoSinkNode::Negotiate() {
     if (!input_port_->IsConnected()) {
@@ -33,6 +42,7 @@ bool VideoSinkNode::Negotiate() {
     if (fr.num > 0 && fr.den > 0) {
         video_fps_ = static_cast<double>(fr.num) / fr.den;
     }
+    master_clock_ = graph_ ? graph_->MasterClock() : nullptr;
     return true;
 }
 
@@ -97,35 +107,28 @@ void VideoSinkNode::SetRenderer(mvp::VideoRenderer* renderer) {
     renderer_ = renderer;
 }
 
-void VideoSinkNode::SetAudioClock(mvp::Clock* audio_clock) {
-    audio_clock_ = audio_clock;
-}
-
-void VideoSinkNode::SetVideoClock(mvp::Clock* video_clock) {
-    video_clock_ = video_clock;
-}
-
 std::vector<InputPort*> VideoSinkNode::Inputs() {
     return {input_port_.get()};
 }
 
 double VideoSinkNode::ComputeDisplayDelay(double pts, double last_pts,
                                           double last_display_time) {
-    if (sync_mode_ == SyncMode::kAudioMaster && audio_clock_) {
-        return ComputeAudioMasterDelay(pts, last_pts);
+    // An external reference exists only when someone else won arbitration.
+    if (master_clock_ && master_clock_ != clock_.get()) {
+        return ComputeSlavedDelay(pts, last_pts);
     }
-    return ComputeVideoMasterDelay(pts, last_pts, last_display_time);
+    return ComputeFreeRunDelay(pts, last_pts, last_display_time);
 }
 
-double VideoSinkNode::ComputeAudioMasterDelay(double pts, double last_pts) {
+double VideoSinkNode::ComputeSlavedDelay(double pts, double last_pts) {
     // 1. Frame interval
     double delay = pts - last_pts;
     if (delay <= kFrameDelayMin || delay > kFrameDelayMax) {
         delay = (video_fps_ > 0) ? (1.0 / video_fps_) : 0.04;
     }
 
-    // 2. Audio/video difference + 3. adaptive sync threshold
-    double diff = pts - audio_clock_->Get();
+    // 2. Master clock difference + 3. adaptive sync threshold
+    double diff = pts - master_clock_->Get();
     double sync_threshold =
         std::clamp(delay, kSyncThresholdMin, kSyncThresholdMax);
 
@@ -150,8 +153,8 @@ double VideoSinkNode::ComputeAudioMasterDelay(double pts, double last_pts) {
                                : 0.0;
 }
 
-double VideoSinkNode::ComputeVideoMasterDelay(double pts, double last_pts,
-                                              double last_display_time) {
+double VideoSinkNode::ComputeFreeRunDelay(double pts, double last_pts,
+                                          double last_display_time) {
     double delay = pts - last_pts;
     if (delay <= kFrameDelayMin || delay > kFrameDelayMax) {
         delay = (video_fps_ > 0) ? (1.0 / video_fps_) : 0.04;
@@ -178,9 +181,7 @@ void VideoSinkNode::SyncAndRender(MediaFrame& mf, double& last_pts,
 }
 
 void VideoSinkNode::RenderFrame(const MediaFrame& mf) {
-    if (video_clock_) {
-        video_clock_->Set(mf.pts());
-    }
+    clock_->Set(mf.pts());
     renderer_->Render(mf);
 }
 

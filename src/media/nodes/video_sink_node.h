@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 
+#include "clock.h"
 #include "graph/media_buffer.h"
 #include "graph/media_graph.h"
 #include "graph/node.h"
@@ -15,7 +16,6 @@
 
 namespace mvp {
 class VideoRenderer;
-class Clock;
 }  // namespace mvp
 
 namespace mvp::graph {
@@ -31,13 +31,10 @@ namespace mvp::graph {
 /// Lifecycle:
 /// - VideoRenderer is created externally and passed in (non-owning).
 ///   This allows the app layer to manage the SDL window lifecycle.
-/// - Clock reference is obtained from MediaGraph for AV sync.
-/// - Worker thread pulls frames from input Link and applies timing.
+/// - Owns a video time base and offers it for master-clock arbitration;
+///   reads the elected master back from the graph during Negotiate.
 class VideoSinkNode : public INode {
   public:
-    /// Sync strategy.
-    enum class SyncMode { kAudioMaster, kVideoMaster };
-
     VideoSinkNode();
     ~VideoSinkNode() override;
 
@@ -48,6 +45,7 @@ class VideoSinkNode : public INode {
     void Stop() override;
     void Flush() override;
     void OnCommand(const Command& cmd) override;
+    ClockOffer ProvideClock() override;
 
     void Process(MediaBuffer, OutputCallback) override {}
 
@@ -64,14 +62,6 @@ class VideoSinkNode : public INode {
     /// Set the external VideoRenderer (must be valid for node lifetime).
     void SetRenderer(mvp::VideoRenderer* renderer);
 
-    /// Set the audio clock for AudioMaster sync.
-    void SetAudioClock(mvp::Clock* audio_clock);
-
-    /// Set video clock (updated by this node when displaying frames).
-    void SetVideoClock(mvp::Clock* video_clock);
-
-    void SetSyncMode(SyncMode mode) { sync_mode_ = mode; }
-
     /// Set the graph reference for EOS reporting.
     void Attach(MediaGraph* graph) override { graph_ = graph; }
 
@@ -85,23 +75,25 @@ class VideoSinkNode : public INode {
     void RenderFrame(const MediaFrame& mf);
     double ComputeDisplayDelay(double pts, double last_pts,
                                double last_display_time);
-    double ComputeAudioMasterDelay(double pts, double last_pts);
-    double ComputeVideoMasterDelay(double pts, double last_pts,
-                                   double last_display_time);
+    double ComputeSlavedDelay(double pts, double last_pts);
+    double ComputeFreeRunDelay(double pts, double last_pts,
+                               double last_display_time);
 
     NodeState state_{NodeState::kIdle};
 
     // Ports
     std::unique_ptr<InputPort> input_port_;
 
+    // Video time base, written by the render thread on every displayed frame.
+    std::shared_ptr<mvp::Clock> clock_{std::make_shared<mvp::Clock>()};
+
     // External references (non-owning)
     mvp::VideoRenderer* renderer_{nullptr};
-    mvp::Clock* audio_clock_{nullptr};
-    mvp::Clock* video_clock_{nullptr};
     MediaGraph* graph_{nullptr};
+    // Elected master; equal to clock_.get() when this node is the reference.
+    IClock* master_clock_{nullptr};
 
     // Sync state
-    SyncMode sync_mode_{SyncMode::kAudioMaster};
     double video_fps_{30.0};
     double frame_timer_{0.0};
 

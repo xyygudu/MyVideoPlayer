@@ -120,6 +120,24 @@ bool MediaGraph::ValidateCaps() const {
     return true;
 }
 
+void MediaGraph::SelectMasterClock() {
+    clocks_.clear();
+    master_clock_.reset();
+
+    int best_priority = 0;
+    for (auto* node : topo_order_) {
+        ClockOffer offer = node->ProvideClock();
+        if (!offer.clock) {
+            continue;
+        }
+        clocks_.push_back(offer.clock);
+        if (!master_clock_ || offer.priority > best_priority) {
+            master_clock_ = offer.clock;
+            best_priority = offer.priority;
+        }
+    }
+}
+
 bool MediaGraph::Negotiate() {
     if (!TopologicalSort()) {
         state_ = GraphState::kError;
@@ -134,6 +152,8 @@ bool MediaGraph::Negotiate() {
         state_ = GraphState::kError;
         return false;
     }
+
+    SelectMasterClock();
 
     for (auto* node : topo_order_) {
         if (!node->Negotiate()) {
@@ -236,11 +256,18 @@ void MediaGraph::Seek(double position) {
     Flush();
     // 2. Broadcast seek so each node resets its own state and repositions.
     SendCommand({CommandType::kSeek, position});
+    // 3. Reposition every time base to the seek target.
+    for (auto& clock : clocks_) {
+        clock->Reset(position);
+    }
 }
 
 void MediaGraph::SetPaused(bool paused) {
     for (auto* node : node_ptrs_) {
         node->SetPaused(paused);
+    }
+    for (auto& clock : clocks_) {
+        clock->SetPaused(paused);
     }
 }
 

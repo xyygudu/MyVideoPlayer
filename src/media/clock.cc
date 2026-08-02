@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 
 namespace mvp {
 
@@ -57,6 +58,7 @@ Clock::Clock() {
 // ---------------------------------------------------------------------------
 
 void Clock::Set(double pts) {
+    std::lock_guard<std::mutex> lock(write_mutex_);
     BeginWrite();
     pts_ = pts;
     last_updated_ = Now();
@@ -116,6 +118,7 @@ double Clock::Get() const {
 // ---------------------------------------------------------------------------
 
 void Clock::SetPaused(bool paused) {
+    std::lock_guard<std::mutex> lock(write_mutex_);
     BeginWrite();
     if (paused && !paused_) {
         // Transitioning to paused: freeze current extrapolated value
@@ -139,6 +142,7 @@ void Clock::SetPaused(bool paused) {
 // ---------------------------------------------------------------------------
 
 void Clock::SetSpeed(double speed) {
+    std::lock_guard<std::mutex> lock(write_mutex_);
     BeginWrite();
     if (!paused_) {
         // Snapshot current value before changing speed
@@ -151,6 +155,7 @@ void Clock::SetSpeed(double speed) {
 }
 
 void Clock::Reset(double pts) {
+    std::lock_guard<std::mutex> lock(write_mutex_);
     BeginWrite();
     pts_ = pts;
     last_updated_ = Now();

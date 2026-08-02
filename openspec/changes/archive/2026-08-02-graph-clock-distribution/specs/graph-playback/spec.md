@@ -1,10 +1,4 @@
-## Purpose
-
-Defines the MediaPlayer class that serves as the preset playback graph builder,
-replacing the old Player API. MediaPlayer constructs and manages the playback
-graph topology for common playback scenarios.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: MediaPlayer builds playback graph from URL
 系统 SHALL 定义 `MediaPlayer` 类，作为播放场景的预设图构建器，替代旧 `Player` 公共 API。

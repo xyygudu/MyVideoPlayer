@@ -1,9 +1,4 @@
-## Purpose
-
-Defines the sink nodes (VideoSinkNode, AudioSinkNode, FileSinkNode) that
-consume processed media data at the end of the graph pipeline.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: VideoSinkNode renders video frames to display
 系统 SHALL 定义 `VideoSinkNode`（Sink 类型），使用 SDL3 GPU 渲染逻辑输出到窗口。
@@ -58,10 +53,3 @@ AudioSinkNode SHALL 提供：
 #### Scenario: Missing audio params fails negotiation
 - **WHEN** 输入端口格式既非 AudioFormat 也不含可用的 codec_params
 - **THEN** Negotiate() 记录 ERROR 并返回 false
-
-### Requirement: FileSinkNode writes data to file
-系统 SHALL 定义 `FileSinkNode`（Sink 类型），用于转码场景的最终输出。
-
-#### Scenario: Write AVPacket to output file
-- **WHEN** 输入端口收到一个 AVPacket，输出文件已打开
-- **THEN** AVPacket 数据被写入文件

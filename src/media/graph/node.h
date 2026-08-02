@@ -3,9 +3,11 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "clock.h"
 #include "graph/media_buffer.h"
 #include "graph/media_format.h"
 
@@ -14,6 +16,16 @@ namespace mvp::graph {
 class InputPort;
 class OutputPort;
 struct Command;
+
+/// A node's bid to become the graph's master clock.
+///
+/// Higher priority wins; ties break by topological order. Each node defines
+/// its own value locally so this header stays free of any judgement about
+/// which kind of time base is more authoritative.
+struct ClockOffer {
+    std::shared_ptr<IClock> clock;
+    int priority{0};
+};
 
 /// Categorizes node's role in the graph.
 enum class NodeType {
@@ -59,6 +71,11 @@ class INode {
     /// Declare acceptable formats/requirements on own input ports.
     /// Called in reverse topological order, before Negotiate.
     virtual void DeclareCaps() {}
+
+    /// Offer a time base for master-clock arbitration. Default: no offer.
+    /// Arbitration completes before Negotiate, so consumers may read
+    /// MediaGraph::MasterClock() there.
+    virtual ClockOffer ProvideClock() { return {}; }
 
     /// Declare/negotiate port formats with neighbors.
     /// Called by MediaGraph after all connections are made.
