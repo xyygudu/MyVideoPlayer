@@ -111,9 +111,6 @@ DecoderNode::Negotiate SHALL 从 EncodedFormat::codec_params 推理输出格式�
 - **WHEN** DecoderNode::Negotiate 执行
 - **THEN** 从输入端口的 codec_params 构造输出 VideoFormat，未调用 avcodec_open2
 
-### Requirement: DemuxNode 实现 ISourceNode::Probe
-DemuxNode SHALL 实现 ISourceNode，提供 Probe() 返回 StreamInfo 列表。Probe SHALL 打开文件、发现流、构造 EncodedFormat。Prepare SHALL 幂等（format_ctx_ 判空守卫）。
-
 ### Requirement: 节点长函数提炼至 50 行内
 DemuxNode/DecoderNode/VideoSinkNode/AudioSinkNode 的长函数 SHALL 提炼私有辅助方法，每个函数体不超过 50 行。DecodeLoop SHALL 不使用 goto。
 

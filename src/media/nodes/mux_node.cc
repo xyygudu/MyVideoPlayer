@@ -18,12 +18,14 @@ MuxNode::MuxNode(std::string output_path, bool has_video, bool has_audio)
     if (has_video) {
         StreamSlot slot;
         slot.port = std::make_unique<InputPort>(this);
+        slot.media_type = MediaType::kVideo;
         slot.primary = true;
         slots_.push_back(std::move(slot));
     }
     if (has_audio) {
         StreamSlot slot;
         slot.port = std::make_unique<InputPort>(this);
+        slot.media_type = MediaType::kAudio;
         slot.primary = !has_video;  // audio is primary only when there is no video
         slots_.push_back(std::move(slot));
     }
@@ -43,6 +45,17 @@ void MuxNode::ResolveOutputRequirements() {
                 needs_global_header_);
 }
 
+void MuxNode::DeclareCaps() {
+    ResolveOutputRequirements();
+    for (auto& slot : slots_) {
+        FormatCaps caps;
+        caps.media_type = slot.media_type;
+        caps.header_placement = needs_global_header_ ? HeaderPlacement::kGlobal
+                                                     : HeaderPlacement::kInBand;
+        slot.port->SetCaps(std::move(caps));
+    }
+}
+
 MuxNode::~MuxNode() {
     Stop();
     CloseOutput();
@@ -54,11 +67,6 @@ bool MuxNode::Negotiate() {
             SPDLOG_ERROR("MuxNode: input port not connected");
             return false;
         }
-    }
-    // Publish container requirement (needs_global_header) to upstream encoders.
-    ResolveOutputRequirements();
-    for (auto& slot : slots_) {
-        slot.port->SetNeedsGlobalHeader(needs_global_header_);
     }
     return true;
 }

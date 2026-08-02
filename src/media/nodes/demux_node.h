@@ -23,15 +23,9 @@ namespace mvp::graph {
 /// - Construction: `DemuxNode(file_path, video_idx, audio_idx)` —
 ///   stream indices come from a prior SourceProbe::Probe() call.
 ///   -1 means no stream of that type. Output ports are created immediately.
-/// - Prepare: calls OpenFile() (always a fresh open since constructor no
-///   longer opens the file)
+/// - Open: opens the file; Negotiate then only reads codecpar
 /// - Start: launches DemuxLoop thread
 /// - Flush: marks seek pending; worker thread executes avformat_seek_file
-///
-/// Lifecycle notes:
-/// - format_ctx_ is allocated in Prepare() (OpenFile), freed in Stop()
-/// - Output ports are created in constructor (order: video first, then audio)
-/// - Worker thread blocks on running_ flag + seek_requested_ atomic
 class DemuxNode : public INode {
   public:
     explicit DemuxNode(std::string file_path, int video_stream_idx = -1,
@@ -39,6 +33,7 @@ class DemuxNode : public INode {
     ~DemuxNode() override;
 
     // --- INode interface ---
+    bool Open() override;
     bool Negotiate() override;
     bool Prepare() override;
     bool Start() override;

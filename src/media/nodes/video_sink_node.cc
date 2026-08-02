@@ -20,6 +20,19 @@ VideoSinkNode::VideoSinkNode() {
 VideoSinkNode::~VideoSinkNode() { Stop(); }
 
 bool VideoSinkNode::Negotiate() {
+    if (!input_port_->IsConnected()) {
+        SPDLOG_ERROR("VideoSinkNode: input port not connected");
+        return false;
+    }
+    const MediaFormat& fmt = input_port_->Format();
+    if (!fmt.IsVideo()) {
+        SPDLOG_ERROR("VideoSinkNode: input format is not video");
+        return false;
+    }
+    const Rational& fr = fmt.AsVideo().frame_rate;
+    if (fr.num > 0 && fr.den > 0) {
+        video_fps_ = static_cast<double>(fr.num) / fr.den;
+    }
     return true;
 }
 

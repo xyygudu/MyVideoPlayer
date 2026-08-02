@@ -88,7 +88,6 @@ bool Transcoder::Impl::BuildGraph() {
         std::make_unique<graph::DemuxNode>(input_url_, video_idx, audio_idx)));
     auto* mux = static_cast<graph::MuxNode*>(graph_->AddNode(
         std::make_unique<graph::MuxNode>(output_path_, want_video, want_audio)));
-    mux->SetGraph(graph_.get());
     mux->SetProgressHook([this](double pts) { OnProgress(pts); });
 
     if (want_video) {
@@ -100,6 +99,10 @@ bool Transcoder::Impl::BuildGraph() {
         WireBranch(demux->Outputs()[demux_port], options_.audio, mux, mux_port);
     }
 
+    if (!graph_->Open()) {
+        SPDLOG_ERROR("Transcoder: graph Open failed");
+        return false;
+    }
     if (!graph_->Negotiate()) {
         SPDLOG_ERROR("Transcoder: graph Negotiate failed");
         return false;

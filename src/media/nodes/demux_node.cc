@@ -34,8 +34,24 @@ DemuxNode::~DemuxNode() {
     CloseFormatContext();
 }
 
-bool DemuxNode::Negotiate() {
+bool DemuxNode::Open() {
     if (!OpenFile()) {
+        return false;
+    }
+    if (audio_stream_index_ < 0 && video_stream_index_ < 0) {
+        SPDLOG_ERROR("DemuxNode: no audio or video streams in '{}'", file_path_);
+        return false;
+    }
+    state_ = NodeState::kOpened;
+    SPDLOG_INFO("DemuxNode: opened '{}' — duration {:.2f}s, video={}, audio={}",
+                file_path_, Duration(), video_stream_index_,
+                audio_stream_index_);
+    return true;
+}
+
+bool DemuxNode::Negotiate() {
+    if (!format_ctx_) {
+        SPDLOG_ERROR("DemuxNode: Negotiate before Open");
         return false;
     }
     if (video_stream_index_ >= 0) {
@@ -63,27 +79,11 @@ bool DemuxNode::Prepare() {
     if (state_ == NodeState::kPrepared || state_ == NodeState::kRunning) {
         return true;  // Already prepared
     }
-    if (state_ != NodeState::kIdle && state_ != NodeState::kConfigured) {
+    if (state_ != NodeState::kOpened) {
         SPDLOG_ERROR("DemuxNode: Prepare called in invalid state {}",
                      static_cast<int>(state_));
         return false;
     }
-
-    if (!OpenFile()) {
-        state_ = NodeState::kError;
-        return false;
-    }
-
-    if (audio_stream_index_ < 0 && video_stream_index_ < 0) {
-        SPDLOG_ERROR("DemuxNode: no audio or video streams in '{}'", file_path_);
-        avformat_close_input(&format_ctx_);
-        state_ = NodeState::kError;
-        return false;
-    }
-
-    SPDLOG_INFO(
-        "DemuxNode: opened '{}' — duration {:.2f}s, video={}, audio={}",
-        file_path_, Duration(), video_stream_index_, audio_stream_index_);
 
     state_ = NodeState::kPrepared;
     return true;

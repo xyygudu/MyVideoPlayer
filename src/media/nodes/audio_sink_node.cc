@@ -29,7 +29,11 @@ AudioSinkNode::~AudioSinkNode() {
 }
 
 bool AudioSinkNode::Negotiate() {
-    return true;
+    if (!input_port_->IsConnected()) {
+        SPDLOG_ERROR("AudioSinkNode: input port not connected");
+        return false;
+    }
+    return ReadAudioParams();
 }
 
 void AudioSinkNode::SetAudioClock(mvp::Clock* clock) {
@@ -45,7 +49,7 @@ bool AudioSinkNode::Prepare() {
         return false;
     }
 
-    if (!ReadAudioParams() || !OpenSdlDevice()) {
+    if (!OpenSdlDevice()) {
         state_ = NodeState::kError;
         return false;
     }

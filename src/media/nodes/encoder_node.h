@@ -86,6 +86,7 @@ class EncoderNode : public INode {
     std::string name_{"EncoderNode"};
 
     mvp::EncodeParams params_;
+    bool global_header_{false};
     const AVCodec* codec_{nullptr};
     MediaType media_type_{MediaType::kUnknown};
     AVRational time_base_{1, 1000};

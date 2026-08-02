@@ -1,10 +1,4 @@
-## Purpose
-
-Defines the source nodes (DemuxNode, DecoderNode) that ingest media data into
-the graph pipeline — opening media files, demuxing streams, and decoding
-compressed packets into raw frames.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: DemuxNode opens file and routes packets by stream
 系统 SHALL 定义 `DemuxNode`（**Source 类型**），负责打开媒体文件并按流分发压缩包。
@@ -34,20 +28,3 @@ DemuxNode SHALL 实现 seek：Flush() 时丢弃内部缓冲，工作线程在下
 #### Scenario: Stream index out of range fails negotiation
 - **WHEN** Negotiate 中 video_stream_index >= nb_streams
 - **THEN** 记录 ERROR 日志并返回 false
-
-### Requirement: DecoderNode decodes compressed packets to frames
-系统 SHALL 定义 `DecoderNode`（Transform 类型），使用 FFmpeg `avcodec_send_packet()` / `avcodec_receive_frame()` 解码。
-
-DecoderNode SHALL 提供：
-- 单个输入端口 + 单个输出端口
-- Prepare()：创建 AVCodecContext，打开解码器
-- 保留 seek 优化：`SetDropUntilPts(double)`
-- ThreadingMode：Active
-
-#### Scenario: Decode video packet to frame
-- **WHEN** 输入一个视频 AVPacket，解码器产生一个 AVFrame
-- **THEN** 输出端口 Push 一个 payload 为 MediaFrame 的 MediaBuffer
-
-#### Scenario: EOS propagates through decoder
-- **WHEN** 输入端口收到 flags=kEos 的 MediaBuffer
-- **THEN** 调用 avcodec_send_packet(nullptr) 冲刷解码器缓冲，最后输出 kEos

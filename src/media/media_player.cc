@@ -254,20 +254,16 @@ bool MediaPlayer::Impl::BuildGraph() {
     }
 
     // 2. Configure sink nodes.
-    double fps = VideoFps();
     bool has_audio = (audio_stream_index_ >= 0);
     if (vsink) {
         vsink->SetRenderer(&video_renderer_);
         vsink->SetAudioClock(&audio_clock_);
         vsink->SetVideoClock(&video_clock_);
-        vsink->SetVideoFps(fps);
         vsink->SetSyncMode(has_audio ? graph::VideoSinkNode::SyncMode::kAudioMaster
                                      : graph::VideoSinkNode::SyncMode::kVideoMaster);
-        vsink->SetGraph(graph_.get());
     }
     if (asink) {
         asink->SetAudioClock(&audio_clock_);
-        asink->SetGraph(graph_.get());
     }
 
     // 3. Wire pipeline (inline).
@@ -283,6 +279,10 @@ bool MediaPlayer::Impl::BuildGraph() {
     }
 
     // 4. Finalize.
+    if (!graph_->Open()) {
+        SPDLOG_ERROR("MediaPlayer: graph Open failed");
+        return false;
+    }
     if (!graph_->Negotiate()) {
         SPDLOG_ERROR("MediaPlayer: graph Negotiate failed");
         return false;

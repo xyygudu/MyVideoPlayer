@@ -32,13 +32,32 @@ OutputPort::Connect() SHALL 在建立连接后调用 `peer->SetFormat(format_)` 
 - **WHEN** MediaGraph::Negotiate() 按拓扑序调用 DecoderNode::Negotiate()
 - **THEN** DecoderNode 从 input_port_->Format().codec_params() 获取编码参数
 
-### Requirement: InputPort carries downstream needs_global_header requirement
-InputPort SHALL 承载下游节点在协商期写入的 `needs_global_header` 需求，供上游节点在 Prepare 期读取。上游 Encoder 通过其输出端口连接的 peer（即该 InputPort）读取该值。
+### Requirement: Nodes declare port caps and graph validates compatibility
+节点 SHALL 在 `DeclareCaps()` 中通过 `InputPort::SetCaps()` 声明本端口可接受的格式与需求。`FormatCaps` 中留空的维度 SHALL 表示“无约束”，不参与兼容性判定。
 
-#### Scenario: MuxNode publishes requirement to upstream encoder
-- **WHEN** `MuxNode::Negotiate()` 解析容器后对输入端口调用 `SetNeedsGlobalHeader(needs_global_header_)`
-- **THEN** 上游 `EncoderNode` 在 `Prepare()` 通过 `output_port_->Peer()->NeedsGlobalHeader()` 读到该值
+MediaGraph SHALL 在 `DeclareCaps()` 之后、`Negotiate()` 之前对每条连接执行 `FormatCaps::Compatible()` 校验；某一维度被双方同时约束且无交集 SHALL 判定为不兼容并使协商失败。该校验 SHALL NOT 在 `OutputPort::Connect()` 中执行——Connect 发生于建图期，早于 caps 声明。
 
-#### Scenario: Unset requirement defaults to false
-- **WHEN** InputPort 尚未被写入该需求
-- **THEN** `NeedsGlobalHeader()` 返回 false（编码器按带内头处理）
+上游节点 SHALL 通过 `output_port_->Peer()->Caps()` 读取下游需求，据此决定自身输出格式（对应 "downstream suggests, upstream decides"）。
+
+#### Scenario: Empty caps means no constraint
+- **WHEN** 某端口未声明任何 caps
+- **THEN** 与任意上游格式均判定为兼容
+
+#### Scenario: Incompatible caps fail negotiation
+- **WHEN** 上下游端口的 FormatCaps 存在相互矛盾的维度
+- **THEN** MediaGraph::Negotiate() 返回 false 并记录不匹配的连接
+
+#### Scenario: Upstream reads downstream caps during negotiation
+- **WHEN** EncoderNode::Negotiate() 执行
+- **THEN** 可通过 output_port_->Peer()->Caps() 读到下游 MuxNode 声明的需求
+
+### Requirement: FormatCaps carries header placement requirement
+`FormatCaps` SHALL 包含 `HeaderPlacement` 维度，取值 `kAny`（默认，无约束）、`kGlobal`（要求编码器把参数集写入 extradata）、`kInBand`（要求参数集随码流内联）。
+
+#### Scenario: Muxer declares global header requirement
+- **WHEN** 输出容器带 `AVFMT_GLOBALHEADER`（如 matroska/mp4）
+- **THEN** MuxNode 在 DeclareCaps() 中将输入端口的 HeaderPlacement 声明为 kGlobal
+
+#### Scenario: Muxer declares in-band requirement
+- **WHEN** 输出容器不带 `AVFMT_GLOBALHEADER`（如 mpegts/avi）
+- **THEN** MuxNode 声明 HeaderPlacement 为 kInBand

@@ -68,7 +68,7 @@ class AudioSinkNode : public INode {
     void SetAudioClock(mvp::Clock* clock);
 
     /// Set graph reference for EOS reporting.
-    void SetGraph(MediaGraph* graph) { graph_ = graph; }
+    void Attach(MediaGraph* graph) override { graph_ = graph; }
 
     /// Clear SDL audio buffer (used on seek).
     void FlushSdlBuffer();

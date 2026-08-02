@@ -16,6 +16,7 @@ INode* MediaGraph::AddNode(std::unique_ptr<INode> node) {
     INode* ptr = node.get();
     nodes_.push_back(std::move(node));
     node_ptrs_.push_back(ptr);
+    ptr->Attach(this);
     return ptr;
 }
 
@@ -79,8 +80,57 @@ bool MediaGraph::TopologicalSort() {
     return true;
 }
 
+bool MediaGraph::Open() {
+    if (!TopologicalSort()) {
+        state_ = GraphState::kError;
+        return false;
+    }
+
+    for (size_t i = 0; i < topo_order_.size(); ++i) {
+        if (topo_order_[i]->Open()) {
+            continue;
+        }
+        SPDLOG_ERROR("MediaGraph::Open: node '{}' failed",
+                     topo_order_[i]->Name());
+        for (size_t j = 0; j < i; ++j) {
+            topo_order_[j]->Stop();
+        }
+        state_ = GraphState::kError;
+        return false;
+    }
+
+    return true;
+}
+
+bool MediaGraph::ValidateCaps() const {
+    for (auto* node : node_ptrs_) {
+        for (auto* out_port : node->Outputs()) {
+            if (!out_port->IsConnected()) {
+                continue;
+            }
+            if (!FormatCaps::Compatible(out_port->Caps(),
+                                        out_port->Peer()->Caps())) {
+                SPDLOG_ERROR("MediaGraph: incompatible caps '{}' -> '{}'",
+                             node->Name(),
+                             out_port->Peer()->Owner()->Name());
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool MediaGraph::Negotiate() {
     if (!TopologicalSort()) {
+        state_ = GraphState::kError;
+        return false;
+    }
+
+    for (auto it = topo_order_.rbegin(); it != topo_order_.rend(); ++it) {
+        (*it)->DeclareCaps();
+    }
+
+    if (!ValidateCaps()) {
         state_ = GraphState::kError;
         return false;
     }

@@ -32,6 +32,7 @@ enum class ThreadingMode {
 enum class NodeState {
     kIdle,        // Initial state, not configured
     kConfigured,  // Configure() succeeded
+    kOpened,      // Open() succeeded, external device/file acquired
     kPrepared,    // Prepare() succeeded, resources allocated
     kRunning,     // Start() called, thread active (Active) or ready (Passive)
     kPaused,      // Temporarily paused
@@ -43,16 +44,21 @@ using OutputCallback = std::function<void(MediaBuffer)>;
 
 /// Abstract interface for all graph processing nodes.
 ///
-/// Lifecycle: [construct with config] → Negotiate → Prepare → Start → [Running] → Stop
-/// Negotiate and Prepare must be called in order. State transitions are validated.
-///
-/// Configuration is node-specific (constructor params or setters), NOT part of
-/// the polymorphic interface. Only lifecycle + data flow are polymorphic.
+/// Lifecycle: [construct] → Open → DeclareCaps → Negotiate → Prepare → Start
+/// Open acquires external devices so Negotiate can stay pure format reasoning.
 class INode {
   public:
     virtual ~INode() = default;
 
     // --- Lifecycle ---
+
+    /// Acquire external devices/files. Source nodes open here so their real
+    /// format and caps are known before negotiation.
+    virtual bool Open() { return true; }
+
+    /// Declare acceptable formats/requirements on own input ports.
+    /// Called in reverse topological order, before Negotiate.
+    virtual void DeclareCaps() {}
 
     /// Declare/negotiate port formats with neighbors.
     /// Called by MediaGraph after all connections are made.
@@ -107,14 +113,9 @@ class INode {
 
     /// Human-readable name for logging.
     virtual std::string Name() const = 0;
-};
 
-/// Stream descriptor produced by source probing.
-struct StreamInfo {
-    int index{-1};
-    MediaType type{};
-    MediaFormat format;    // EncodedFormat carrying a codec_params copy
-    double duration{0.0};  // Source duration in seconds
+    /// Called by MediaGraph::AddNode; nodes that report events override it.
+    virtual void Attach(class MediaGraph* graph) { (void)graph; }
 };
 
 }  // namespace mvp::graph

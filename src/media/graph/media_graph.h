@@ -68,8 +68,12 @@ class MediaGraph {
 
     // --- Lifecycle (cascades to all nodes in topo order) ---
 
-    /// Run format negotiation on all nodes (Source → Sink order).
-    /// Detects cycles. Returns false if any node fails.
+    /// Acquire external devices/files on all nodes. Must precede Negotiate.
+    /// Rolls back already-opened nodes on failure.
+    bool Open();
+
+    /// Two-pass negotiation: DeclareCaps (Sink→Source) → caps validation →
+    /// Negotiate (Source→Sink). Detects cycles. Returns false if any step fails.
     bool Negotiate();
 
     /// Allocate resources on all nodes.
@@ -116,6 +120,9 @@ class MediaGraph {
   private:
     /// Compute topological order. Returns false if cycle detected.
     bool TopologicalSort();
+
+    /// Check every connection's caps for contradictions.
+    bool ValidateCaps() const;
 
     std::vector<std::unique_ptr<INode>> nodes_;
     std::vector<INode*> node_ptrs_;       // Raw pointers for convenience

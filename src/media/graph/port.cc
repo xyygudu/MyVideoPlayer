@@ -25,18 +25,6 @@ bool OutputPort::Connect(InputPort* peer, LinkCapacity capacity) {
         return false;
     }
 
-    // Check format compatibility if both have caps set.
-    if (!caps_.IsEmpty() && !peer->Caps().IsEmpty()) {
-        auto intersection = FormatCaps::Intersect(caps_, peer->Caps());
-        if (intersection.IsEmpty() && !caps_.IsEmpty()) {
-            SPDLOG_ERROR(
-                "OutputPort::Connect: format caps incompatible between "
-                "'{}' and '{}'",
-                owner_->Name(), peer->Owner()->Name());
-            return false;
-        }
-    }
-
     peer_ = peer;
     peer->peer_ = this;
 

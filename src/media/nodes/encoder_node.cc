@@ -51,6 +51,13 @@ bool EncoderNode::Negotiate() {
         time_base_ = AVRational{1, sr > 0 ? sr : 44100};
     }
 
+    // Container decides where parameter sets go; read the downstream muxer's
+    // requirement now so Prepare() can apply it before avcodec_open2.
+    if (output_port_->Peer()) {
+        global_header_ = output_port_->Peer()->Caps().header_placement ==
+                         HeaderPlacement::kGlobal;
+    }
+
     // Preliminary output format: codec_id + time_base only. Real codec
     // parameters (extradata) are only known after avcodec_open2 in
     // Prepare(), see PublishNegotiatedOutputFormat().
@@ -109,9 +116,7 @@ bool EncoderNode::OpenCodec() {
         ConfigureAudioContext(fmt.AsAudio());
     }
     codec_ctx_->time_base = time_base_;
-    // Global header (extradata) only if the negotiated container requires it
-    // (AVFMT_GLOBALHEADER, decided in MuxNode::Negotiate); in-band otherwise.
-    if (output_port_->Peer() && output_port_->Peer()->NeedsGlobalHeader()) {
+    if (global_header_) {
         codec_ctx_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     }
 

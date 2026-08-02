@@ -90,6 +90,10 @@ class MediaFormat {
         payload_;
 };
 
+/// Where a codec must put its parameter sets, as required by the downstream
+/// container. kAny = no constraint.
+enum class HeaderPlacement { kAny = 0, kGlobal, kInBand };
+
 /// Describes the range of formats a port can accept or produce.
 /// Used during Connect() for compatibility checking.
 struct FormatCaps {
@@ -109,9 +113,14 @@ struct FormatCaps {
 
     // Packet capabilities
     std::vector<int> codec_ids;          // Empty = any
+    HeaderPlacement header_placement{HeaderPlacement::kAny};
 
     /// Check if a specific MediaFormat is compatible with these caps.
     bool Accepts(const MediaFormat& format) const;
+
+    /// Whether two ports' caps can coexist. Undeclared caps accept anything;
+    /// a dimension conflicts only when both sides constrain it disjointly.
+    static bool Compatible(const FormatCaps& a, const FormatCaps& b);
 
     /// Compute intersection of two FormatCaps. Returns empty caps if
     /// no overlap.

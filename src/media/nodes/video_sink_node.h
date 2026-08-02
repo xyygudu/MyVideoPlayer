@@ -71,10 +71,9 @@ class VideoSinkNode : public INode {
     void SetVideoClock(mvp::Clock* video_clock);
 
     void SetSyncMode(SyncMode mode) { sync_mode_ = mode; }
-    void SetVideoFps(double fps) { video_fps_ = fps; }
 
     /// Set the graph reference for EOS reporting.
-    void SetGraph(MediaGraph* graph) { graph_ = graph; }
+    void Attach(MediaGraph* graph) override { graph_ = graph; }
 
     /// Set paused state (freezes render loop).
     void SetPaused(bool paused) override;

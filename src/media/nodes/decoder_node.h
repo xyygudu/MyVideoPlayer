@@ -71,7 +71,7 @@ class DecoderNode : public INode {
     void SetDropUntilPts(double pts);
 
     /// Set graph reference for shared resource access (HW device).
-    void SetGraph(MediaGraph* graph) { graph_ = graph; }
+    void Attach(MediaGraph* graph) override { graph_ = graph; }
 
   private:
     void DecodeLoop();

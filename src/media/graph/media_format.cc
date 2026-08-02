@@ -20,6 +20,23 @@ std::vector<T> IntersectVectors(const std::vector<T>& a,
     return result;
 }
 
+/// Both sides constrained with no overlap.
+template <typename T>
+bool Disjoint(const std::vector<T>& a, const std::vector<T>& b) {
+    if (a.empty() || b.empty()) return false;
+    for (const auto& x : a) {
+        if (std::find(b.begin(), b.end(), x) != b.end()) return false;
+    }
+    return true;
+}
+
+/// A zero max means "unbounded above".
+bool RangesOverlap(int min_a, int max_a, int min_b, int max_b) {
+    int lo = std::max(min_a, min_b);
+    int hi = (max_a == 0) ? max_b : (max_b == 0) ? max_a : std::min(max_a, max_b);
+    return hi == 0 || lo <= hi;
+}
+
 }  // namespace
 
 // --- MediaFormat factory methods ---
@@ -115,6 +132,29 @@ bool FormatCaps::Accepts(const MediaFormat& format) const {
     return true;
 }
 
+bool FormatCaps::Compatible(const FormatCaps& a, const FormatCaps& b) {
+    if (a.IsEmpty() || b.IsEmpty()) {
+        return true;
+    }
+    if (a.media_type != b.media_type) {
+        return false;
+    }
+    if (Disjoint(a.pixel_formats, b.pixel_formats) ||
+        Disjoint(a.sample_formats, b.sample_formats) ||
+        Disjoint(a.sample_rates, b.sample_rates) ||
+        Disjoint(a.channel_counts, b.channel_counts) ||
+        Disjoint(a.codec_ids, b.codec_ids)) {
+        return false;
+    }
+    if (!RangesOverlap(a.min_width, a.max_width, b.min_width, b.max_width) ||
+        !RangesOverlap(a.min_height, a.max_height, b.min_height, b.max_height)) {
+        return false;
+    }
+    return a.header_placement == HeaderPlacement::kAny ||
+           b.header_placement == HeaderPlacement::kAny ||
+           a.header_placement == b.header_placement;
+}
+
 FormatCaps FormatCaps::Intersect(const FormatCaps& a, const FormatCaps& b) {
     if (a.media_type != b.media_type) {
         return {};  // Incompatible types
@@ -138,6 +178,9 @@ FormatCaps FormatCaps::Intersect(const FormatCaps& a, const FormatCaps& b) {
     result.channel_counts =
         IntersectVectors(a.channel_counts, b.channel_counts);
     result.codec_ids = IntersectVectors(a.codec_ids, b.codec_ids);
+    result.header_placement = (a.header_placement == HeaderPlacement::kAny)
+                                  ? b.header_placement
+                                  : a.header_placement;
     return result;
 }
 

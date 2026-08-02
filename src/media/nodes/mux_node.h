@@ -30,6 +30,7 @@ class MuxNode : public INode {
     ~MuxNode() override;
 
     // --- INode interface ---
+    void DeclareCaps() override;
     bool Negotiate() override;
     bool Prepare() override;
     bool Start() override;
@@ -49,7 +50,7 @@ class MuxNode : public INode {
     std::string Name() const override { return "MuxNode"; }
 
     /// Set graph reference for EOS/error reporting.
-    void SetGraph(MediaGraph* graph) { graph_ = graph; }
+    void Attach(MediaGraph* graph) override { graph_ = graph; }
 
     /// Invoked after each successful write of the primary stream's packet
     /// (video if present, else audio) with that packet's PTS in seconds.
@@ -61,6 +62,7 @@ class MuxNode : public INode {
     struct StreamSlot {
         std::unique_ptr<InputPort> port;
         AVStream* av_stream{nullptr};
+        MediaType media_type{};
         bool eos{false};
         bool primary{false};  // video if present, else audio
     };
@@ -73,9 +75,8 @@ class MuxNode : public INode {
     bool OpenOutput();
     bool CreateStreams();
 
-    // Negotiate-time container probe (av_guess_format, no allocation).
+    // Container probe (av_guess_format, no allocation).
     void ResolveOutputRequirements();
-
     // MuxLoop helpers
     void FillPendingSlots(PendingSlots& pending);
     int PickNextSlot(const PendingSlots& pending) const;
