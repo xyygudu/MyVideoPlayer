@@ -37,14 +37,19 @@ enum class SampleFormat {
     kFloatPlanar,
 };
 
-/// Internal unified frame type for pipeline transport.
-/// Wraps an AVFrame with PTS and MediaType tag. Move-only.
-/// Used between Decoder → FrameQueue → Renderer boundary.
+/// Internal frame payload for pipeline transport: owns an AVFrame and exposes
+/// its pixel/sample planes. Move-only.
+///
+/// Carries no timestamp and no media type — both are transport metadata owned
+/// by MediaBuffer. `RawFrame()->pts` is only meaningful at the FFmpeg
+/// boundaries (decoder output, encoder input); frames minted by MediaFramePool
+/// mid-pipeline leave it at AV_NOPTS_VALUE.
+///
 /// NOT exposed in public API — VideoFrame/AudioFrame remain the public types.
 class MediaFrame {
   public:
     MediaFrame();
-    MediaFrame(AVFrame* src, double pts, MediaType type);
+    explicit MediaFrame(AVFrame* src);
     ~MediaFrame();
 
     MediaFrame(MediaFrame&& other) noexcept;
@@ -53,9 +58,7 @@ class MediaFrame {
     MediaFrame(const MediaFrame&) = delete;
     MediaFrame& operator=(const MediaFrame&) = delete;
 
-    double pts() const;
     bool IsValid() const;
-    MediaType type() const;
 
     int width() const;
     int height() const;
@@ -71,7 +74,6 @@ class MediaFrame {
     // Leaves *this unchanged. Always returns an independent deep copy,
     // since the caller keeps using the original frame afterward.
     [[nodiscard]] MediaFrame MakeWritable() const&;
-    static MediaFrame CreateSameFormat(const MediaFrame& ref, double pts);
 
     AVFrame* RawFrame() const;
 
@@ -79,8 +81,6 @@ class MediaFrame {
     friend class MediaFramePool;  // Acquire() assembles a MediaFrame's AVFrame directly
 
     AVFramePtr frame_;
-    double pts_{0.0};
-    MediaType type_{MediaType::kUnknown};
 };
 
 /// Reusable allocator for same-size/format output frames.
@@ -103,7 +103,7 @@ class MediaFramePool {
 
     /// Returns a frame of the given size/format. Rebuilds the internal pool
     /// only when width/height/format differ from the last call.
-    MediaFrame Acquire(int width, int height, int format, double pts);
+    MediaFrame Acquire(int width, int height, int format);
 
   private:
     AVBufferPool* pool_{nullptr};

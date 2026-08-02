@@ -277,7 +277,7 @@ void AudioSinkNode::AudioLoop() {
 
         // Measured before feeding: the queue then spans exactly [heard, pts),
         // so the difference is the position the user is hearing right now.
-        clock_->Set(mf.pts() - QueuedSeconds());
+        clock_->Set(buf.timestamp().pts - QueuedSeconds());
         ConvertAndFeed(mf.RawFrame());
     }
 

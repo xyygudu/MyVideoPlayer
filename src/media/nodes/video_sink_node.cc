@@ -171,9 +171,9 @@ double VideoSinkNode::ComputeFreeRunDelay(double pts, double last_pts,
                : 0.0;
 }
 
-void VideoSinkNode::SyncAndRender(MediaFrame mf, double& last_pts,
+void VideoSinkNode::SyncAndRender(MediaBuffer buf, double& last_pts,
                                   double& last_display_time) {
-    double pts = mf.pts();
+    double pts = buf.timestamp().pts;
 
     double delay = ComputeDisplayDelay(pts, last_pts, last_display_time);
     if (delay > 0.0) {
@@ -184,7 +184,7 @@ void VideoSinkNode::SyncAndRender(MediaFrame mf, double& last_pts,
     last_display_time = Clock::Now();
     last_pts = pts;
     clock_->Set(pts);
-    PresentFrame(std::move(mf));
+    PresentFrame(std::move(buf.AsFrame()));
 }
 
 void VideoSinkNode::PresentFrame(MediaFrame frame) {
@@ -241,13 +241,13 @@ void VideoSinkNode::RenderLoop() {
         }
 
         if (paused_.load(std::memory_order_relaxed)) {
-            last_pts = buf.AsFrame().pts();
+            last_pts = buf.timestamp().pts;
             last_display_time = Clock::Now();
             clock_->Set(last_pts);
             PresentFrame(std::move(buf.AsFrame()));
             step_.store(false, std::memory_order_relaxed);
         } else {
-            SyncAndRender(std::move(buf.AsFrame()), last_pts, last_display_time);
+            SyncAndRender(std::move(buf), last_pts, last_display_time);
         }
     }
 }

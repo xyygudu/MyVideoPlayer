@@ -12,8 +12,7 @@ namespace mvp {
 
 MediaFrame::MediaFrame() = default;
 
-MediaFrame::MediaFrame(AVFrame* src, double pts, MediaType type)
-    : pts_(pts), type_(type) {
+MediaFrame::MediaFrame(AVFrame* src) {
     if (src) {
         av_frame_ref(frame_.get(), src);
     }
@@ -22,31 +21,18 @@ MediaFrame::MediaFrame(AVFrame* src, double pts, MediaType type)
 MediaFrame::~MediaFrame() = default;
 
 MediaFrame::MediaFrame(MediaFrame&& other) noexcept
-    : frame_(std::move(other.frame_)),
-      pts_(other.pts_),
-      type_(other.type_) {
-    other.pts_ = 0.0;
-    other.type_ = MediaType::kUnknown;
-}
+    : frame_(std::move(other.frame_)) {}
 
 MediaFrame& MediaFrame::operator=(MediaFrame&& other) noexcept {
     if (this != &other) {
         frame_ = std::move(other.frame_);
-        pts_ = other.pts_;
-        type_ = other.type_;
-        other.pts_ = 0.0;
-        other.type_ = MediaType::kUnknown;
     }
     return *this;
 }
 
-double MediaFrame::pts() const { return pts_; }
-
 bool MediaFrame::IsValid() const {
     return frame_.get() && frame_.get()->data[0];
 }
-
-MediaType MediaFrame::type() const { return type_; }
 
 AVFrame* MediaFrame::RawFrame() const { return frame_.get(); }
 
@@ -76,8 +62,6 @@ MediaFrame MediaFrame::MakeWritable() && {
     av_frame_make_writable(tmp.get());
     MediaFrame copy;
     copy.frame_ = std::move(tmp);
-    copy.pts_ = pts_;
-    copy.type_ = type_;
     return copy;
 }
 
@@ -88,21 +72,7 @@ MediaFrame MediaFrame::MakeWritable() const& {
     av_frame_make_writable(tmp.get());
     MediaFrame copy;
     copy.frame_ = std::move(tmp);
-    copy.pts_ = pts_;
-    copy.type_ = type_;
     return copy;
-}
-
-MediaFrame MediaFrame::CreateSameFormat(const MediaFrame& ref, double pts) {
-    MediaFrame mf;
-    if (!ref.frame_.get()) return mf;
-    mf.frame_->format = ref.frame_->format;
-    mf.frame_->width = ref.frame_->width;
-    mf.frame_->height = ref.frame_->height;
-    av_frame_get_buffer(mf.frame_.get(), 0);
-    mf.pts_ = pts;
-    mf.type_ = ref.type_;
-    return mf;
 }
 
 // --- MediaFramePool ---
@@ -139,7 +109,7 @@ MediaFramePool& MediaFramePool::operator=(MediaFramePool&& other) noexcept {
     return *this;
 }
 
-MediaFrame MediaFramePool::Acquire(int width, int height, int format, double pts) {
+MediaFrame MediaFramePool::Acquire(int width, int height, int format) {
     if (!pool_ || width != width_ || height != height_ || format != format_) {
         av_buffer_pool_uninit(&pool_);
         int size = av_image_get_buffer_size(static_cast<AVPixelFormat>(format), width, height,
@@ -167,8 +137,6 @@ MediaFrame MediaFramePool::Acquire(int width, int height, int format, double pts
         return MediaFrame();
     }
     frame->buf[0] = buf;  // frame now owns this reference
-    mf.pts_ = pts;
-    mf.type_ = MediaType::kVideo;
     return mf;
 }
 

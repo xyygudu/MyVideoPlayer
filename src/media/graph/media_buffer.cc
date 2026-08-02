@@ -2,22 +2,14 @@
 
 namespace mvp::graph {
 
-MediaBuffer::MediaBuffer(AVPacketPtr pkt, MediaType type, Timestamp ts,
-                         BufferFlags flags)
-    : payload_(std::move(pkt)),
-      media_type_(type),
-      timestamp_(ts),
-      flags_(flags) {}
+MediaBuffer::MediaBuffer(AVPacketPtr pkt, Timestamp ts, BufferFlags flags)
+    : payload_(std::move(pkt)), timestamp_(ts), flags_(flags) {}
 
 MediaBuffer::MediaBuffer(MediaFrame frame, Timestamp ts, BufferFlags flags)
-    : payload_(std::move(frame)),
-      media_type_(frame.type()),
-      timestamp_(ts),
-      flags_(flags) {}
+    : payload_(std::move(frame)), timestamp_(ts), flags_(flags) {}
 
-MediaBuffer MediaBuffer::MakeEos(MediaType type, int serial) {
+MediaBuffer MediaBuffer::MakeEos(int serial) {
     MediaBuffer buf;
-    buf.media_type_ = type;
     buf.flags_ = BufferFlags::kEos;
     buf.serial_ = serial;
     return buf;
@@ -27,7 +19,6 @@ MediaBuffer::~MediaBuffer() = default;
 
 MediaBuffer::MediaBuffer(MediaBuffer&& other) noexcept
     : payload_(std::move(other.payload_)),
-      media_type_(other.media_type_),
       timestamp_(other.timestamp_),
       flags_(other.flags_),
       serial_(other.serial_) {
@@ -38,7 +29,6 @@ MediaBuffer::MediaBuffer(MediaBuffer&& other) noexcept
 MediaBuffer& MediaBuffer::operator=(MediaBuffer&& other) noexcept {
     if (this != &other) {
         payload_ = std::move(other.payload_);
-        media_type_ = other.media_type_;
         timestamp_ = other.timestamp_;
         flags_ = other.flags_;
         serial_ = other.serial_;

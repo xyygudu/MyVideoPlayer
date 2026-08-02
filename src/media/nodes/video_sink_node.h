@@ -71,7 +71,8 @@ class VideoSinkNode : public INode {
 
   private:
     void RenderLoop();
-    void SyncAndRender(MediaFrame mf, double& last_pts, double& last_display_time);
+    void SyncAndRender(MediaBuffer buf, double& last_pts,
+                       double& last_display_time);
     void PresentFrame(MediaFrame frame);
     void RedrawCurrent();
     void ApplyPendingResize();

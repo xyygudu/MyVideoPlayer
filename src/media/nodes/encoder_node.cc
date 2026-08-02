@@ -247,7 +247,7 @@ MediaFrame EncoderNode::ConvertVideoFrame(const MediaFrame& src) {
         return MediaFrame();
     }
 
-    MediaFrame dst = video_scratch_pool_.Acquire(width, height, target_fmt, src.pts());
+    MediaFrame dst = video_scratch_pool_.Acquire(width, height, target_fmt);
     AVFrame* src_frame = src.RawFrame();
     AVFrame* dst_frame = dst.RawFrame();
     sws_scale(sws_ctx_, src_frame->data, src_frame->linesize, 0, height,
@@ -398,7 +398,8 @@ void EncoderNode::ProcessFrame(MediaBuffer& buf) {
     if (!mf.IsValid()) {
         return;
     }
-    int64_t pts_ticks = static_cast<int64_t>(mf.pts() / av_q2d(time_base_) + 0.5);
+    int64_t pts_ticks =
+        static_cast<int64_t>(buf.timestamp().pts / av_q2d(time_base_) + 0.5);
 
     if (media_type_ == MediaType::kVideo) {
         bool needs_convert = mf.format() != static_cast<int>(codec_ctx_->pix_fmt);
@@ -422,7 +423,7 @@ void EncoderNode::HandleEos() {
     }
     avcodec_send_frame(codec_ctx_, nullptr);
     DrainPackets();
-    output_port_->Push(MediaBuffer::MakeEos(media_type_, current_serial_));
+    output_port_->Push(MediaBuffer::MakeEos(current_serial_));
 }
 
 void EncoderNode::DrainPackets() {
@@ -439,15 +440,13 @@ void EncoderNode::DrainPackets() {
 
         Timestamp ts;
         ts.pts = pkt->pts * av_q2d(time_base_);
-        ts.dts = (pkt->dts != AV_NOPTS_VALUE) ? pkt->dts * av_q2d(time_base_) : ts.pts;
-        ts.duration = pkt->duration * av_q2d(time_base_);
         ts.time_base = {time_base_.num, time_base_.den};
 
         BufferFlags flags = BufferFlags::kNone;
         if (pkt->flags & AV_PKT_FLAG_KEY) {
             flags = flags | BufferFlags::kKeyFrame;
         }
-        MediaBuffer buf(std::move(pkt), media_type_, ts, flags);
+        MediaBuffer buf(std::move(pkt), ts, flags);
         buf.set_serial(current_serial_);
         output_port_->Push(std::move(buf));
     }

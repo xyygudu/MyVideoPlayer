@@ -126,8 +126,8 @@ void TransformEffectNode::Process(MediaBuffer input, OutputCallback emit) {
         return;
     }
 
-    MediaFrame out_mf = output_pool_.Acquire(src_mf.width(), src_mf.height(), src_mf.format(),
-                                             src_mf.pts());
+    MediaFrame out_mf = output_pool_.Acquire(src_mf.width(), src_mf.height(),
+                                             src_mf.format());
     if (!out_mf.IsValid()) { emit(std::move(input)); return; }
     if (TryApplyPermute(src_mf, out_mf, input, emit)) return;
     ApplyBilinear(src_mf, out_mf, input, emit);

@@ -206,10 +206,9 @@ void DecoderNode::DrainFrames() {
             drop_until_pts_.store(0.0, std::memory_order_release);
         }
 
-        MediaFrame mf(frame.get(), frame_pts, media_type_);
+        MediaFrame mf(frame.get());
         Timestamp ts;
         ts.pts = frame_pts;
-        ts.duration = frame->duration * av_q2d(time_base_);
         ts.time_base = {time_base_.num, time_base_.den};
 
         MediaBuffer buf(std::move(mf), ts);
@@ -236,7 +235,7 @@ void DecoderNode::HandleEos() {
     // Drain remaining frames, then propagate EOS downstream.
     avcodec_send_packet(codec_ctx_, nullptr);
     DrainFrames();
-    output_port_->Push(MediaBuffer::MakeEos(media_type_, current_serial_));
+    output_port_->Push(MediaBuffer::MakeEos(current_serial_));
 }
 
 void DecoderNode::ProcessPacket(MediaBuffer& buf) {

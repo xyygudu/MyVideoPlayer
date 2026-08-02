@@ -223,10 +223,10 @@ void DemuxNode::RefreshLocalSerial() {
 
 void DemuxNode::EmitEos(OutputPort* video_port, OutputPort* audio_port) {
     if (video_port && video_port->IsConnected()) {
-        video_port->Push(MediaBuffer::MakeEos(MediaType::kVideo, local_serial_));
+        video_port->Push(MediaBuffer::MakeEos(local_serial_));
     }
     if (audio_port && audio_port->IsConnected()) {
-        audio_port->Push(MediaBuffer::MakeEos(MediaType::kAudio, local_serial_));
+        audio_port->Push(MediaBuffer::MakeEos(local_serial_));
     }
 }
 
@@ -234,34 +234,26 @@ void DemuxNode::RoutePacket(AVPacketPtr pkt, OutputPort* video_port,
                             OutputPort* audio_port) {
     int stream_index = pkt->stream_index;
     OutputPort* target = nullptr;
-    MediaType type = MediaType::kUnknown;
     if (stream_index == video_stream_index_ && video_port) {
         target = video_port;
-        type = MediaType::kVideo;
     } else if (stream_index == audio_stream_index_ && audio_port) {
         target = audio_port;
-        type = MediaType::kAudio;
     }
     if (!target || !target->IsConnected()) {
         return;
     }
 
     auto* stream = format_ctx_->streams[stream_index];
-    double pts_sec = (pkt->pts != AV_NOPTS_VALUE)
-                         ? pkt->pts * av_q2d(stream->time_base)
-                         : 0.0;
     Timestamp ts;
-    ts.pts = pts_sec;
-    ts.dts = (pkt->dts != AV_NOPTS_VALUE) ? pkt->dts * av_q2d(stream->time_base)
-                                          : pts_sec;
-    ts.duration = pkt->duration * av_q2d(stream->time_base);
+    ts.pts = (pkt->pts != AV_NOPTS_VALUE) ? pkt->pts * av_q2d(stream->time_base)
+                                          : 0.0;
     ts.time_base = {stream->time_base.num, stream->time_base.den};
 
     BufferFlags flags = BufferFlags::kNone;
     if (pkt->flags & AV_PKT_FLAG_KEY) {
         flags = flags | BufferFlags::kKeyFrame;
     }
-    MediaBuffer buf(std::move(pkt), type, ts, flags);
+    MediaBuffer buf(std::move(pkt), ts, flags);
     buf.set_serial(local_serial_);
     target->Push(std::move(buf));
 }

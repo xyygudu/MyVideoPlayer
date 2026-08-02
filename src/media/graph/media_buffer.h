@@ -40,10 +40,11 @@ struct Rational {
 
 /// Timestamp information carried by each MediaBuffer.
 struct Timestamp {
-    double pts{0.0};       // Presentation timestamp in seconds
-    double dts{0.0};       // Decode timestamp in seconds
-    double duration{0.0};  // Duration in seconds
-    Rational time_base;    // Original time base for conversion
+    double pts{0.0};     // Presentation timestamp in seconds
+    // Native time base of the payload. Only meaningful for packets, where the
+    // muxer rescales the AVPacket's own pts/dts with it; frame PTS is already
+    // in seconds.
+    Rational time_base;
 };
 
 /// Unified data carrier flowing through graph Links.
@@ -51,7 +52,9 @@ struct Timestamp {
 /// Payload is a type-safe variant: either compressed packet (AVPacketPtr)
 /// or decoded frame (MediaFrame). Move-only semantics.
 ///
-/// Serial field is stamped by Link::Push() for seek/flush epoch tracking.
+/// Owns all transport metadata. Media type is deliberately absent: it is a
+/// property of the link (fixed at negotiation, readable via
+/// InputPort::Format()), not of each buffer.
 class MediaBuffer {
   public:
     using Payload = std::variant<std::monostate, AVPacketPtr, MediaFrame>;
@@ -59,7 +62,7 @@ class MediaBuffer {
     MediaBuffer() = default;
 
     /// Construct with packet payload.
-    explicit MediaBuffer(AVPacketPtr pkt, MediaType type, Timestamp ts = {},
+    explicit MediaBuffer(AVPacketPtr pkt, Timestamp ts = {},
                          BufferFlags flags = BufferFlags::kNone);
 
     /// Construct with frame payload.
@@ -68,7 +71,7 @@ class MediaBuffer {
 
     /// Construct an EOS-only buffer (no payload). The seek epoch is required:
     /// an unstamped EOS is dropped as stale and playback never reports end.
-    static MediaBuffer MakeEos(MediaType type, int serial);
+    static MediaBuffer MakeEos(int serial);
 
     ~MediaBuffer();
 
@@ -90,19 +93,16 @@ class MediaBuffer {
     const MediaFrame& AsFrame() const;
 
     // --- Metadata ---
-    MediaType media_type() const { return media_type_; }
     Timestamp timestamp() const { return timestamp_; }
     BufferFlags flags() const { return flags_; }
     int serial() const { return serial_; }
 
-    void set_media_type(MediaType type) { media_type_ = type; }
     void set_timestamp(Timestamp ts) { timestamp_ = ts; }
     void set_flags(BufferFlags flags) { flags_ = flags; }
     void set_serial(int serial) { serial_ = serial; }
 
   private:
     Payload payload_;
-    MediaType media_type_{};  // Initialized in .cc to avoid enum include
     Timestamp timestamp_;
     BufferFlags flags_{BufferFlags::kNone};
     int serial_{0};
