@@ -5,7 +5,7 @@
       "label": "cmake-build",
       "type": "shell",
       "command": "cmake",
-      "args": ["--build", "${workspaceFolder}/build"],
+      "args": ["--build", "--preset", "default"],
       "options": {
         "cwd": "${workspaceFolder}"
       },

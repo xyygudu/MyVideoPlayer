@@ -16,6 +16,7 @@
         "MSVC_ROOT": "D:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207",
         "SDK_ROOT": "D:/Windows Kits/10",
         "SDK_VER": "10.0.22621.0",
+        "VSLANG": "1033",
         "PATH": "D:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64;D:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja;D:/Windows Kits/10/bin/10.0.22621.0/x64;$penv{PATH}",
         "INCLUDE": "D:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/include;D:/Windows Kits/10/Include/10.0.22621.0/ucrt;D:/Windows Kits/10/Include/10.0.22621.0/shared;D:/Windows Kits/10/Include/10.0.22621.0/um;D:/Windows Kits/10/Include/10.0.22621.0/winrt",
         "LIB": "D:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/lib/x64;D:/Windows Kits/10/Lib/10.0.22621.0/ucrt/x64;D:/Windows Kits/10/Lib/10.0.22621.0/um/x64"

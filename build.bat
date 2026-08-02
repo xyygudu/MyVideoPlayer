@@ -2,4 +2,4 @@
 if not exist "%~dp0build" (
     cmake --preset default
 )
-cmake --build build %*
+cmake --build --preset default %*
