@@ -207,11 +207,12 @@ double MediaPlayer::Impl::VideoFps() const {
 }
 
 void MediaPlayer::Impl::NotifyWindowResized(int w, int h) {
+    // Recorded for the renderer's initial Open; the live update goes through
+    // the graph so only the render thread touches the renderer.
     window_width_ = w;
     window_height_ = h;
-    video_renderer_.Resize(w, h);
     if (graph_) {
-        graph_->SendCommand({graph::CommandType::kRedraw});
+        graph_->SendCommand({graph::CommandType::kResize, 0.0, w, h});
     }
 }
 

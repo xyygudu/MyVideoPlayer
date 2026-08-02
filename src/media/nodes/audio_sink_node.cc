@@ -22,6 +22,10 @@ namespace {
 // Audio is the most stable time base: SDL drains it at a fixed device rate,
 // so it outranks any other offer in the playback graph.
 constexpr int kClockPriority = 100;
+
+// How much audio to keep queued in SDL to absorb feed jitter. Compensated out
+// of the clock, so changing it does not shift A/V sync.
+constexpr double kQueueTargetSeconds = 0.1;
 }  // namespace
 
 AudioSinkNode::AudioSinkNode() {
@@ -172,10 +176,16 @@ bool AudioSinkNode::ShouldThrottle() const {
     if (paused_.load(std::memory_order_relaxed)) {
         return true;
     }
-    // Back-pressure: keep at most ~100ms of audio buffered in SDL.
-    int queued = SDL_GetAudioStreamQueued(sdl_stream_);
-    int target_bytes = sample_rate_ * channels_ * 2 / 10;  // 100ms of S16
-    return queued > target_bytes;
+    return QueuedSeconds() > kQueueTargetSeconds;
+}
+
+double AudioSinkNode::QueuedSeconds() const {
+    const double bytes_per_sec =
+        static_cast<double>(sample_rate_) * channels_ * 2;  // S16
+    if (!sdl_stream_ || bytes_per_sec <= 0.0) {
+        return 0.0;
+    }
+    return SDL_GetAudioStreamQueued(sdl_stream_) / bytes_per_sec;
 }
 
 void AudioSinkNode::ConvertAndFeed(AVFrame* frame) {
@@ -265,7 +275,9 @@ void AudioSinkNode::AudioLoop() {
             continue;
         }
 
-        clock_->Set(mf.pts());
+        // Measured before feeding: the queue then spans exactly [heard, pts),
+        // so the difference is the position the user is hearing right now.
+        clock_->Set(mf.pts() - QueuedSeconds());
         ConvertAndFeed(mf.RawFrame());
     }
 

@@ -1,5 +1,18 @@
 ﻿## Requirements
 
+### Requirement: 主时钟报告已呈现位置
+提供时基的节点 SHALL 报告**用户已经感知到**的位置，而非节点已提交给外部设备的位置。二者之间的设备缓冲时长 SHALL 被扣除。
+
+理由：主时钟是全图对齐的基准。若它报告的是提交位置，所有从钟都会按缓冲深度提前呈现，且该偏移会随缓冲参数变化 —— 同步精度将被缓冲策略绑架。
+
+#### Scenario: 音频时钟扣除设备队列
+- **WHEN** AudioSinkNode 已把 PTS=5.0 的帧交给设备，设备中尚有 0.1s 音频未播放
+- **THEN** 主时钟报告约 4.9
+
+#### Scenario: 同步精度与缓冲深度正交
+- **WHEN** 缓冲深度参数被调整
+- **THEN** 音画同步关系不变，仅抗欠载能力变化
+
 ### Requirement: Master clock is arbitrated by MediaGraph
 时钟 SHALL 由写入它的节点持有，而非由 facade 持有再注入节点。
 

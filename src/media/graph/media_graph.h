@@ -78,7 +78,8 @@ class MediaGraph {
     /// Stop all nodes, wait for threads to exit.
     void Stop();
 
-    /// Broadcast flush to all nodes and links (seek).
+    /// Drop all in-flight data: bumps the seek epoch (invalidating buffers
+    /// already in transit) and clears every link and node.
     void Flush();
 
     // --- Control (high-level operations, decoupled from topology) ---

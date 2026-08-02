@@ -234,6 +234,11 @@ void MediaGraph::Stop() {
 }
 
 void MediaGraph::Flush() {
+    // Bump before clearing: clearing wakes producers blocked in Push and they
+    // immediately enqueue the buffer they still hold, which carries the old
+    // epoch. Keeping the two together makes the invariant impossible to skip.
+    seek_epoch_.fetch_add(1, std::memory_order_release);
+
     // Flush all links.
     for (auto* node : node_ptrs_) {
         for (auto* out_port : node->Outputs()) {
@@ -256,10 +261,6 @@ void MediaGraph::SendCommand(const Command& cmd) {
 }
 
 void MediaGraph::Seek(double position) {
-    // Bump before Flush: Flush wakes producers blocked in Push, and they
-    // immediately enqueue the buffer they still hold. Those carry the old
-    // epoch, so consumers must already see the new one.
-    seek_epoch_.fetch_add(1, std::memory_order_release);
     Flush();
     SendCommand({CommandType::kSeek, position});
     for (auto& clock : clocks_) {

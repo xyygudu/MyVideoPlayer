@@ -11,12 +11,14 @@ namespace mvp::graph {
 /// INode interface (open/closed principle).
 enum class CommandType {
     kSeek,    // Reposition playback to a target position
-    kRedraw,  // Re-present the last displayed frame (e.g. window resized)
+    kResize,  // Output window size changed
 };
 
 struct Command {
     CommandType type;
-    double position{0.0};  // For kSeek: target position in seconds
+    double position{0.0};  // kSeek: target position in seconds
+    int width{0};          // kResize
+    int height{0};         // kResize
 };
 
 }  // namespace mvp::graph

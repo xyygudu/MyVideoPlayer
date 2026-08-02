@@ -78,6 +78,7 @@ class AudioSinkNode : public INode {
 
     // AudioLoop helpers
     bool ShouldThrottle() const;
+    double QueuedSeconds() const;
     void ConvertAndFeed(struct AVFrame* frame);
     void DrainAndReportEos();
 

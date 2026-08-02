@@ -1,9 +1,4 @@
-## Purpose
-
-Defines the sink nodes (VideoSinkNode, AudioSinkNode, FileSinkNode) that
-consume processed media data at the end of the graph pipeline.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: VideoSinkNode renders video frames to display
 系统 SHALL 定义 `VideoSinkNode`（Sink 类型），使用 SDL3 GPU 渲染逻辑输出到窗口。
@@ -49,47 +44,6 @@ VideoSinkNode SHALL NOT 自行校验 buffer 世代 —— 该职责已归属输�
 - **WHEN** 输入端口未连接或格式不是视频
 - **THEN** Negotiate() 记录 ERROR 并返回 false
 
-### Requirement: VideoSinkNode 在暂停态支持步进与重绘
-暂停状态下 VideoSinkNode SHALL 停止推进显示时序，但 SHALL 响应两类请求：
-
-- **步进（step）**：收到 `kSeek` 后取一帧并立即显示，随后自动回到暂停等待。语义对齐 FFplay 的 `step_to_next_frame`，SHALL NOT 引入"预览帧"之类的自创概念。
-- **重绘**：收到 `kResize` 并应用新尺寸后，SHALL 重新呈现已保存的当前帧，SHALL NOT 从输入端口取新数据。
-
-恢复播放时 SHALL 清除未消费的步进请求。
-
-#### Scenario: 暂停态 seek 步进一帧
-- **WHEN** 暂停中收到 {kSeek, T}
-- **THEN** 节点取一帧显示后重新进入暂停等待，SHALL NOT 连续消费后续帧
-
-#### Scenario: 步进取到的必然是目标帧
-- **WHEN** 暂停态 seek，输入链路中残留 pre-seek 的在途帧
-- **THEN** 端口校验已将其丢弃，节点取到的第一帧即为 post-seek 数据
-
-#### Scenario: 重绘不消费新数据
-- **WHEN** 暂停中应用了新窗口尺寸
-- **THEN** 节点重绘已保存的当前帧，输入链路的队列长度不变
-
-#### Scenario: 无当前帧时重绘安全
-- **WHEN** 尚未显示过任何帧就需要重绘
-- **THEN** 节点不做任何渲染，不崩溃
-
-### Requirement: VideoSinkNode 在渲染线程应用窗口尺寸变化
-`VideoSinkNode` SHALL 在收到 `kResize` 时仅暂存目标尺寸，并在**自身渲染线程**上应用到渲染器，随后重绘当前帧。
-
-`OnCommand` 由控制线程调用，SHALL NOT 直接触碰渲染器 —— 渲染器由渲染线程独占。暂存 SHALL 保证宽高作为整体被读到，不会出现新宽配旧高的组合。
-
-#### Scenario: 渲染器只被渲染线程修改
-- **WHEN** UI 线程在播放过程中广播 {kResize, w, h}
-- **THEN** 渲染器的尺寸状态仅由渲染线程写入，不存在跨线程的无同步读写
-
-#### Scenario: 宽高整体生效
-- **WHEN** 连续快速拖拽窗口产生多次 kResize
-- **THEN** 渲染线程读到的始终是某一次完整的宽高组合，不会混用不同次的宽与高
-
-#### Scenario: 暂停态尺寸变化立即生效
-- **WHEN** 暂停时收到 {kResize, w, h}
-- **THEN** 渲染线程应用新尺寸并重绘当前帧，画面立即重新适配
-
 ### Requirement: AudioSinkNode plays audio frames through SDL
 系统 SHALL 定义 `AudioSinkNode`（Sink 类型），使用 SDL 音频输出。
 
@@ -125,9 +79,44 @@ AudioSinkNode SHALL 提供：
 - **WHEN** 输入端口格式既非 AudioFormat 也不含可用的 codec_params
 - **THEN** Negotiate() 记录 ERROR 并返回 false
 
-### Requirement: FileSinkNode writes data to file
-系统 SHALL 定义 `FileSinkNode`（Sink 类型），用于转码场景的最终输出。
+### Requirement: VideoSinkNode 在暂停态支持步进与重绘
+暂停状态下 VideoSinkNode SHALL 停止推进显示时序，但 SHALL 响应两类请求：
 
-#### Scenario: Write AVPacket to output file
-- **WHEN** 输入端口收到一个 AVPacket，输出文件已打开
-- **THEN** AVPacket 数据被写入文件
+- **步进（step）**：收到 `kSeek` 后取一帧并立即显示，随后自动回到暂停等待。语义对齐 FFplay 的 `step_to_next_frame`，SHALL NOT 引入"预览帧"之类的自创概念。
+- **重绘**：收到 `kResize` 并应用新尺寸后，SHALL 重新呈现已保存的当前帧，SHALL NOT 从输入端口取新数据。
+
+恢复播放时 SHALL 清除未消费的步进请求。
+
+#### Scenario: 暂停态 seek 步进一帧
+- **WHEN** 暂停中收到 {kSeek, T}
+- **THEN** 节点取一帧显示后重新进入暂停等待，SHALL NOT 连续消费后续帧
+
+#### Scenario: 步进取到的必然是目标帧
+- **WHEN** 暂停态 seek，输入链路中残留 pre-seek 的在途帧
+- **THEN** 端口校验已将其丢弃，节点取到的第一帧即为 post-seek 数据
+
+#### Scenario: 重绘不消费新数据
+- **WHEN** 暂停中应用了新窗口尺寸
+- **THEN** 节点重绘已保存的当前帧，输入链路的队列长度不变
+
+#### Scenario: 无当前帧时重绘安全
+- **WHEN** 尚未显示过任何帧就需要重绘
+- **THEN** 节点不做任何渲染，不崩溃
+
+## ADDED Requirements
+
+### Requirement: VideoSinkNode 在渲染线程应用窗口尺寸变化`VideoSinkNode` SHALL 在收到 `kResize` 时仅暂存目标尺寸，并在**自身渲染线程**上应用到渲染器，随后重绘当前帧。
+
+`OnCommand` 由控制线程调用，SHALL NOT 直接触碰渲染器 —— 渲染器由渲染线程独占。暂存 SHALL 保证宽高作为整体被读到，不会出现新宽配旧高的组合。
+
+#### Scenario: 渲染器只被渲染线程修改
+- **WHEN** UI 线程在播放过程中广播 {kResize, w, h}
+- **THEN** 渲染器的尺寸状态仅由渲染线程写入，不存在跨线程的无同步读写
+
+#### Scenario: 宽高整体生效
+- **WHEN** 连续快速拖拽窗口产生多次 kResize
+- **THEN** 渲染线程读到的始终是某一次完整的宽高组合，不会混用不同次的宽与高
+
+#### Scenario: 暂停态尺寸变化立即生效
+- **WHEN** 暂停时收到 {kResize, w, h}
+- **THEN** 渲染线程应用新尺寸并重绘当前帧，画面立即重新适配

@@ -93,8 +93,12 @@ void VideoSinkNode::Flush() {
 void VideoSinkNode::OnCommand(const Command& cmd) {
     if (cmd.type == CommandType::kSeek) {
         step_.store(true, std::memory_order_relaxed);
-    } else if (cmd.type == CommandType::kRedraw) {
-        redraw_.store(true, std::memory_order_relaxed);
+    } else if (cmd.type == CommandType::kResize) {
+        // Called on the control thread; the renderer belongs to the render
+        // thread, so only stash the target here.
+        const uint64_t packed = (static_cast<uint64_t>(cmd.width) << 32) |
+                                static_cast<uint32_t>(cmd.height);
+        pending_size_.store(packed, std::memory_order_relaxed);
     }
 }
 
@@ -179,11 +183,11 @@ void VideoSinkNode::SyncAndRender(MediaFrame mf, double& last_pts,
 
     last_display_time = Clock::Now();
     last_pts = pts;
-    RenderFrame(std::move(mf));
+    clock_->Set(pts);
+    PresentFrame(std::move(mf));
 }
 
-void VideoSinkNode::RenderFrame(MediaFrame frame) {
-    clock_->Set(frame.pts());
+void VideoSinkNode::PresentFrame(MediaFrame frame) {
     current_frame_ = std::move(frame);
     renderer_->Render(current_frame_);
 }
@@ -194,17 +198,26 @@ void VideoSinkNode::RedrawCurrent() {
     }
 }
 
+void VideoSinkNode::ApplyPendingResize() {
+    const uint64_t packed = pending_size_.exchange(0, std::memory_order_relaxed);
+    if (packed == 0) {
+        return;
+    }
+    renderer_->Resize(static_cast<int>(packed >> 32),
+                      static_cast<int>(packed & 0xffffffffu));
+    RedrawCurrent();
+}
+
 void VideoSinkNode::RenderLoop() {
     double last_pts = 0.0;
     double last_display_time = Clock::Now();
     frame_timer_ = Clock::Now();
 
     while (running_.load(std::memory_order_relaxed)) {
+        ApplyPendingResize();
+
         bool paused = paused_.load(std::memory_order_relaxed);
         if (paused && !step_.load(std::memory_order_relaxed)) {
-            if (redraw_.exchange(false, std::memory_order_relaxed)) {
-                RedrawCurrent();
-            }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
@@ -230,7 +243,8 @@ void VideoSinkNode::RenderLoop() {
         if (paused_.load(std::memory_order_relaxed)) {
             last_pts = buf.AsFrame().pts();
             last_display_time = Clock::Now();
-            RenderFrame(std::move(buf.AsFrame()));
+            clock_->Set(last_pts);
+            PresentFrame(std::move(buf.AsFrame()));
             step_.store(false, std::memory_order_relaxed);
         } else {
             SyncAndRender(std::move(buf.AsFrame()), last_pts, last_display_time);

@@ -72,8 +72,9 @@ class VideoSinkNode : public INode {
   private:
     void RenderLoop();
     void SyncAndRender(MediaFrame mf, double& last_pts, double& last_display_time);
-    void RenderFrame(MediaFrame frame);
+    void PresentFrame(MediaFrame frame);
     void RedrawCurrent();
+    void ApplyPendingResize();
     double ComputeDisplayDelay(double pts, double last_pts,
                                double last_display_time);
     double ComputeSlavedDelay(double pts, double last_pts);
@@ -108,7 +109,9 @@ class VideoSinkNode : public INode {
     std::atomic<bool> paused_{false};
     // Advance exactly one frame while paused, then park again (ffplay `step`).
     std::atomic<bool> step_{false};
-    std::atomic<bool> redraw_{false};
+    // Target window size packed as (width << 32) | height; 0 means none.
+    // Packed so the render thread never reads a mismatched width/height pair.
+    std::atomic<uint64_t> pending_size_{0};
 };
 
 }  // namespace mvp::graph

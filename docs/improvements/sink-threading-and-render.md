@@ -46,6 +46,8 @@ pause_cv_.wait(lk, [this] {
 
 ## 2. VideoRenderer 的窗口尺寸跨线程非原子读写
 
+> **已解决（2026-08-02，change sink-device-boundaries）**：尺寸变更改走 `kResize` 命令，由 VideoSinkNode 在渲染线程上应用。`window_width_/height_` 从此只有渲染线程一个写者，竞态从根消失，**且未引入任何原子成员** —— 竞态在正确的接缝处消失，而非靠加原子掩盖。下文保留作为问题记录。
+
 ### 问题
 
 `VideoRenderer::Resize()` 由 Qt UI 线程调用，只记录尺寸：
