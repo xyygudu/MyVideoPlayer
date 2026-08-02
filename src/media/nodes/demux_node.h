@@ -53,6 +53,9 @@ class DemuxNode : public INode {
     NodeState State() const override { return state_; }
     std::string Name() const override { return "DemuxNode"; }
 
+    /// Set graph reference for latching the seek epoch.
+    void Attach(MediaGraph* graph) override { graph_ = graph; }
+
     // --- DemuxNode-specific ---
 
     /// Request a seek to the given position in seconds.
@@ -79,10 +82,11 @@ class DemuxNode : public INode {
     void EmitEos(OutputPort* video_port, OutputPort* audio_port);
     void RoutePacket(AVPacketPtr pkt, OutputPort* video_port,
                      OutputPort* audio_port);
-    void RefreshLocalSerial(OutputPort* video_port, OutputPort* audio_port);
+    void RefreshLocalSerial();
 
     NodeState state_{NodeState::kIdle};
     std::string file_path_;
+    MediaGraph* graph_{nullptr};
 
     // FFmpeg state (owned, allocated in Prepare, freed in Stop)
     AVFormatContext* format_ctx_{nullptr};
@@ -101,7 +105,7 @@ class DemuxNode : public INode {
     static constexpr double kNoSeekPending = -1.0;
     std::atomic<double> pending_seek_{kNoSeekPending};
 
-    // Serial mirrored from the output Links after each seek.
+    // Seek epoch latched from the graph after each reposition.
     int local_serial_{0};
 };
 

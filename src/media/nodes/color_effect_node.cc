@@ -99,7 +99,6 @@ void ColorEffectNode::Process(MediaBuffer input, OutputCallback emit) {
     }
 
     MediaBuffer out(std::move(mf), input.timestamp(), input.flags());
-    out.set_serial(input.serial());
     emit(std::move(out));
 }
 

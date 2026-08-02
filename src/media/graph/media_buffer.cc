@@ -15,10 +15,11 @@ MediaBuffer::MediaBuffer(MediaFrame frame, Timestamp ts, BufferFlags flags)
       timestamp_(ts),
       flags_(flags) {}
 
-MediaBuffer MediaBuffer::MakeEos(MediaType type) {
+MediaBuffer MediaBuffer::MakeEos(MediaType type, int serial) {
     MediaBuffer buf;
     buf.media_type_ = type;
     buf.flags_ = BufferFlags::kEos;
+    buf.serial_ = serial;
     return buf;
 }
 

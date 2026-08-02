@@ -10,11 +10,21 @@ std::optional<MediaBuffer> InputPort::Pull() {
     if (!link_) {
         return std::nullopt;
     }
-    return link_->Pop();
-}
-
-int InputPort::CurrentSerial() const {
-    return link_ ? link_->serial() : 0;
+    while (auto buf = link_->Pop()) {
+        const int epoch = CurrentEpoch();
+        if (buf->serial() != epoch) {
+            SPDLOG_DEBUG("InputPort[{}]: drop stale buffer serial={} epoch={}",
+                         owner_->Name(), buf->serial(), epoch);
+            continue;
+        }
+        if (!buf->IsValid()) {
+            SPDLOG_WARN("InputPort[{}]: drop malformed buffer",
+                        owner_->Name());
+            continue;
+        }
+        return buf;
+    }
+    return std::nullopt;
 }
 
 // --- OutputPort ---
@@ -47,9 +57,11 @@ void OutputPort::Push(MediaBuffer buf) {
 
     if (downstream->Threading() == ThreadingMode::kPassive) {
         // Synchronous call: Process on current thread.
-        // The emit callback routes each output buffer to the Passive node's
-        // own output ports (continuing the chain).
-        downstream->Process(std::move(buf), [downstream](MediaBuffer out) {
+        // The emit callback stamps each output with the input's seek epoch
+        // and routes it to the Passive node's own output ports.
+        const int serial = buf.serial();
+        downstream->Process(std::move(buf), [downstream, serial](MediaBuffer out) {
+            out.set_serial(serial);
             auto outputs = downstream->Outputs();
             if (!outputs.empty()) {
                 outputs[0]->Push(std::move(out));

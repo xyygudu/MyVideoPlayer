@@ -210,6 +210,9 @@ void MediaPlayer::Impl::NotifyWindowResized(int w, int h) {
     window_width_ = w;
     window_height_ = h;
     video_renderer_.Resize(w, h);
+    if (graph_) {
+        graph_->SendCommand({graph::CommandType::kRedraw});
+    }
 }
 
 bool MediaPlayer::Impl::BuildGraph() {

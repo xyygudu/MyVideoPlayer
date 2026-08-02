@@ -40,13 +40,12 @@ struct LinkCapacity {
 /// Push blocks when EITHER limit is exceeded.
 /// Pop blocks when empty. Both wake on Abort().
 ///
-/// Serial tracks flush epochs; producers stamp buffers at read time,
-/// consumers should discard buffers whose serial != this Link's serial().
+/// Holds no seek epoch: staleness is a graph-wide notion owned by MediaGraph
+/// and checked at the port boundary.
 class Link {
   public:
     explicit Link(LinkCapacity capacity = {})
         : capacity_(capacity),
-          serial_(0),
           total_bytes_(0),
           count_(0),
           abort_(false) {}
@@ -95,15 +94,14 @@ class Link {
         return buf;
     }
 
-    /// Clear all queued data and increment serial.
+    /// Clear all queued data and wake both sides.
     void Flush() {
         std::lock_guard lock(mutex_);
         queue_.clear();
         total_bytes_ = 0;
         count_ = 0;
-        serial_.fetch_add(1, std::memory_order_release);
-        // Wake both sides: Push waiters can re-enqueue with new serial,
-        // Pop waiters will get new data from upstream after seek.
+        // Wake both sides: Push waiters can re-enqueue, Pop waiters will get
+        // new data from upstream after seek.
         cond_push_.notify_all();
         cond_pop_.notify_all();
     }
@@ -116,17 +114,14 @@ class Link {
         cond_pop_.notify_all();
     }
 
-    /// Reset to initial state (clear data, reset abort, reset serial).
+    /// Reset to initial state (clear data, reset abort).
     void Reset() {
         std::lock_guard lock(mutex_);
         queue_.clear();
         total_bytes_ = 0;
         count_ = 0;
         abort_.store(false, std::memory_order_release);
-        serial_.store(0, std::memory_order_release);
     }
-
-    int serial() const { return serial_.load(std::memory_order_acquire); }
 
     int Size() const {
         std::lock_guard lock(mutex_);
@@ -141,7 +136,6 @@ class Link {
     }
 
     LinkCapacity capacity_;
-    std::atomic<int> serial_;
     int64_t total_bytes_;
     int count_;
     std::atomic<bool> abort_;

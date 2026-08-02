@@ -82,7 +82,7 @@ SourceInfo SourceProbe::Probe(const std::string& filepath) {
     }
 
     avformat_close_input(&fmt_ctx);
-    SPDLOG_INFO("SourceProbe: '{}' — {} video, {} audio, {:.2f}s",
+    SPDLOG_INFO("SourceProbe: '{}' - {} video, {} audio, {:.2f}s",
                 filepath, info.video_streams.size(),
                 info.audio_streams.size(), info.duration);
     return info;

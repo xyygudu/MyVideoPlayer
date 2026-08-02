@@ -26,7 +26,11 @@ bool MediaGraph::Connect(OutputPort* src, InputPort* dst,
         SPDLOG_ERROR("MediaGraph::Connect: null port");
         return false;
     }
-    return src->Connect(dst, capacity);
+    if (!src->Connect(dst, capacity)) {
+        return false;
+    }
+    dst->BindSeekEpoch(&seek_epoch_);
+    return true;
 }
 
 bool MediaGraph::TopologicalSort() {
@@ -252,11 +256,12 @@ void MediaGraph::SendCommand(const Command& cmd) {
 }
 
 void MediaGraph::Seek(double position) {
-    // 1. Clear all link queues (drop in-flight buffers, bump serial).
+    // Bump before Flush: Flush wakes producers blocked in Push, and they
+    // immediately enqueue the buffer they still hold. Those carry the old
+    // epoch, so consumers must already see the new one.
+    seek_epoch_.fetch_add(1, std::memory_order_release);
     Flush();
-    // 2. Broadcast seek so each node resets its own state and repositions.
     SendCommand({CommandType::kSeek, position});
-    // 3. Reposition every time base to the seek target.
     for (auto& clock : clocks_) {
         clock->Reset(position);
     }

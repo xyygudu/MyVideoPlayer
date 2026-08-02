@@ -422,7 +422,7 @@ void EncoderNode::HandleEos() {
     }
     avcodec_send_frame(codec_ctx_, nullptr);
     DrainPackets();
-    output_port_->Push(MediaBuffer::MakeEos(media_type_));
+    output_port_->Push(MediaBuffer::MakeEos(media_type_, current_serial_));
 }
 
 void EncoderNode::DrainPackets() {
@@ -448,6 +448,7 @@ void EncoderNode::DrainPackets() {
             flags = flags | BufferFlags::kKeyFrame;
         }
         MediaBuffer buf(std::move(pkt), media_type_, ts, flags);
+        buf.set_serial(current_serial_);
         output_port_->Push(std::move(buf));
     }
 }
@@ -460,6 +461,7 @@ void EncoderNode::EncodeLoop() {
         }
         MediaBuffer& buf = *opt_buf;
 
+        current_serial_ = buf.serial();
         if (HasFlag(buf.flags(), BufferFlags::kEos)) {
             HandleEos();
             continue;

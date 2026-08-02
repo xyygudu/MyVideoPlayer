@@ -66,8 +66,9 @@ class MediaBuffer {
     explicit MediaBuffer(MediaFrame frame, Timestamp ts = {},
                          BufferFlags flags = BufferFlags::kNone);
 
-    /// Construct an EOS-only buffer (no payload).
-    static MediaBuffer MakeEos(MediaType type);
+    /// Construct an EOS-only buffer (no payload). The seek epoch is required:
+    /// an unstamped EOS is dropped as stale and playback never reports end.
+    static MediaBuffer MakeEos(MediaType type, int serial);
 
     ~MediaBuffer();
 

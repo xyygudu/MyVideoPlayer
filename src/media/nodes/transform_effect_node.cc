@@ -160,7 +160,6 @@ bool TransformEffectNode::TryApplyPermute(const MediaFrame& src, MediaFrame& dst
     }
 
     MediaBuffer out_buf(std::move(dst), input.timestamp(), input.flags());
-    out_buf.set_serial(input.serial());
     emit(std::move(out_buf));
     return true;
 }
@@ -191,7 +190,6 @@ void TransformEffectNode::ApplyBilinear(const MediaFrame& src, MediaFrame& dst,
     }
 
     MediaBuffer out_buf(std::move(dst), input.timestamp(), input.flags());
-    out_buf.set_serial(input.serial());
     emit(std::move(out_buf));
 }
 

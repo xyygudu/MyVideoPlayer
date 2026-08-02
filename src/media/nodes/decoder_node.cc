@@ -213,14 +213,15 @@ void DecoderNode::DrainFrames() {
         ts.time_base = {time_base_.num, time_base_.den};
 
         MediaBuffer buf(std::move(mf), ts);
+        buf.set_serial(current_serial_);
         output_port_->Push(std::move(buf));
     }
 }
 
 void DecoderNode::MaybeFlushOnSerialChange(int serial) {
-    // After a seek, Link::Flush() increments the serial. When the serial
-    // changes, flush the codec on THIS thread (safe) to clear stale
-    // reference frames before decoding the new (post-seek) packets.
+    // After a seek the graph bumps its epoch. When the epoch changes, flush
+    // the codec on THIS thread (safe) to clear stale reference frames before
+    // decoding the new (post-seek) packets.
     if (serial == last_serial_) {
         return;
     }
@@ -235,7 +236,7 @@ void DecoderNode::HandleEos() {
     // Drain remaining frames, then propagate EOS downstream.
     avcodec_send_packet(codec_ctx_, nullptr);
     DrainFrames();
-    output_port_->Push(MediaBuffer::MakeEos(media_type_));
+    output_port_->Push(MediaBuffer::MakeEos(media_type_, current_serial_));
 }
 
 void DecoderNode::ProcessPacket(MediaBuffer& buf) {
@@ -265,10 +266,7 @@ void DecoderNode::DecodeLoop() {
         }
         MediaBuffer& buf = *opt_buf;
 
-        if (buf.serial() != input_port_->CurrentSerial()) {
-            continue;  // stale pre-seek buffer, discard
-        }
-
+        current_serial_ = buf.serial();
         MaybeFlushOnSerialChange(buf.serial());
 
         if (HasFlag(buf.flags(), BufferFlags::kEos)) {

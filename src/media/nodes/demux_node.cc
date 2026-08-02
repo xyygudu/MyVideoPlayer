@@ -9,6 +9,7 @@ extern "C" {
 
 #include "graph/graph_command.h"
 #include "graph/media_format.h"
+#include "graph/media_graph.h"
 #include "demux_node.h"
 
 namespace mvp::graph {
@@ -43,7 +44,7 @@ bool DemuxNode::Open() {
         return false;
     }
     state_ = NodeState::kOpened;
-    SPDLOG_INFO("DemuxNode: opened '{}' — duration {:.2f}s, video={}, audio={}",
+    SPDLOG_INFO("DemuxNode: opened '{}' - duration {:.2f}s, video={}, audio={}",
                 file_path_, Duration(), video_stream_index_,
                 audio_stream_index_);
     return true;
@@ -211,23 +212,21 @@ bool DemuxNode::HasPendingSeek() const {
     return pending_seek_.load(std::memory_order_acquire) != kNoSeekPending;
 }
 
-void DemuxNode::RefreshLocalSerial(OutputPort* video_port, OutputPort* audio_port) {
-    OutputPort* port = video_port ? video_port : audio_port;
-    if (port && port->GetLink()) {
-        local_serial_ = port->GetLink()->serial();
+void DemuxNode::RefreshLocalSerial() {
+    // Latch once per reposition. Reading the epoch per packet would stamp a
+    // packet read before the seek with the post-seek epoch, defeating the
+    // staleness check.
+    if (graph_) {
+        local_serial_ = graph_->SeekEpoch();
     }
 }
 
 void DemuxNode::EmitEos(OutputPort* video_port, OutputPort* audio_port) {
     if (video_port && video_port->IsConnected()) {
-        MediaBuffer buf = MediaBuffer::MakeEos(MediaType::kVideo);
-        buf.set_serial(local_serial_);
-        video_port->Push(std::move(buf));
+        video_port->Push(MediaBuffer::MakeEos(MediaType::kVideo, local_serial_));
     }
     if (audio_port && audio_port->IsConnected()) {
-        MediaBuffer buf = MediaBuffer::MakeEos(MediaType::kAudio);
-        buf.set_serial(local_serial_);
-        audio_port->Push(std::move(buf));
+        audio_port->Push(MediaBuffer::MakeEos(MediaType::kAudio, local_serial_));
     }
 }
 
@@ -282,7 +281,7 @@ void DemuxNode::DemuxLoop() {
 
     while (running_.load(std::memory_order_relaxed)) {
         if (HandlePendingSeek()) {
-            RefreshLocalSerial(video_port, audio_port);
+            RefreshLocalSerial();
         }
 
         AVPacketPtr pkt;

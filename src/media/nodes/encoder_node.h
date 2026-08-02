@@ -98,6 +98,7 @@ class EncoderNode : public INode {
     int64_t audio_next_pts_{0};  // pts (time_base units) of first unconsumed sample
     bool audio_pts_valid_{false};
     MediaFramePool video_scratch_pool_;
+    int current_serial_{0};  // Epoch of the frame being encoded; stamps output
 
     std::unique_ptr<InputPort> input_port_;
     std::unique_ptr<OutputPort> output_port_;

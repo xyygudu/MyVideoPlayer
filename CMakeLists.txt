@@ -6,6 +6,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# spdlog strips SPDLOG_DEBUG at compile time unless this is set; without it the
+# runtime level set in logging.cc can never reach debug statements.
+add_compile_definitions(
+  $<$<CONFIG:Debug,RelWithDebInfo>:SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_DEBUG>
+)
+
 # Export compile_commands.json for VS Code IntelliSense
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

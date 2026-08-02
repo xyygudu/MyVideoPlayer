@@ -1,6 +1,7 @@
 #ifndef MVP_GRAPH_MEDIA_GRAPH_H_
 #define MVP_GRAPH_MEDIA_GRAPH_H_
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -101,6 +102,10 @@ class MediaGraph {
     /// (e.g. a transcode graph). Non-owning.
     IClock* MasterClock() const { return master_clock_.get(); }
 
+    /// Monotonic seek generation. Buffers stamped with an older value are
+    /// stale in-flight data and get dropped at the port boundary.
+    int SeekEpoch() const { return seek_epoch_.load(std::memory_order_acquire); }
+
     void SetEventCallback(EventCallback cb) { event_cb_ = std::move(cb); }
 
     /// Report an event (called by nodes, thread-safe).
@@ -124,6 +129,7 @@ class MediaGraph {
     std::vector<INode*> node_ptrs_;       // Raw pointers for convenience
     std::vector<INode*> topo_order_;      // Sorted execution order
     GraphState state_{GraphState::kIdle};
+    std::atomic<int> seek_epoch_{0};
     std::vector<std::shared_ptr<IClock>> clocks_;  // Every offered clock
     std::shared_ptr<IClock> master_clock_;
     EventCallback event_cb_;

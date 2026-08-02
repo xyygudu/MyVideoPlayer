@@ -1,9 +1,4 @@
-## Purpose
-
-Defines the sink nodes (VideoSinkNode, AudioSinkNode, FileSinkNode) that
-consume processed media data at the end of the graph pipeline.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: VideoSinkNode renders video frames to display
 系统 SHALL 定义 `VideoSinkNode`（Sink 类型），使用 SDL3 GPU 渲染逻辑输出到窗口。
@@ -39,6 +34,8 @@ VideoSinkNode SHALL NOT 自行校验 buffer 世代 —— 该职责已归属输�
 - **WHEN** 输入端口未连接或格式不是视频
 - **THEN** Negotiate() 记录 ERROR 并返回 false
 
+## ADDED Requirements
+
 ### Requirement: VideoSinkNode 在暂停态支持步进与重绘
 暂停状态下 VideoSinkNode SHALL 停止推进显示时序，但 SHALL 响应两类请求：
 
@@ -62,33 +59,3 @@ VideoSinkNode SHALL NOT 自行校验 buffer 世代 —— 该职责已归属输�
 #### Scenario: 无当前帧时重绘安全
 - **WHEN** 尚未显示过任何帧就收到 {kRedraw}
 - **THEN** 节点不做任何渲染，不崩溃
-
-### Requirement: AudioSinkNode plays audio frames through SDL
-系统 SHALL 定义 `AudioSinkNode`（Sink 类型），使用 SDL 音频输出。
-
-AudioSinkNode SHALL 提供：
-- 单个输入端口：接收 MediaFrame（media_type=kAudio）
-- SDL 音频设备驱动：内部 Pull 数据、resample 到 SDL 格式
-- 时基：自持一个时钟，每消费一帧更新其 PTS，通过 `ProvideClock()` 以最高优先级参与主时钟仲裁
-- `Negotiate()`：SHALL 从输入端口格式读取 sample_rate / channels（格式推理属协商期职责）
-- `Prepare()`：SHALL 仅打开 SDL 音频设备，不再做格式推理
-- ThreadingMode：Active
-
-#### Scenario: Audio clock drives master clock
-- **WHEN** AudioSinkNode 消费完 PTS=5.0 的帧
-- **THEN** 其自持时钟更新，`MasterClock()->Get()` 返回约 5.0
-
-#### Scenario: Audio params resolved during negotiation
-- **WHEN** AudioSinkNode::Negotiate() 执行
-- **THEN** sample_rate 与 channels 从输入端口格式解析完成，Prepare() 直接用其打开 SDL 设备
-
-#### Scenario: Missing audio params fails negotiation
-- **WHEN** 输入端口格式既非 AudioFormat 也不含可用的 codec_params
-- **THEN** Negotiate() 记录 ERROR 并返回 false
-
-### Requirement: FileSinkNode writes data to file
-系统 SHALL 定义 `FileSinkNode`（Sink 类型），用于转码场景的最终输出。
-
-#### Scenario: Write AVPacket to output file
-- **WHEN** 输入端口收到一个 AVPacket，输出文件已打开
-- **THEN** AVPacket 数据被写入文件

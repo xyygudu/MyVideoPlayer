@@ -1,6 +1,7 @@
 #ifndef MVP_GRAPH_PORT_H_
 #define MVP_GRAPH_PORT_H_
 
+#include <atomic>
 #include <memory>
 #include <optional>
 
@@ -21,12 +22,15 @@ class InputPort {
   public:
     explicit InputPort(INode* owner) : owner_(owner) {}
 
-    /// Pull a buffer from the upstream Link. Blocks if empty.
+    /// Pull the next usable buffer from the upstream Link. Blocks if empty.
+    /// Stale (pre-seek) and malformed buffers are dropped here so consumers
+    /// never have to check for them.
     /// Returns nullopt if the link is aborted.
     std::optional<MediaBuffer> Pull();
 
-    /// Current serial of the upstream Link, or 0 if unconnected.
-    int CurrentSerial() const;
+    /// Bind the graph-wide seek generation counter. Called by
+    /// MediaGraph::Connect; the port only ever reads it.
+    void BindSeekEpoch(const std::atomic<int>* epoch) { seek_epoch_ = epoch; }
 
     /// Set the format capabilities this port accepts.
     void SetCaps(FormatCaps caps) { caps_ = std::move(caps); }
@@ -43,12 +47,17 @@ class InputPort {
   private:
     friend class OutputPort;
 
+    int CurrentEpoch() const {
+        return seek_epoch_ ? seek_epoch_->load(std::memory_order_acquire) : 0;
+    }
+
     INode* owner_;
     OutputPort* peer_{nullptr};
     FormatCaps caps_;
     MediaFormat format_;
     // Link is owned by the OutputPort that created it.
     Link* link_{nullptr};
+    const std::atomic<int>* seek_epoch_{nullptr};
 };
 
 /// Output port — data production endpoint of a node.

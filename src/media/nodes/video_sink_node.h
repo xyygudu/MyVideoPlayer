@@ -71,8 +71,9 @@ class VideoSinkNode : public INode {
 
   private:
     void RenderLoop();
-    void SyncAndRender(MediaFrame& mf, double& last_pts, double& last_display_time);
-    void RenderFrame(const MediaFrame& mf);
+    void SyncAndRender(MediaFrame mf, double& last_pts, double& last_display_time);
+    void RenderFrame(MediaFrame frame);
+    void RedrawCurrent();
     double ComputeDisplayDelay(double pts, double last_pts,
                                double last_display_time);
     double ComputeSlavedDelay(double pts, double last_pts);
@@ -86,6 +87,10 @@ class VideoSinkNode : public INode {
 
     // Video time base, written by the render thread on every displayed frame.
     std::shared_ptr<mvp::Clock> clock_{std::make_shared<mvp::Clock>()};
+
+    // Last displayed frame, kept so it can be re-presented without pulling
+    // new data (window resize while paused).
+    MediaFrame current_frame_;
 
     // External references (non-owning)
     mvp::VideoRenderer* renderer_{nullptr};
@@ -101,7 +106,9 @@ class VideoSinkNode : public INode {
     std::thread render_thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> paused_{false};
-    std::atomic<bool> awating_preview_frame_{false};
+    // Advance exactly one frame while paused, then park again (ffplay `step`).
+    std::atomic<bool> step_{false};
+    std::atomic<bool> redraw_{false};
 };
 
 }  // namespace mvp::graph

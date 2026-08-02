@@ -106,7 +106,8 @@ class DecoderNode : public INode {
     std::thread decode_thread_;
     std::atomic<bool> running_{false};
     std::atomic<double> drop_until_pts_{0.0};
-    int last_serial_{0};  // Tracks Link serial for flush-on-seek detection
+    int last_serial_{0};     // Tracks seek epoch for flush-on-seek detection
+    int current_serial_{0};  // Epoch of the packet being decoded; stamps output
 };
 
 }  // namespace mvp::graph

@@ -92,7 +92,9 @@ void VideoSinkNode::Flush() {
 
 void VideoSinkNode::OnCommand(const Command& cmd) {
     if (cmd.type == CommandType::kSeek) {
-        awating_preview_frame_.store(true, std::memory_order_relaxed);
+        step_.store(true, std::memory_order_relaxed);
+    } else if (cmd.type == CommandType::kRedraw) {
+        redraw_.store(true, std::memory_order_relaxed);
     }
 }
 
@@ -100,7 +102,7 @@ void VideoSinkNode::OnCommand(const Command& cmd) {
 void VideoSinkNode::SetPaused(bool paused) {
     paused_ = paused;
     if (!paused) {
-        awating_preview_frame_.store(false, std::memory_order_relaxed);
+        step_.store(false, std::memory_order_relaxed);
     }
 }
 void VideoSinkNode::SetRenderer(mvp::VideoRenderer* renderer) {
@@ -165,7 +167,7 @@ double VideoSinkNode::ComputeFreeRunDelay(double pts, double last_pts,
                : 0.0;
 }
 
-void VideoSinkNode::SyncAndRender(MediaFrame& mf, double& last_pts,
+void VideoSinkNode::SyncAndRender(MediaFrame mf, double& last_pts,
                                   double& last_display_time) {
     double pts = mf.pts();
 
@@ -177,12 +179,19 @@ void VideoSinkNode::SyncAndRender(MediaFrame& mf, double& last_pts,
 
     last_display_time = Clock::Now();
     last_pts = pts;
-    RenderFrame(mf);
+    RenderFrame(std::move(mf));
 }
 
-void VideoSinkNode::RenderFrame(const MediaFrame& mf) {
-    clock_->Set(mf.pts());
-    renderer_->Render(mf);
+void VideoSinkNode::RenderFrame(MediaFrame frame) {
+    clock_->Set(frame.pts());
+    current_frame_ = std::move(frame);
+    renderer_->Render(current_frame_);
+}
+
+void VideoSinkNode::RedrawCurrent() {
+    if (current_frame_.IsValid()) {
+        renderer_->Render(current_frame_);
+    }
 }
 
 void VideoSinkNode::RenderLoop() {
@@ -192,12 +201,15 @@ void VideoSinkNode::RenderLoop() {
 
     while (running_.load(std::memory_order_relaxed)) {
         bool paused = paused_.load(std::memory_order_relaxed);
-        bool preview_pending = awating_preview_frame_.load(std::memory_order_relaxed);
-        if (paused && !preview_pending) {
+        if (paused && !step_.load(std::memory_order_relaxed)) {
+            if (redraw_.exchange(false, std::memory_order_relaxed)) {
+                RedrawCurrent();
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
 
+        // Pull already dropped stale and malformed buffers.
         auto opt_buf = input_port_->Pull();
         if (!opt_buf) {
             break;  // Link aborted
@@ -208,25 +220,20 @@ void VideoSinkNode::RenderLoop() {
             if (graph_) {
                 graph_->ReportEvent(GraphEvent::kEos);
             }
-            
             continue;
         }
-
         if (!buf.IsFrame()) {
-            continue;
-        }
-        MediaFrame& mf = buf.AsFrame();
-        if (!mf.IsValid()) {
+            SPDLOG_WARN("VideoSinkNode: unexpected non-frame payload");
             continue;
         }
 
         if (paused_.load(std::memory_order_relaxed)) {
-            last_pts = mf.pts();
+            last_pts = buf.AsFrame().pts();
             last_display_time = Clock::Now();
-            RenderFrame(mf);
-            awating_preview_frame_.store(false, std::memory_order_relaxed);
+            RenderFrame(std::move(buf.AsFrame()));
+            step_.store(false, std::memory_order_relaxed);
         } else {
-            SyncAndRender(mf, last_pts, last_display_time);
+            SyncAndRender(std::move(buf.AsFrame()), last_pts, last_display_time);
         }
     }
 }
