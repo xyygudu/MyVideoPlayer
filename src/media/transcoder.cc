@@ -14,6 +14,14 @@
 #include "nodes/mux_node.h"
 
 namespace mvp {
+namespace {
+// Transcoding has no A/V sync look-ahead, so this only needs to keep the
+// encoder fed. Encoding a frame costs orders of magnitude more than decoding
+// one, so a single frame would already prevent starvation; 4 leaves room for
+// I-frame decode spikes. Going deeper buys nothing — libx264 already holds
+// rc_lookahead (40 by default) frames of its own.
+constexpr int kTranscodeFrameDepth = 4;
+}  // namespace
 
 class Transcoder::Impl {
   public:
@@ -122,9 +130,12 @@ void Transcoder::Impl::WireBranch(graph::OutputPort* demux_output,
     auto* enc = static_cast<graph::EncoderNode*>(
         graph_->AddNode(std::make_unique<graph::EncoderNode>(params)));
 
-    graph_->Connect(demux_output, dec->Inputs()[0], {15 * 1024 * 1024, 256});
-    graph_->Connect(dec->Outputs()[0], enc->Inputs()[0]);
-    graph_->Connect(enc->Outputs()[0], mux->Inputs()[mux_port_index]);
+    graph_->Connect(demux_output, dec->Inputs()[0],
+                    graph::LinkCapacity::ForPackets());
+    graph_->Connect(dec->Outputs()[0], enc->Inputs()[0],
+                    graph::LinkCapacity::ForFrames(kTranscodeFrameDepth));
+    graph_->Connect(enc->Outputs()[0], mux->Inputs()[mux_port_index],
+                    graph::LinkCapacity::ForPackets());
 }
 
 void Transcoder::Impl::OnGraphEvent(graph::GraphEvent event) {

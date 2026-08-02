@@ -7,7 +7,7 @@
 ---
 
 ## 1. LinkCapacity 的字节维度对帧撒谎，兜底阀被焊死
-
+> **已解决（2026-08-02，change link-capacity-must-be-explicit）**：`ByteSize()` 现在遍历 `AVFrame::buf[]` 与 `extended_buf[]` 累加真实字节；`LinkCapacity` 构造函数私有化，只能经 `ForPackets()` / `ForFrames(depth)` 创建，"无界"不再可表达；容量常量具名于 link.h 并标注 ffplay 出处。下文保留作为问题记录。
 ### 问题
 
 `LinkCapacity::ByteSize()` 对 MediaFrame 载荷固定返回 1：
@@ -74,6 +74,8 @@ constexpr int64_t kFrameQueueByteCap    = 128 * 1024 * 1024;  // 仅极端分辨
 
 ## 2. 包队列第二维用固定包数，且字节上限是每链路而非全局
 
+> **已撤销（2026-08-02，change link-capacity-must-be-explicit design D4）**：复核后判定为过度设计。时长维度要求 Link 理解帧率/采样率，把媒体语义滲进一个纯传输设施；15MB 每链路与全局的差别在本项目规模下无实际影响。待出现真实痛点（如直播低延迟场景）再重新评估。
+
 ### 问题
 
 当前包链路容量 `{15MB, 256}`。与 ffplay 对照存在两处偏差：
@@ -119,6 +121,8 @@ struct LinkCapacity {
 ---
 
 ## 3. Link::Push 阻塞生产者，导致同一 demux 的多条支路互相饿死
+
+> **已撤销（2026-08-02，change link-capacity-must-be-explicit design D5）**：证据不足。libavformat 内部已对非交错存储的容器做了重排，实测（非交错 AVI）未观察到支路饿死。在拿到可复现的饿死用例之前不引入生产者自我节流。
 
 ### 问题
 

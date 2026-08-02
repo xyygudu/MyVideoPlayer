@@ -25,6 +25,13 @@ extern "C" {
 #include "video_renderer.h"
 
 namespace mvp {
+namespace {
+// Provenance: ffplay VIDEO_PICTURE_QUEUE_SIZE / SAMPLE_QUEUE_SIZE. These depths
+// exist to absorb decode jitter and let the sink look one frame ahead for A/V
+// sync timing.
+constexpr int kVideoFrameDepth = 3;
+constexpr int kAudioFrameDepth = 9;
+}  // namespace
 
 class MediaPlayer::Impl {
   public:
@@ -248,14 +255,18 @@ bool MediaPlayer::Impl::BuildGraph() {
 
     // 3. Wire pipeline (inline).
     if (vdec && vsink) {
-        graph_->Connect(demux->Outputs()[0], vdec->Inputs()[0], {15 * 1024 * 1024, 256});
+        graph_->Connect(demux->Outputs()[0], vdec->Inputs()[0],
+                        graph::LinkCapacity::ForPackets());
         graph::OutputPort* effect_out = WireVideoEffects(vdec);
-        graph_->Connect(effect_out, vsink->Inputs()[0], {std::numeric_limits<int64_t>::max(), 3});
+        graph_->Connect(effect_out, vsink->Inputs()[0],
+                        graph::LinkCapacity::ForFrames(kVideoFrameDepth));
     }
     if (adec && asink) {
         int audio_port = (video_stream_index_ >= 0) ? 1 : 0;
-        graph_->Connect(demux->Outputs()[audio_port], adec->Inputs()[0], {15 * 1024 * 1024, 256});
-        graph_->Connect(adec->Outputs()[0], asink->Inputs()[0], {std::numeric_limits<int64_t>::max(), 9});
+        graph_->Connect(demux->Outputs()[audio_port], adec->Inputs()[0],
+                        graph::LinkCapacity::ForPackets());
+        graph_->Connect(adec->Outputs()[0], asink->Inputs()[0],
+                        graph::LinkCapacity::ForFrames(kAudioFrameDepth));
     }
 
     // 4. Finalize.
@@ -281,8 +292,10 @@ graph::OutputPort* MediaPlayer::Impl::WireVideoEffects(graph::DecoderNode* vdec)
     auto* color = static_cast<graph::ColorEffectNode*>(
         graph_->AddNode(std::make_unique<graph::ColorEffectNode>()));
 
-    graph_->Connect(vdec->Outputs()[0], transform->Inputs()[0]);
-    graph_->Connect(transform->Outputs()[0], color->Inputs()[0]);
+    graph_->Connect(vdec->Outputs()[0], transform->Inputs()[0],
+                    graph::LinkCapacity::ForFrames(kVideoFrameDepth));
+    graph_->Connect(transform->Outputs()[0], color->Inputs()[0],
+                    graph::LinkCapacity::ForFrames(kVideoFrameDepth));
 
     effect_manager_.Register("transform", "Transform", transform);
     effect_manager_.Register("color", "Color", color);

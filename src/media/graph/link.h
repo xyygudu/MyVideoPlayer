@@ -5,7 +5,6 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
-#include <limits>
 #include <mutex>
 #include <optional>
 
@@ -14,24 +13,65 @@
 
 namespace mvp::graph {
 
-/// Dual-dimension capacity limits for a Link.
-///
-/// Both `max_bytes` and `max_count` are enforced simultaneously:
-/// Push blocks when EITHER limit is reached.
-/// Use `INT64_MAX` / `INT_MAX` sentinels to leave a dimension unlimited.
-struct LinkCapacity {
-    int64_t max_bytes{std::numeric_limits<int64_t>::max()};
-    int     max_count{std::numeric_limits<int>::max()};
+// Provenance: ffplay's MAX_QUEUE_SIZE bounds read-ahead by bytes; the count
+// bound keeps low-bitrate streams from buffering minutes of packets.
+inline constexpr int64_t kPacketQueueBytes = 15 * 1024 * 1024;
+inline constexpr int kPacketQueueCount = 256;
 
-    /// Compute the byte contribution of a buffer toward the byte limit.
-    static int64_t ByteSize(const MediaBuffer& buf) {
-        if (buf.IsPacket() && buf.AsPacket().get()) {
-            return buf.AsPacket()->size;
-        }
-        // Frames: count as 1 byte each (byte limit is typically disabled
-        // via INT64_MAX for frame links, so this value is irrelevant).
-        return 1;
+// Frame links are depth-controlled; this only guards extreme resolutions
+// (4K x3 = 37MB passes through; 8K 10-bit degrades to 1 frame, not OOM).
+inline constexpr int64_t kFrameQueueByteCap = 128 * 1024 * 1024;
+
+/// Dual-dimension capacity limits for a Link: Push blocks when EITHER the
+/// byte or the item limit is reached.
+///
+/// Only constructible through the named factories — an unbounded capacity is
+/// deliberately not expressible, since for an Active downstream it is always
+/// wrong and its failure mode (silently losing backpressure) is invisible.
+class LinkCapacity {
+  public:
+    static LinkCapacity ForPackets() {
+        return LinkCapacity(kPacketQueueBytes, kPacketQueueCount);
     }
+
+    /// @param depth  How many frames to buffer; the controlling dimension.
+    static LinkCapacity ForFrames(int depth) {
+        return LinkCapacity(kFrameQueueByteCap, depth);
+    }
+
+    int64_t max_bytes() const { return max_bytes_; }
+    int max_count() const { return max_count_; }
+
+    /// System memory a buffer occupies. Hardware frames land near 0 because
+    /// their picture data lives in GPU memory, which is what we want here.
+    static int64_t ByteSize(const MediaBuffer& buf) {
+        if (buf.IsPacket()) {
+            const AVPacketPtr& pkt = buf.AsPacket();
+            return pkt.get() ? pkt->size : 0;
+        }
+        if (buf.IsFrame()) {
+            const AVFrame* f = buf.AsFrame().RawFrame();
+            if (!f) {
+                return 0;
+            }
+            int64_t total = 0;
+            for (int i = 0; i < AV_NUM_DATA_POINTERS && f->buf[i]; ++i) {
+                total += f->buf[i]->size;
+            }
+            for (int i = 0; i < f->nb_extended_buf; ++i) {
+                total += f->extended_buf[i]->size;
+            }
+            return total;
+        }
+        return 0;  // EOS-only buffer
+    }
+
+  private:
+    LinkCapacity(int64_t max_bytes, int max_count)
+        : max_bytes_(max_bytes), max_count_(max_count) {}
+
+    int64_t max_bytes_;
+    int max_count_;
 };
 
 /// Thread-safe bounded queue connecting two Active nodes.
@@ -44,7 +84,7 @@ struct LinkCapacity {
 /// and checked at the port boundary.
 class Link {
   public:
-    explicit Link(LinkCapacity capacity = {})
+    explicit Link(LinkCapacity capacity)
         : capacity_(capacity),
           total_bytes_(0),
           count_(0),
@@ -131,8 +171,8 @@ class Link {
   private:
     /// Returns true if either dimension has reached its capacity limit.
     bool IsFull() const {
-        return count_ >= capacity_.max_count ||
-               total_bytes_ >= capacity_.max_bytes;
+        return count_ >= capacity_.max_count() ||
+               total_bytes_ >= capacity_.max_bytes();
     }
 
     LinkCapacity capacity_;

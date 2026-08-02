@@ -84,6 +84,8 @@ std::atomic<int> window_height_{0};
 
 ## 3. link-capacity spec 与实现不符
 
+> **已解决（2026-08-02，change link-capacity-must-be-explicit）**：spec 与实现同时修正，容量必须显式声明且不可为无界。
+
 ### 问题
 
 `openspec/specs/link-capacity/spec.md` 中有一条场景：

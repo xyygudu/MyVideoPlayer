@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Link 支持双维度容量约束
 
@@ -33,27 +33,7 @@ Link SHALL 支持同时按字节数和条目数限制队列容量，Push 时任�
 - **WHEN** 链路中传输的是 D3D11 硬件帧
 - **THEN** 其字节贡献接近 0，字节上限不会因显存中的画面而误触发
 
-### Requirement: Link 去模板化
-
-Link SHALL 不再使用 `template<typename CapacityPolicy>`，移除 `PacketLink` / `FrameLink` 类型别名。
-
-#### Scenario: 统一 Link 类型
-
-- **WHEN** 创建 Link 实例
-- **THEN** 类型为 `Link` 而非 `Link<ByteCapacity>` 或 `Link<CountCapacity>`
-
-### Requirement: Link 只负责有界排队
-`Link` SHALL 只承担两项职责：按双维度容量约束的阻塞排队，以及 flush / abort 时唤醒等待方。`Link` SHALL NOT 持有 seek 世代号 —— 世代是图级概念，由 `MediaGraph` 持有。
-
-`Link::Flush()` SHALL 清空队列并唤醒两侧等待者，SHALL NOT 修改任何世代状态。
-
-#### Scenario: Flush 不再递增世代
-- **WHEN** 调用 Link::Flush()
-- **THEN** 队列清空、两侧条件变量被唤醒，Link 内部不存在任何世代计数
-
-#### Scenario: 陈旧数据的判定不依赖 Link
-- **WHEN** 消费者判断一个 buffer 是否过期
-- **THEN** 依据是图级世代，而非该 buffer 所经过的 Link 的状态
+## ADDED Requirements
 
 ### Requirement: 链路容量必须显式声明且不可为无界
 
@@ -89,3 +69,9 @@ Link SHALL 不再使用 `template<typename CapacityPolicy>`，移除 `PacketLink
 
 - **WHEN** 编码耗时显著高于解码耗时
 - **THEN** 少量缓冲即可保证编码器不空转；继续加深不带来收益，因为编码器自身已持有更大的前瞻缓冲
+
+## REMOVED Requirements
+
+### Requirement: 各连接使用独立容量参数
+**Reason**: 原需求以字面量列举各连接的容量数值（`{15MB, 256}` / `{不限, 3}` / `{不限, 9}`），既未覆盖转码图的连接，也把"不限"写成了合法取值。其中的场景「Demux→Decoder 不因视频包阻塞音频路径」更与实现不符 —— `Link::Push` 在队列满时确实会阻塞 demux 线程，容量充足只是降低了发生概率，并非机制保证。
+**Migration**: 由 `链路容量必须显式声明且不可为无界` 与 `缓冲深度归属建图方` 取代。支路互相饿死的风险改由文档记录：实践中 libavformat 自身会交织非交织容器，且缓冲深度远大于正常交织间隙。

@@ -68,10 +68,11 @@ class OutputPort {
 
     /// Connect this output to a downstream input port.
     /// Creates a Link between them if both nodes are Active.
-    /// @param capacity  Dual-dimension capacity (max_bytes + max_count).
-    ///                  Packet links: ~{15MB, 256}, frame links: ~{unlimited, 3/9}.
+    /// @param capacity  Buffering limits for that Link. No default: forgetting
+    ///                  it must be a compile error, not a silent loss of
+    ///                  backpressure.
     /// Returns false if format caps are incompatible.
-    bool Connect(InputPort* peer, LinkCapacity capacity = {});
+    bool Connect(InputPort* peer, LinkCapacity capacity);
 
     /// Push a buffer to the downstream node.
     /// - If downstream is Passive: calls Process() synchronously
