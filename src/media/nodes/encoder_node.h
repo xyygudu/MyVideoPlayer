@@ -28,8 +28,11 @@ namespace mvp::graph {
 
 /// Transform node: encodes decoded frames into compressed packets, mirroring
 /// DecoderNode in reverse (kTransform, kActive).
-/// - Negotiate: resolve encoder, publish preliminary EncodedFormat (real
-///   extradata only known after open).
+/// - DeclareCaps: resolve encoder, declare its codec_id on the output port
+///   caps so ValidateCaps() can catch a codec/container mismatch before any
+///   resource is allocated (see MuxNode's caps on the other end of the link).
+/// - Negotiate: publish preliminary EncodedFormat (real extradata only known
+///   after open).
 /// - Prepare: avcodec_open2, then republish format with real codec params.
 /// - EOF: null frame -> drain -> push EOS.
 class EncoderNode : public INode {
@@ -38,6 +41,7 @@ class EncoderNode : public INode {
     ~EncoderNode() override;
 
     // --- INode interface ---
+    void DeclareCaps() override;
     bool Negotiate() override;
     bool Prepare() override;
     bool Start() override;

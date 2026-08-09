@@ -10,6 +10,7 @@ extern "C" {
 #include <spdlog/spdlog.h>
 
 #include "ffmpeg_utils.h"
+#include "mvp/container_probe.h"
 
 namespace mvp::graph {
 
@@ -47,11 +48,22 @@ void MuxNode::ResolveOutputRequirements() {
 
 void MuxNode::DeclareCaps() {
     ResolveOutputRequirements();
+    mvp::ContainerCodecCaps codec_caps = mvp::ContainerProbe::Query(output_path_);
     for (auto& slot : slots_) {
         FormatCaps caps;
         caps.media_type = slot.media_type;
         caps.header_placement = needs_global_header_ ? HeaderPlacement::kGlobal
                                                      : HeaderPlacement::kInBand;
+        const std::vector<std::string>& names = (slot.media_type == MediaType::kVideo)
+                                                     ? codec_caps.video_codecs
+                                                     : codec_caps.audio_codecs;
+        for (const std::string& name : names) {
+            const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
+            if (codec) caps.codec_ids.push_back(codec->id);
+        }
+        SPDLOG_DEBUG("MuxNode: container declares {} supported codec(s) for {} port",
+                     caps.codec_ids.size(),
+                     slot.media_type == MediaType::kVideo ? "video" : "audio");
         slot.port->SetCaps(std::move(caps));
     }
 }

@@ -68,6 +68,9 @@ bool EncoderNode::Negotiate() {
 }
 
 bool EncoderNode::FindEncoder() {
+    if (codec_) {
+        return true;  // Already resolved in DeclareCaps(); avoid a second lookup
+    }
     codec_ = avcodec_find_encoder_by_name(params_.codec_name.c_str());
     if (!codec_) {
         SPDLOG_ERROR("EncoderNode: encoder '{}' not found", params_.codec_name);
@@ -75,6 +78,19 @@ bool EncoderNode::FindEncoder() {
     }
     name_ = "EncoderNode(" + params_.codec_name + ")";
     return true;
+}
+
+void EncoderNode::DeclareCaps() {
+    if (!FindEncoder()) {
+        return;  // Negotiate() calls FindEncoder() again and reports the error
+    }
+    // Media type comes from the resolved encoder itself, not the (not yet
+    // negotiated) input format — DeclareCaps runs before any node's Negotiate.
+    FormatCaps caps;
+    caps.media_type =
+        (codec_->type == AVMEDIA_TYPE_AUDIO) ? MediaType::kAudio : MediaType::kVideo;
+    caps.codec_ids = {codec_->id};
+    output_port_->SetCaps(std::move(caps));
 }
 
 bool EncoderNode::Prepare() {

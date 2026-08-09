@@ -38,6 +38,7 @@ class TranscoderPage : public QWidget {
   private slots:
     void OnBrowseSource();
     void OnBrowseOutput();
+    void OnContainerChanged(int index);
     void OnQualityPresetChanged(int index);
     void OnRateControlModeChanged(int index);
     void OnAdvancedToggled();
@@ -52,6 +53,7 @@ class TranscoderPage : public QWidget {
     QWidget* BuildAdvancedForm(QWidget* parent);
     QWidget* BuildActionSection();
     mvp::TranscodeOptions BuildOptionsFromUi() const;
+    void RefreshEncoderOptions();
     void SetRunningState(bool running);
     void HandleProgress(double percent);
     void HandleCompletion(bool ok);
@@ -61,6 +63,8 @@ class TranscoderPage : public QWidget {
     IconButton* browse_source_btn_{nullptr};
     IconButton* browse_output_btn_{nullptr};
     QComboBox* container_combo_{nullptr};
+    QComboBox* video_encoder_combo_{nullptr};
+    QComboBox* audio_encoder_combo_{nullptr};
     QComboBox* quality_preset_combo_{nullptr};
 
     QWidget* advanced_body_{nullptr};

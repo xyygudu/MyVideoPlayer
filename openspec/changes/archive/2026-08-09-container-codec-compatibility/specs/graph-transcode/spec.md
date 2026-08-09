@@ -1,61 +1,4 @@
-## Purpose
-
-Defines the Transcoder class and MuxNode for transcode scenarios —
-building transcode graphs that process media from source to encoded output.
-
-## Requirements
-
-### Requirement: Transcoder builds transcode graph
-系统 SHALL 定义 `Transcoder` 类，作为转码场景的预设图构建器。
-
-Transcoder SHALL 提供：
-- `SetInput(const std::string& url)`
-- `SetOutput(const std::string& path, const TranscodeOptions& options)`
-- `Start()`：构建图并启动（无 Clock，全速处理）
-- `Cancel()` / `SetProgressCallback(ProgressCallback)` / `SetCompletionCallback(std::function<void(bool ok)>)`
-
-`TranscodeOptions` SHALL 定义为：
-```cpp
-struct EncodeParams {
-    std::string codec_name;                 // 空字符串 = 不输出该媒体类型
-    RateControlMode rate_control{RateControlMode::kCrf};
-    int crf{23};
-    int64_t bitrate_bps{0};                 // rate_control == kBitrate 时生效
-    int gop_size{250};
-    int max_b_frames{2};
-    std::string preset{"medium"};           // 仅对支持 preset 的编码器（如 libx264）生效
-};
-
-struct TranscodeOptions {
-    EncodeParams video;
-    EncodeParams audio;
-};
-```
-
-Transcoder 内部图构建（v1 范围，不含 AVFilter/裁剪/直通拷贝/两遍编码/硬件编码）：
-```
-FileSource → Demux ─┬─► Decoder(V) → Encoder(V) ─┐
-                    └─► Decoder(A) → Encoder(A) ──┤
-                                                    └─► MuxNode → FileSink
-```
-
-v1 SHALL 仅支持单条视频流 + 单条音频流（或仅其一），`EncodeParams::codec_name` 为空表示该媒体类型不参与输出（既不创建 Decoder 也不创建 Encoder 分支）。
-
-#### Scenario: Progress callback reports percentage
-- **WHEN** 输入 60 秒文件，全速转码
-- **THEN** ProgressCallback 被多次调用，百分比从 0 递增到 100
-
-#### Scenario: Completion callback reports success
-- **WHEN** 转码正常完成（所有输入达到 EOS，MuxNode 写完 trailer）
-- **THEN** SetCompletionCallback 注册的回调被调用一次，参数为 true
-
-#### Scenario: Completion callback reports failure on encode/mux error
-- **WHEN** EncoderNode 或 MuxNode 在处理中报错（如 avcodec_send_frame 失败）
-- **THEN** 错误通过 SPDLOG_ERROR 记录，节点转为 kError 状态，SetCompletionCallback 注册的回调被调用一次，参数为 false
-
-#### Scenario: Video-only or audio-only output
-- **WHEN** TranscodeOptions.audio.codec_name 为空字符串
-- **THEN** Transcoder 不创建音频 Decoder/Encoder 分支，仅转码视频流
+## MODIFIED Requirements
 
 ### Requirement: MuxNode multiplexes streams
 系统 SHALL 定义 `MuxNode`（Sink 类型），使用 FFmpeg `avformat_write_header()` / `av_interleaved_write_frame()` / `av_write_trailer()`。
@@ -96,6 +39,8 @@ MuxNode SHALL 提供：
 - **WHEN** `DeclareCaps()` 解析输出容器为 mp4
 - **THEN** 视频输入端口 caps 的 `codec_ids` 包含该容器支持的编码器（如 H.264），不支持的编码器不在集合内
 
+## ADDED Requirements
+
 ### Requirement: 编码器与容器的兼容性在协商期校验
 `EncoderNode::DeclareCaps()` SHALL 解析出编码器后，将其 codec_id 声明到输出端口 caps 的 `codec_ids`（单元素集合），媒体类型取自该编码器的 `AVMediaType`，不依赖尚未协商的输入格式。
 
@@ -112,16 +57,3 @@ MuxNode SHALL 提供：
 #### Scenario: 不确定的兼容性不阻塞协商
 - **WHEN** MuxNode 对某编码器的支持性探测结果为"不确定"（`avformat_query_codec` 返回负值）
 - **THEN** 该编码器被包含在 `codec_ids` 内，协商正常通过；真正的不兼容留给 `avformat_write_header` 的现有错误日志兜底
-
-### Requirement: 转码图各链路声明缓冲量
-转码图的每一条连接 SHALL 显式声明容量。Decoder→Encoder 与 Encoder→Mux 两条链路 SHALL NOT 依赖任何隐式默认值。
-
-Decoder→Encoder 的深度 SHALL 按"避免编码器饥饿"选取，而非沿用播放图的深度 —— 后者服务于 A/V 同步前瞻，转码无此需求。编码单帧的耗时远高于解码单帧，少量缓冲即足够；继续加深不带来收益，因为编码器自身持有的前瞻缓冲远大于链路缓冲。
-
-#### Scenario: 转码不因缺失背压而耗尽内存
-- **WHEN** 转码一个高分辨率长片，编码速度显著慢于解码
-- **THEN** 解码线程被链路背压限速，峰值内存保持在与缓冲深度相称的量级，SHALL NOT 随片长增长
-
-#### Scenario: 背压不降低转码吞吐
-- **WHEN** 为 Decoder→Encoder 链路加上容量限制
-- **THEN** 转码总耗时与输出内容不变 —— 编码器本就是瓶颈，解码器领先与否不影响完成时间

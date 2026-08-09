@@ -21,6 +21,7 @@
 
 #include "icon_button.h"
 #include "app_theme.h"
+#include "mvp/container_probe.h"
 
 namespace {
 
@@ -209,7 +210,15 @@ QWidget* TranscoderPage::BuildBasicSection() {
 
     container_combo_ = new QComboBox(group);
     container_combo_->addItems({"mp4", "mkv"});
+    connect(container_combo_, &QComboBox::currentIndexChanged, this,
+            &TranscoderPage::OnContainerChanged);
     form->addRow(QStringLiteral("\u5BB9\u5668\u683C\u5F0F\uFF1A"), container_combo_);
+
+    video_encoder_combo_ = new QComboBox(group);
+    form->addRow(QStringLiteral("\u89C6\u9891\u7F16\u7801\u5668\uFF1A"), video_encoder_combo_);
+
+    audio_encoder_combo_ = new QComboBox(group);
+    form->addRow(QStringLiteral("\u97F3\u9891\u7F16\u7801\u5668\uFF1A"), audio_encoder_combo_);
 
     quality_preset_combo_ = new QComboBox(group);
     quality_preset_combo_->addItems({QStringLiteral("\u9AD8\u8D28\u91CF"),
@@ -221,6 +230,7 @@ QWidget* TranscoderPage::BuildBasicSection() {
     form->addRow(QStringLiteral("\u753B\u8D28\u9884\u8BBE\uFF1A"), quality_preset_combo_);
 
     v->addLayout(form);
+    RefreshEncoderOptions();
     return group;
 }
 
@@ -338,6 +348,10 @@ void TranscoderPage::OnBrowseSource() {
     start_cancel_btn_->setEnabled(true);
 }
 
+void TranscoderPage::OnContainerChanged(int /*index*/) {
+    RefreshEncoderOptions();
+}
+
 void TranscoderPage::OnBrowseOutput() {
     QString path = QFileDialog::getSaveFileName(
         this, QStringLiteral("\u9009\u62E9\u8F93\u51FA\u4F4D\u7F6E"), output_path_edit_->text(),
@@ -372,7 +386,7 @@ void TranscoderPage::OnAdvancedToggled() {
 mvp::TranscodeOptions TranscoderPage::BuildOptionsFromUi() const {
     mvp::TranscodeOptions options;
 
-    options.video.codec_name = "libx264";
+    options.video.codec_name = video_encoder_combo_->currentText().toStdString();
     options.video.preset = resolved_video_preset_.toStdString();
     if (rate_control_combo_->currentIndex() == 1) {
         options.video.rate_control = mvp::RateControlMode::kBitrate;
@@ -384,10 +398,40 @@ mvp::TranscodeOptions TranscoderPage::BuildOptionsFromUi() const {
     options.video.gop_size = gop_spin_->value();
     options.video.max_b_frames = max_b_frames_spin_->value();
 
-    options.audio.codec_name = "aac";
+    options.audio.codec_name = audio_encoder_combo_->currentText().toStdString();
     options.audio.bitrate_bps = static_cast<int64_t>(audio_bitrate_spin_->value()) * 1000;
 
     return options;
+}
+
+void TranscoderPage::RefreshEncoderOptions() {
+    mvp::ContainerCodecCaps caps =
+        mvp::ContainerProbe::Query(container_combo_->currentText().toStdString());
+
+    // Repopulates a combo from the container's supported codecs, keeping the
+    // current selection if it's still valid, otherwise falling back to the
+    // container's default — a stale, no-longer-valid selection is never
+    // silently kept.
+    auto refresh_combo = [](QComboBox* combo, const std::vector<std::string>& codecs,
+                            const std::string& default_codec) {
+        QString previous = combo->currentText();
+        combo->blockSignals(true);
+        combo->clear();
+        for (const std::string& name : codecs) {
+            combo->addItem(QString::fromStdString(name));
+        }
+        int keep_index = combo->findText(previous);
+        if (keep_index >= 0) {
+            combo->setCurrentIndex(keep_index);
+        } else {
+            int default_index = combo->findText(QString::fromStdString(default_codec));
+            combo->setCurrentIndex(default_index >= 0 ? default_index : 0);
+        }
+        combo->blockSignals(false);
+    };
+
+    refresh_combo(video_encoder_combo_, caps.video_codecs, caps.default_video_codec);
+    refresh_combo(audio_encoder_combo_, caps.audio_codecs, caps.default_audio_codec);
 }
 
 void TranscoderPage::SetRunningState(bool running) {
