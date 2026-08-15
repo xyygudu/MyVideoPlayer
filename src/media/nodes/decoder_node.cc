@@ -332,7 +332,12 @@ void DecoderNode::MaybeFlushOnSerialChange(int serial) {
     }
     avcodec_flush_buffers(codec_ctx_);
     last_serial_ = serial;
-    if (drop_until_pts_.load(std::memory_order_acquire) > 0.0) {
+    // AVDISCARD_NONREF accelerates software catch-up by skipping non-ref
+    // frames. Hardware decode must not use it: D3D11VA surfaces leak when
+    // outputs are discarded, the pool drains and send_packet blocks forever
+    // (mpv/ffplay likewise rely on PTS-drop only under hwaccel).
+    if (codec_ctx_->hw_device_ctx == nullptr &&
+        drop_until_pts_.load(std::memory_order_acquire) > 0.0) {
         codec_ctx_->skip_frame = AVDISCARD_NONREF;
     }
 }

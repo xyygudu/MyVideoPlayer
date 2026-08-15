@@ -40,11 +40,19 @@
 - [x] 5.4 VideoRenderer:绑定呈现纹理;移除渲染线程上全部设备操作(RenderHwTransfer 删除,RenderFallback 拒绝硬件帧)
 - [x] 5.5 ~MediaGraph 显式销毁顺序:节点先于 GPU 设备(池纹理生命周期)
 
+## 5b. 实机修复(二轮验收:seek 不刷新 + 重开卡死)
+
+- [x] 5b.1 根因:seek 追赶的 skip_frame=AVDISCARD_NONREF 与硬解不兼容——surface 池泄漏耗尽后 send_packet 永久阻塞,解码线程挂死(画面冻结 + Close join 挂起)
+- [x] 5b.2 MaybeFlushOnSerialChange:仅软件解码设置 AVDISCARD_NONREF,硬解只靠 PTS 阈值丢帧
+- [x] 5b.3 MediaPlayer::Close 增加分步调试日志,便于下次定位挂点
+
 ## 6. 验证
 
 - [x] 6.1 构建通过(mvp_core.dll / mvp_app.exe / mvp_transcode_cli.exe)
 - [x] 6.2 软件路径回归:ffmpeg 生成 2s 测试视频 → mvp_transcode_cli 转码成功、输出有效(解码/编码软路径不受影响)
 - [x] 6.3 ffmpeg CLI 对照:本机 d3d11va 硬解 + 下载正常(机器级硬解能力确认)
-- [ ] 6.4 硬解实机验收(需用户 GUI 操作):播放 H.264/HEVC 视频有画面,日志 "hardware decode enabled" + "hw binding on",GPU Video Decode 有占用
-- [ ] 6.5 特效开关验收:播放中启用色彩特效,画面生效;禁用后恢复零拷贝
-- [ ] 6.6 `openspec validate gpu-stage-a-hw-decode-render --strict` 通过后 archive
+- [x] 6.4 硬解播放有画面(用户确认)
+- [ ] 6.5 seek 复测:多次 seek 后画面正常刷新、无卡顿
+- [ ] 6.6 重开文件复测:关闭再打开新视频,无卡死(若复现,Close 分步日志可定位挂点)
+- [ ] 6.7 特效开关验收:播放中启用色彩特效,画面生效;禁用后恢复零拷贝
+- [ ] 6.8 `openspec validate gpu-stage-a-hw-decode-render --strict` 通过后 archive

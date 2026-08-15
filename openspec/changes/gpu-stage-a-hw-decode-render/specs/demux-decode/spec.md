@@ -28,6 +28,17 @@ DecoderNode SHALL 在解码线程(设备命令上下文的唯一使用者)完成
 - **WHEN** CopyForPresentation 返回 nullptr 且下载成功
 - **THEN** 推送软件帧(实际格式经 MaybeAnnounceFormat 校正),渲染走软件上传路径;下载失败则丢帧告警
 
+### Requirement: Decoder supports skip_frame during seek
+DecoderNode SHALL 在 seek 追赶期设置 `codec_ctx_->skip_frame = AVDISCARD_NONREF` 加速软件解码,到达目标 PTS 后恢复 AVDISCARD_DEFAULT。硬件解码(`codec_ctx_->hw_device_ctx` 非空)SHALL NOT 设置 skip_frame:硬解 surface 池在输出被丢弃时会泄漏,池耗尽后 `avcodec_send_packet` 永久阻塞等待空闲 surface;硬解追赶仅靠 PTS 阈值丢帧(帧完整解码后丢弃,surface 正常归还)。
+
+#### Scenario: 软件解码 seek 追赶跳帧
+- **WHEN** 软件解码且 seek 后尚未到达目标 PTS
+- **THEN** skip_frame 置 AVDISCARD_NONREF,到达目标后恢复 AVDISCARD_DEFAULT
+
+#### Scenario: 硬件解码 seek 不跳帧
+- **WHEN** 硬件解码(带 hw_device_ctx)时 seek
+- **THEN** skip_frame 保持默认值,追赶期只按 PTS 阈值丢弃已解码帧
+
 ### Requirement: DecoderNode Negotiate 做格式推理
 DecoderNode::Negotiate SHALL 从 EncodedFormat::codec_params 推理输出格式,不开 codec。Prepare SHALL 只剩资源分配。像素格式为占位,首帧后 SHALL 按实际 `AVFrame::format` 校正输出端口格式(含硬件帧的 hw_sw_format),格式变化时经 `OutputPort::SetFormat` 传播。
 

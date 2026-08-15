@@ -140,9 +140,12 @@ bool MediaPlayer::Impl::Open(const std::string& filepath) {
 void MediaPlayer::Impl::Close() {
     effect_manager_.Clear();
     if (graph_) {
+        SPDLOG_DEBUG("MediaPlayer: stopping graph");
         graph_->Stop();
+        SPDLOG_DEBUG("MediaPlayer: destroying graph");
         graph_.reset();
     }
+    SPDLOG_DEBUG("MediaPlayer: closing renderer");
     video_renderer_.Close();
 
     info_ = SourceInfo{};

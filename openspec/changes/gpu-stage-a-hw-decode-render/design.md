@@ -53,6 +53,7 @@ Open() 请求 direct3d11 驱动,失败回退任意后端;探测 `SDL_PROP_RENDER
 
 ## 7. 已知限制(记录在案)
 
+- **硬解下 seek 追赶不用 skip_frame**:`AVDISCARD_NONREF` 会让 D3D11VA 输出被丢弃时泄漏 surface,池耗尽后 `avcodec_send_packet` 永久阻塞(实测:seek 后画面冻结 + 关闭时 join 挂起)。硬解追赶只按 PTS 阈值丢弃已完整解码的帧(surface 正常归还),追赶速度由 GPU 解码吞吐保证——与 mpv/ffplay 的 hwaccel 处理一致。
 - **池复用的 GPU 采样余量**:呈现纹理池(8)与解码器 surface 池(FFmpeg 分配,通常 ≥8)都大于在途帧数(链路 3 + current_frame 1),最老纹理被复用前其呈现早已完成——与 mpv d3d11 的"靠池大小而非显式 fence"实践一致;若未来出现闪烁再引入 fence。
 - **10-bit 硬件帧 + CPU 特效**:P010 下载后特效不处理(直通 + 一次性警告),渲染器可正常呈现。Stage B 解决。
 - **单设备单硬解线程**:FFmpeg 的 D3D11VA 解码按单线程设计;转码双路硬解需评估设备锁或第二设备(Stage C 决策点)。
