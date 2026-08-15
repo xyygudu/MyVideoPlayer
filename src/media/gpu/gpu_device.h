@@ -2,6 +2,7 @@
 #define MVP_GPU_GPU_DEVICE_H_
 
 #include <memory>
+#include <mutex>
 
 #include "media_frame.h"
 
@@ -42,6 +43,14 @@ class GpuDevice {
     /// operation on the thread that submits decode work is what keeps it
     /// single-threaded (same model as the ffmpeg CLI).
     virtual void* CopyForPresentation(const AVFrame* hw_frame) = 0;
+
+    /// Mutex serializing the device's single immediate context, which is
+    /// shared by FFmpeg decode/copy (decode thread) and the renderer backend
+    /// (render thread) — the D3D11 device hands out ONE immediate context to
+    /// every caller, so all command submission must be mutually exclusive
+    /// (mpv's d3d11 ctx_lock model). Nodes take it around FFmpeg codec calls;
+    /// the renderer takes it around draw operations.
+    virtual std::mutex& DeviceContextMutex() = 0;
 
     /// Wrap an externally owned native device (e.g. the ID3D11Device behind
     /// an SDL3 renderer) so decode and presentation share one device.

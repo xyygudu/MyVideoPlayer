@@ -1,6 +1,8 @@
 #ifndef MVP_VIDEO_RENDERER_H_
 #define MVP_VIDEO_RENDERER_H_
 
+#include <mutex>
+
 #include "media_frame.h"
 
 struct SDL_Window;
@@ -47,6 +49,13 @@ class VideoRenderer {
     /// device.
     void* NativeDevice() const { return native_device_; }
 
+    /// Set the mutex serializing the shared device command context (owned by
+    /// the graph's GpuDevice). When set, every draw operation runs under it:
+    /// the D3D11 device hands out one immediate context to all callers, so
+    /// render submission must exclude FFmpeg decode submission (mpv ctx_lock
+    /// model). Non-owning; clear it before the device is destroyed.
+    void SetDeviceContextMutex(std::mutex* mutex) { device_ctx_mutex_ = mutex; }
+
   private:
     // Software path: YUV420P direct upload
     void RenderYUV420P(const MediaFrame& frame);
@@ -77,6 +86,9 @@ class VideoRenderer {
 
     PixelFormat bindable_domain_{PixelFormat::kUnknown};
     void* native_device_{nullptr};
+    // Non-owning; the graph's GPU device owns the mutex. Null = software
+    // pipeline, no shared command context to serialize.
+    std::mutex* device_ctx_mutex_{nullptr};
 
     // Fallback conversion for non-YUV420P frames
     SwsContext* sws_ctx_ = nullptr;

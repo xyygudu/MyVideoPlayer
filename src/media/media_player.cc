@@ -143,6 +143,9 @@ void MediaPlayer::Impl::Close() {
         SPDLOG_DEBUG("MediaPlayer: stopping graph");
         graph_->Stop();
         SPDLOG_DEBUG("MediaPlayer: destroying graph");
+        // The mutex belongs to the graph's GPU device; drop the pointer
+        // before the device (and mutex) is destroyed.
+        video_renderer_.SetDeviceContextMutex(nullptr);
         graph_.reset();
     }
     SPDLOG_DEBUG("MediaPlayer: closing renderer");
@@ -241,7 +244,12 @@ bool MediaPlayer::Impl::BuildGraph() {
     // The wrapper hands the interface to FFmpeg, so the graph must outlive
     // the renderer — Close() destroys graph_ before video_renderer_.
     if (void* native = video_renderer_.NativeDevice()) {
-        graph_->SetGpuDevice(gpu::GpuDevice::WrapExternal(native));
+        if (auto device = gpu::GpuDevice::WrapExternal(native)) {
+            // The shared device's single immediate context is serialized by
+            // this mutex: decoder FFmpeg calls and renderer draw ops.
+            video_renderer_.SetDeviceContextMutex(&device->DeviceContextMutex());
+            graph_->SetGpuDevice(std::move(device));
+        }
     }
 
     auto* demux = static_cast<graph::DemuxNode*>(

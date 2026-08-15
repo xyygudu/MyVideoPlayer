@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <mutex>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -17,6 +18,26 @@ extern "C" {
 #include "media_frame.h"
 
 namespace mvp::graph {
+
+namespace {
+
+/// Serializes the shared device command context for FFmpeg codec calls.
+/// No-op without a GPU device (software decode shares nothing).
+class DeviceLock {
+  public:
+    explicit DeviceLock(gpu::GpuDevice* device)
+        : mutex_(device ? &device->DeviceContextMutex() : nullptr) {
+        if (mutex_) mutex_->lock();
+    }
+    ~DeviceLock() {
+        if (mutex_) mutex_->unlock();
+    }
+
+  private:
+    std::mutex* mutex_;
+};
+
+}  // namespace
 
 DecoderNode::DecoderNode() {
     input_port_ = std::make_unique<InputPort>(this);
@@ -271,6 +292,8 @@ void DecoderNode::DrainFrames() {
         if (target > 0.0) {
             codec_ctx_->skip_frame = AVDISCARD_DEFAULT;
             drop_until_pts_.store(0.0, std::memory_order_release);
+            SPDLOG_DEBUG("DecoderNode: seek catch-up done, first frame pts={:.3f}",
+                         frame_pts);
         }
 
         MediaFrame mf(frame.get());
@@ -330,8 +353,12 @@ void DecoderNode::MaybeFlushOnSerialChange(int serial) {
     if (serial == last_serial_) {
         return;
     }
-    avcodec_flush_buffers(codec_ctx_);
+    {
+        DeviceLock dev_lock(gpu_device_);
+        avcodec_flush_buffers(codec_ctx_);
+    }
     last_serial_ = serial;
+    SPDLOG_DEBUG("DecoderNode: codec flushed (serial={})", serial);
     // AVDISCARD_NONREF accelerates software catch-up by skipping non-ref
     // frames. Hardware decode must not use it: D3D11VA surfaces leak when
     // outputs are discarded, the pool drains and send_packet blocks forever
@@ -344,8 +371,11 @@ void DecoderNode::MaybeFlushOnSerialChange(int serial) {
 
 void DecoderNode::HandleEos() {
     // Drain remaining frames, then propagate EOS downstream.
-    avcodec_send_packet(codec_ctx_, nullptr);
-    DrainFrames();
+    {
+        DeviceLock dev_lock(gpu_device_);
+        avcodec_send_packet(codec_ctx_, nullptr);
+        DrainFrames();
+    }
     output_port_->Push(MediaBuffer::MakeEos(current_serial_));
 }
 
@@ -354,6 +384,7 @@ void DecoderNode::ProcessPacket(MediaBuffer& buf) {
         return;  // Unexpected buffer type
     }
     AVPacketPtr& pkt = buf.AsPacket();
+    DeviceLock dev_lock(gpu_device_);
     if (!pkt.get() || !pkt->data) {
         // Null/empty packet — treat as a flush request.
         avcodec_send_packet(codec_ctx_, nullptr);

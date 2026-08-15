@@ -105,6 +105,13 @@ void VideoRenderer::Close() {
 void VideoRenderer::Render(const MediaFrame& frame) {
     if (!renderer_ || !frame.IsValid()) return;
 
+    // SDL and FFmpeg share the device's single immediate context; all draw
+    // submission runs under the graph device's mutex (see SetDeviceContextMutex).
+    std::unique_lock<std::mutex> dev_lock(*device_ctx_mutex_, std::defer_lock);
+    if (device_ctx_mutex_) {
+        dev_lock.lock();
+    }
+
     switch (gpu::FromAvPixelFormat(frame.RawFrame()->format)) {
         case PixelFormat::kD3D11:
             RenderHWFrame(frame);

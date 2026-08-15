@@ -26,19 +26,21 @@ class D3D11GpuDevice final : public GpuDevice {
     AVBufferRef* DeviceRef() const override { return device_ref_; }
     bool SupportsDecoder(const AVCodec* codec) const override;
     void* CopyForPresentation(const AVFrame* hw_frame) override;
+    std::mutex& DeviceContextMutex() override { return context_mutex_; }
 
   private:
     explicit D3D11GpuDevice(AVBufferRef* device_ref);
 
     // Returns a pool texture matching w/h/format, rebuilding the ring when
-    // the parameters change. Caller holds copy_mutex_.
+    // the parameters change. Caller holds context_mutex_.
     ID3D11Texture2D* AcquirePoolTexture(int width, int height, int dxgi_format);
 
     AVBufferRef* device_ref_{nullptr};
     // The device's command context, used only on the decode thread
-    // (serialized by copy_mutex_).
+    // (serialized by context_mutex_).
     ID3D11DeviceContext* device_context_{nullptr};
-    std::mutex copy_mutex_;
+    // Serializes the shared immediate context; also guards the pool.
+    std::mutex context_mutex_;
 
     // Ring of individual shader-resource textures for presentation binding.
     // Sized larger than the max frames in flight so a texture is never

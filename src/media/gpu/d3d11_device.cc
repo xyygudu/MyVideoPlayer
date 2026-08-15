@@ -89,7 +89,7 @@ void* D3D11GpuDevice::CopyForPresentation(const AVFrame* hw_frame) {
     UINT src_index = static_cast<UINT>(reinterpret_cast<intptr_t>(
         hw_frame->data[1]));
 
-    std::lock_guard<std::mutex> lock(copy_mutex_);
+    std::lock_guard<std::mutex> lock(context_mutex_);
     ID3D11Texture2D* dst = AcquirePoolTexture(hw_frame->width, hw_frame->height,
                                              dxgi_format);
     if (!dst) {
