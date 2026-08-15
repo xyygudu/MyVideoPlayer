@@ -6,6 +6,7 @@
       "type": "shell",
       "command": "cmake",
       "args": ["--build", "--preset", "default"],
+      "dependsOn": "cmake-configure",
       "options": {
         "cwd": "${workspaceFolder}"
       },
