@@ -256,7 +256,6 @@ void DecoderNode::DrainFrames() {
             SPDLOG_WARN("DecoderNode: receive_frame error {}", ret);
             break;
         }
-        MaybeAnnounceFormat(frame.get());
 
         double frame_pts = (frame->pts != AV_NOPTS_VALUE)
                                ? frame->pts * av_q2d(time_base_)
@@ -275,6 +274,23 @@ void DecoderNode::DrainFrames() {
         }
 
         MediaFrame mf(frame.get());
+        if (frame->hw_frames_ctx && gpu_device_) {
+            void* tex = gpu_device_->CopyForPresentation(frame.get());
+            if (tex) {
+                mf.SetHwPresentationTexture(tex);
+            } else {
+                // Convert on the decode thread: the device command context
+                // must never be touched from the render thread, so the GPU→CPU
+                // fallback happens here (ffmpeg CLI single-thread model).
+                mf = TransferToSoftware(mf);
+                if (!mf.IsValid()) {
+                    SPDLOG_WARN("DecoderNode: hw frame download failed");
+                    continue;
+                }
+            }
+        }
+        MaybeAnnounceFormat(mf.RawFrame());
+
         Timestamp ts;
         ts.pts = frame_pts;
         ts.time_base = {time_base_.num, time_base_.den};
@@ -286,7 +302,9 @@ void DecoderNode::DrainFrames() {
 }
 
 void DecoderNode::MaybeAnnounceFormat(const AVFrame* frame) {
-    if (frame->format == announced_av_format_) {
+    // Audio frames use the same AVFrame::format field for sample formats;
+    // this correction applies to video only.
+    if (media_type_ != MediaType::kVideo || frame->format == announced_av_format_) {
         return;
     }
     announced_av_format_ = frame->format;

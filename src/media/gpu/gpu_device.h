@@ -7,6 +7,7 @@
 
 struct AVBufferRef;
 struct AVCodec;
+struct AVFrame;
 
 namespace mvp::gpu {
 
@@ -28,6 +29,19 @@ class GpuDevice {
 
     /// Whether the codec advertises hardware decoding on this device.
     virtual bool SupportsDecoder(const AVCodec* codec) const = 0;
+
+    /// Copies a decoded hardware frame into an individual texture owned by
+    /// the device, suitable for direct presentation binding. Decoder frames
+    /// live in array textures that presentation APIs cannot wrap, so this
+    /// is a GPU-side blit (mpv d3d11 interop pattern). Returns nullptr when
+    /// the frame layout is unsupported — the caller then converts on its own
+    /// thread via av_hwframe_transfer_data.
+    ///
+    /// Thread contract: SHALL be called on the decode thread only. The
+    /// device's command context is not thread-safe; keeping every device
+    /// operation on the thread that submits decode work is what keeps it
+    /// single-threaded (same model as the ffmpeg CLI).
+    virtual void* CopyForPresentation(const AVFrame* hw_frame) = 0;
 
     /// Wrap an externally owned native device (e.g. the ID3D11Device behind
     /// an SDL3 renderer) so decode and presentation share one device.

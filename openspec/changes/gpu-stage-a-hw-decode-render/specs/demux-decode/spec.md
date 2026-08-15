@@ -17,6 +17,17 @@ DecoderNode SHALL 移除 SetHWAccel 方法。帧域决策 SHALL 在 `Negotiate()
 - **WHEN** 带硬件打开 `avcodec_open2` 失败
 - **THEN** 释放该上下文,重试软件打开;再次失败才置 NodeState::kError
 
+### Requirement: 硬件帧在解码线程完成呈现准备
+DecoderNode SHALL 在解码线程(设备命令上下文的唯一使用者)完成硬件帧的呈现准备:调用 `GpuDevice::CopyForPresentation` 生成呈现纹理并挂到 MediaFrame;生成失败时 SHALL 在同一线程 `av_hwframe_transfer_data` 下载为软件帧后推送。解码线程之外的任何节点 SHALL NOT 对硬件帧做设备操作或下载转换。
+
+#### Scenario: 硬件帧携带呈现纹理
+- **WHEN** CopyForPresentation 成功
+- **THEN** 推送的 MediaFrame 携带非空呈现纹理,渲染线程只做绑定与呈现
+
+#### Scenario: 下载回退保持单线程契约
+- **WHEN** CopyForPresentation 返回 nullptr 且下载成功
+- **THEN** 推送软件帧(实际格式经 MaybeAnnounceFormat 校正),渲染走软件上传路径;下载失败则丢帧告警
+
 ### Requirement: DecoderNode Negotiate 做格式推理
 DecoderNode::Negotiate SHALL 从 EncodedFormat::codec_params 推理输出格式,不开 codec。Prepare SHALL 只剩资源分配。像素格式为占位,首帧后 SHALL 按实际 `AVFrame::format` 校正输出端口格式(含硬件帧的 hw_sw_format),格式变化时经 `OutputPort::SetFormat` 传播。
 

@@ -31,10 +31,20 @@
 - [x] 4.4 RenderHWFrame 拆分:RenderBoundHwFrame(外部纹理绑定零拷贝)+ RenderHwTransfer(原回退路径)
 - [x] 4.5 Present 增加纹理参数重载
 
-## 5. 验证
+## 5. 实机修复(首轮验收暴露:无画面)
 
-- [x] 5.1 构建通过(mvp_core.dll / mvp_app.exe / mvp_transcode_cli.exe)
-- [x] 5.2 软件路径回归:ffmpeg 生成 2s 测试视频 → mvp_transcode_cli 转码成功、输出有效(解码/编码软路径不受影响)
-- [ ] 5.3 硬解实机验收(需用户 GUI 操作):播放 H.264/HEVC 视频,确认日志 "hardware decode enabled" + "VideoRenderer … hw binding on",任务管理器 GPU Video Decode 有占用
-- [ ] 5.4 特效开关验收:播放中启用色彩特效,画面生效(确认边界下载路径);禁用后恢复零拷贝
-- [ ] 5.5 `openspec validate gpu-stage-a-hw-decode-render --strict` 通过后 archive
+- [x] 5.0 根因:解码(解码线程)与 transfer 回退(渲染线程)并发使用同一 D3D11 立即上下文;且解码器数组纹理无法被 SDL3 包装(非数组 SRV 限制)
+- [x] 5.1 GpuDevice::CopyForPresentation:D3D11 后端实现独立纹理环池(8 个,SHADER_RESOURCE)+ CopySubresourceRegion blit,内部互斥锁
+- [x] 5.2 MediaFrame 增加呈现纹理指针字段,move 语义携带
+- [x] 5.3 DecoderNode:DrainFrames 在解码线程生成呈现纹理;失败时同线程下载软件帧;MaybeAnnounceFormat 增加音频守卫并按实际推送帧公告
+- [x] 5.4 VideoRenderer:绑定呈现纹理;移除渲染线程上全部设备操作(RenderHwTransfer 删除,RenderFallback 拒绝硬件帧)
+- [x] 5.5 ~MediaGraph 显式销毁顺序:节点先于 GPU 设备(池纹理生命周期)
+
+## 6. 验证
+
+- [x] 6.1 构建通过(mvp_core.dll / mvp_app.exe / mvp_transcode_cli.exe)
+- [x] 6.2 软件路径回归:ffmpeg 生成 2s 测试视频 → mvp_transcode_cli 转码成功、输出有效(解码/编码软路径不受影响)
+- [x] 6.3 ffmpeg CLI 对照:本机 d3d11va 硬解 + 下载正常(机器级硬解能力确认)
+- [ ] 6.4 硬解实机验收(需用户 GUI 操作):播放 H.264/HEVC 视频有画面,日志 "hardware decode enabled" + "hw binding on",GPU Video Decode 有占用
+- [ ] 6.5 特效开关验收:播放中启用色彩特效,画面生效;禁用后恢复零拷贝
+- [ ] 6.6 `openspec validate gpu-stage-a-hw-decode-render --strict` 通过后 archive

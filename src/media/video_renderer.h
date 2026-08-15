@@ -54,10 +54,9 @@ class VideoRenderer {
     void RenderFallback(const MediaFrame& frame);
     // NV12 direct upload (used for hw_transfer or native NV12)
     void RenderNV12(const MediaFrame& frame);
-    // Hardware frame: direct binding or GPU→CPU transfer fallback
+    // Hardware frame: bind the decoder-prepared presentation texture
     void RenderHWFrame(const MediaFrame& frame);
     bool RenderBoundHwFrame(const MediaFrame& frame);
-    void RenderHwTransfer(const MediaFrame& frame);
 
     void Present(int frame_width, int frame_height);
     void Present(SDL_Texture* texture, int frame_width, int frame_height);

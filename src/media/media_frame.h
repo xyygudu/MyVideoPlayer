@@ -75,6 +75,15 @@ class MediaFrame {
     /// P010), or -1 when not a hardware frame.
     int HwSwFormat() const;
 
+    /// Presentation texture for a hardware frame: an individual (non-array)
+    /// GPU texture the renderer can bind directly, produced by the graph GPU
+    /// device on the decode thread. nullptr = no presentation path, use the
+    /// software frame instead. Pool-owned: valid while the frame is alive.
+    void* HwPresentationTexture() const { return presentation_texture_; }
+    void SetHwPresentationTexture(void* texture) {
+        presentation_texture_ = texture;
+    }
+
     int width() const;
     int height() const;
     int format() const;
@@ -96,6 +105,10 @@ class MediaFrame {
     friend class MediaFramePool;  // Acquire() assembles a MediaFrame's AVFrame directly
 
     AVFramePtr frame_;
+    // Non-owning; the graph GPU device owns the texture pool. Plain pointer
+    // (not smart) because ownership lives with the device, and the frame
+    // only references it.
+    void* presentation_texture_{nullptr};
 };
 
 /// GPU→CPU domain conversion: copies a hardware frame into system memory.

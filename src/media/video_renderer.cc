@@ -4,7 +4,6 @@
 
 extern "C" {
 #include <libavutil/frame.h>
-#include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 }
@@ -151,14 +150,17 @@ void VideoRenderer::RenderNV12(const MediaFrame& frame) {
 
 void VideoRenderer::RenderHWFrame(const MediaFrame& frame) {
     AVFrame* hw = frame.RawFrame();
-    if (hw->format == AV_PIX_FMT_D3D11 &&
-        bindable_domain_ != PixelFormat::kUnknown) {
-        if (RenderBoundHwFrame(frame)) {
-            return;
-        }
-        SPDLOG_WARN("VideoRenderer: texture binding failed, using transfer");
+    if (hw->format != AV_PIX_FMT_D3D11 ||
+        bindable_domain_ == PixelFormat::kUnknown) {
+        // Negotiation should have prevented this: without a binding backend
+        // the chain stays software. Dropping is safer than converting here —
+        // the device command context must never be used from this thread.
+        SPDLOG_WARN("VideoRenderer: hardware frame on non-binding backend");
+        return;
     }
-    RenderHwTransfer(frame);
+    if (!frame.HwPresentationTexture() || !RenderBoundHwFrame(frame)) {
+        SPDLOG_WARN("VideoRenderer: hardware frame not presentable, dropped");
+    }
 }
 
 bool VideoRenderer::RenderBoundHwFrame(const MediaFrame& frame) {
@@ -172,12 +174,12 @@ bool VideoRenderer::RenderBoundHwFrame(const MediaFrame& frame) {
             sdl_format = SDL_PIXELFORMAT_P010;
             break;
         default:
-            return false;  // Unknown layout: let the transfer fallback convert
+            return false;  // Unknown layout: nothing presentable was prepared
     }
 
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetPointerProperty(props, SDL_PROP_TEXTURE_CREATE_D3D11_TEXTURE_POINTER,
-                           hw->data[0]);
+                           frame.HwPresentationTexture());
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, hw->width);
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
                           hw->height);
@@ -186,68 +188,41 @@ bool VideoRenderer::RenderBoundHwFrame(const MediaFrame& frame) {
     SDL_Texture* bound = SDL_CreateTextureWithProperties(renderer_, props);
     SDL_DestroyProperties(props);
     if (!bound) {
+        SPDLOG_WARN("VideoRenderer: binding texture failed: {}",
+                    SDL_GetError());
         return false;
     }
 
-    // The MediaFrame owns the underlying D3D11 texture; it must outlive this
-    // call, which VideoSinkNode guarantees via current_frame_.
+    // The device pool keeps the texture alive until the ring reuses it; the
+    // frame holds a reference through this call via VideoSinkNode.
     Present(bound, hw->width, hw->height);
     SDL_DestroyTexture(bound);
     return true;
 }
 
-void VideoRenderer::RenderHwTransfer(const MediaFrame& frame) {
-    AVFrame* hw_frame = frame.RawFrame();
-    if (!hw_frame || !hw_frame->hw_frames_ctx) {
-        RenderFallback(frame);
-        return;
-    }
-
-    // 硬件帧 → 系统内存 NV12（DMA transfer，比软解快一个数量级）
-    AVFramePtr sw_frame;
-    sw_frame->format = AV_PIX_FMT_NV12;
-    if (av_hwframe_transfer_data(sw_frame.get(), hw_frame, 0) < 0) {
-        SPDLOG_WARN("VideoRenderer: hw frame transfer failed");
-        RenderFallback(frame);
-        return;
-    }
-
-    int fw = sw_frame->width;
-    int fh = sw_frame->height;
-    EnsureTexture(fw, fh, SDL_PIXELFORMAT_NV12);
-    if (!texture_) return;
-
-    SDL_UpdateNVTexture(texture_, nullptr,
-                        sw_frame->data[0], sw_frame->linesize[0],
-                        sw_frame->data[1], sw_frame->linesize[1]);
-    Present(fw, fh);
-}
-
 void VideoRenderer::RenderFallback(const MediaFrame& frame) {
     AVFrame* av = frame.RawFrame();
+    if (!av) return;
+
+    // Hardware frames are converted by the decoder before reaching a
+    // software path; converting here would touch the device command context
+    // from the render thread, which is forbidden (single-thread contract).
+    if (av->hw_frames_ctx) {
+        SPDLOG_WARN("VideoRenderer: unexpected hardware frame in fallback");
+        return;
+    }
+
     int fw = av->width;
     int fh = av->height;
     EnsureTexture(fw, fh, SDL_PIXELFORMAT_IYUV);
     if (!texture_) return;
 
     AVFrame* src_frame = av;
-    if (!src_frame) return;
-
-    // 硬件帧需要先 transfer 到系统内存
-    AVFrame* sw_frame = src_frame;
-    AVFramePtr tmp_frame;
-    if (src_frame->hw_frames_ctx) {
-        if (av_hwframe_transfer_data(tmp_frame.get(), src_frame, 0) < 0) {
-            SPDLOG_ERROR("VideoRenderer: hw frame transfer failed");
-            return;
-        }
-        sw_frame = tmp_frame.get();
-    }
 
     // 使用 sws_scale 转为 YUV420P
     if (!sws_ctx_) {
         sws_ctx_ = sws_getContext(
-            fw, fh, static_cast<AVPixelFormat>(sw_frame->format),
+            fw, fh, static_cast<AVPixelFormat>(src_frame->format),
             fw, fh, AV_PIX_FMT_YUV420P,
             SWS_BILINEAR, nullptr, nullptr, nullptr);
     }
@@ -264,7 +239,7 @@ void VideoRenderer::RenderFallback(const MediaFrame& frame) {
     av_image_fill_arrays(dst_data, dst_linesize, convert_buffer_,
                          AV_PIX_FMT_YUV420P, fw, fh, 1);
 
-    sws_scale(sws_ctx_, sw_frame->data, sw_frame->linesize, 0, fh,
+    sws_scale(sws_ctx_, src_frame->data, src_frame->linesize, 0, fh,
               dst_data, dst_linesize);
 
     SDL_UpdateYUVTexture(texture_, nullptr,

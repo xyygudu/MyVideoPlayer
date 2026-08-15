@@ -12,7 +12,16 @@
 namespace mvp::graph {
 
 MediaGraph::MediaGraph() = default;
-MediaGraph::~MediaGraph() { Stop(); }
+
+MediaGraph::~MediaGraph() {
+    Stop();
+    // Explicit order: nodes (which may still reference presentation pool
+    // textures in retained frames) must go before the GPU device frees the
+    // pool. Default member order would free the device first.
+    nodes_.clear();
+    node_ptrs_.clear();
+    gpu_device_.reset();
+}
 
 INode* MediaGraph::AddNode(std::unique_ptr<INode> node) {
     INode* ptr = node.get();

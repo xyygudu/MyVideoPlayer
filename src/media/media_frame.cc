@@ -22,11 +22,16 @@ MediaFrame::MediaFrame(AVFrame* src) {
 MediaFrame::~MediaFrame() = default;
 
 MediaFrame::MediaFrame(MediaFrame&& other) noexcept
-    : frame_(std::move(other.frame_)) {}
+    : frame_(std::move(other.frame_)),
+      presentation_texture_(other.presentation_texture_) {
+    other.presentation_texture_ = nullptr;
+}
 
 MediaFrame& MediaFrame::operator=(MediaFrame&& other) noexcept {
     if (this != &other) {
         frame_ = std::move(other.frame_);
+        presentation_texture_ = other.presentation_texture_;
+        other.presentation_texture_ = nullptr;
     }
     return *this;
 }

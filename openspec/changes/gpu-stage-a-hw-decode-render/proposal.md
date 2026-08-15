@@ -12,7 +12,7 @@
 - `DecoderNode`:Prepare 挂载 `hw_device_ctx` + `get_format` 回调;带硬件打开失败时自动重试软件解码;首帧后按实际格式校正输出端口格式
 - `VideoSinkNode::DeclareCaps`:渲染器后端支持外部纹理绑定时接受硬件域,否则只接受软格式——协商自动把链路压回软解
 - 特效节点(`TransformEffectNode`/`ColorEffectNode`):DeclareCaps 把下游约束中继到上游(格式透明节点);Process 在启用且参数非恒等时,把硬件帧在节点边界显式下载为软件帧再处理(恒等/禁用时零开销直通)
-- `VideoRenderer`:请求并校验 D3D11 后端、提取渲染器设备供 FFmpeg 共享;`RenderHWFrame` 重写为 `SDL_CreateTextureWithProperties` 外部纹理绑定(零拷贝),原 transfer 路径降级为回退分支
+- `VideoRenderer`:请求并校验 D3D11 后端、提取渲染器设备供 FFmpeg 共享;`RenderHWFrame` 绑定解码线程生成的呈现纹理(独立纹理池,GPU blit 桥接数组纹理)实现零拷贝,渲染线程不触碰设备命令上下文
 - `MediaPlayer::BuildGraph`:渲染器先 Open,其设备经 `GpuDevice::WrapExternal` 注入 graph
 
 ## Capabilities

@@ -47,7 +47,7 @@ FFmpeg 释放 AVHWDeviceContext 时会释放被包装的设备接口,因此持�
 - **THEN** graph 先于渲染器销毁,设备接口引用计数始终不为零直至渲染器关闭
 
 ### Requirement: 硬件解码能力探测
-`SupportsDecoder` SHALL 通过 `avcodec_get_hw_config` 遍历该编码器的硬件配置,当存在 `AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX` 且 `device_type` 与本后端设备类型一致的配置时返回 true;遍历尽仍无匹配返回 false。
+`SupportsDecoder` SHALL 通过 `avcodec_get_hw_config` 遍历该编码器的硬件配置，当存在 `AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX` 且 `device_type` 与本后端设备类型一致的配置时返回 true；遍历尽仍无匹配返回 false。
 
 #### Scenario: 支持硬解的编码器
 - **WHEN** 编码器(如 h264)声明了 D3D11VA 硬件配置
@@ -56,6 +56,19 @@ FFmpeg 释放 AVHWDeviceContext 时会释放被包装的设备接口,因此持�
 #### Scenario: 不支持硬解的编码器
 - **WHEN** 编码器没有本设备类型的硬件配置
 - **THEN** 返回 false,调用方协商软格式
+
+### Requirement: 呈现纹理生成服务
+GpuDevice SHALL 提供 `CopyForPresentation(const AVFrame* hw_frame)`,把硬件解码帧复制到设备拥有的、可被呈现 API 直接绑定的独立纹理(GPU 侧 blit),返回非拥有指针。解码器帧是数组纹理(呈现 API 无法包装),故 SHALL 通过独立纹理池桥接;池大小 SHALL 大于管线在途帧数,保证纹理复用前所有引用已呈现完毕。
+
+`CopyForPresentation` SHALL 在帧布局不支持时返回 nullptr,由调用方在自身线程做软件转换。该函数 SHALL 只在解码线程调用——设备的命令上下文非线程安全,所有设备操作 SHALL 收敛到提交解码工作的同一线程(ffmpeg CLI 单线程模型)。
+
+#### Scenario: 解码帧被复制为可绑定纹理
+- **WHEN** 解码线程对 D3D11 硬件帧调用 CopyForPresentation 且 sw_format 为 NV12/P010
+- **THEN** 返回池中独立纹理指针,内容为解码帧的 GPU 拷贝,可被 SDL3 外部纹理绑定呈现
+
+#### Scenario: 不支持布局返回 nullptr
+- **WHEN** 硬件帧 sw_format 非 NV12/P010
+- **THEN** 返回 nullptr,调用方在解码线程 av_hwframe_transfer_data 下载为软件帧
 
 ### Requirement: 像素格式映射唯一收口
 系统 SHALL 提供 `gpu::FromAvPixelFormat` / `gpu::ToAvPixelFormat` 作为 FFmpeg AVPixelFormat 与项目 PixelFormat 之间的双向映射唯一实现点。未建模的格式 SHALL 映射为 `PixelFormat::kUnknown` / `AV_PIX_FMT_NONE`。其他模块 SHALL NOT 各自维护映射表。
