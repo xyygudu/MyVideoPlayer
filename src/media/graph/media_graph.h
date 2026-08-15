@@ -11,6 +11,12 @@
 #include "graph/node.h"
 #include "graph/port.h"
 
+namespace mvp {
+namespace gpu {
+class GpuDevice;
+}  // namespace gpu
+}  // namespace mvp
+
 namespace mvp::graph {
 
 /// Events reported by the graph to the application.
@@ -98,6 +104,14 @@ class MediaGraph {
 
     GraphState State() const { return state_; }
 
+    /// Set the GPU device shared by all nodes (injected by the pipeline
+    /// builder before Open; decode/encode/effects derive their own contexts
+    /// from it). The graph owns it for its lifetime.
+    void SetGpuDevice(std::unique_ptr<gpu::GpuDevice> device);
+
+    /// Non-owning accessor; valid until the graph is destroyed.
+    gpu::GpuDevice* GpuDevice() const { return gpu_device_.get(); }
+
     /// The arbitrated master time base, or nullptr when no node offers one
     /// (e.g. a transcode graph). Non-owning.
     IClock* MasterClock() const { return master_clock_.get(); }
@@ -132,6 +146,7 @@ class MediaGraph {
     std::atomic<int> seek_epoch_{0};
     std::vector<std::shared_ptr<IClock>> clocks_;  // Every offered clock
     std::shared_ptr<IClock> master_clock_;
+    std::unique_ptr<gpu::GpuDevice> gpu_device_;   // Shared GPU device
     EventCallback event_cb_;
 };
 

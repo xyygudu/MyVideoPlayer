@@ -24,6 +24,14 @@ TransformEffectNode::TransformEffectNode() {
 
 TransformEffectNode::~TransformEffectNode() = default;
 
+void TransformEffectNode::DeclareCaps() {
+    // Format-transparent node: relay the downstream constraint upstream so
+    // the producer negotiates a format the whole remaining chain accepts.
+    if (output_port_->IsConnected()) {
+        input_port_->SetCaps(output_port_->Peer()->Caps());
+    }
+}
+
 bool TransformEffectNode::Negotiate() {
     if (!input_port_->IsConnected()) {
         SPDLOG_ERROR("TransformEffectNode: input port not connected");
@@ -105,19 +113,6 @@ TransformAffineParams TransformEffectNode::SnapshotParams() const {
 void TransformEffectNode::Process(MediaBuffer input, OutputCallback emit) {
     if (!enabled_.load() || !input.IsFrame()) { emit(std::move(input)); return; }
 
-    const MediaFrame& src_mf = input.AsFrame();
-    if (!src_mf.IsValid()) { emit(std::move(input)); return; }
-
-    if (!IsPlanarYuvPixelFormat(src_mf.format())) {
-        if (!logged_unsupported_format_) {
-            SPDLOG_WARN("TransformEffectNode: unsupported pixel format {}, passing through",
-                        src_mf.format());
-            logged_unsupported_format_ = true;
-        }
-        emit(std::move(input));
-        return;
-    }
-
     const TransformAffineParams params = SnapshotParams();
     if (params.rotate_rad == 0.0f && !params.flip_h && !params.flip_v &&
         params.scale_x == 1.0f && params.scale_y == 1.0f &&
@@ -126,11 +121,37 @@ void TransformEffectNode::Process(MediaBuffer input, OutputCallback emit) {
         return;
     }
 
-    MediaFrame out_mf = output_pool_.Acquire(src_mf.width(), src_mf.height(),
-                                             src_mf.format());
+    // CPU effects convert hardware frames at the node boundary (GPU→CPU);
+    // the GPU engine of a later stage will replace this download.
+    MediaFrame downloaded;
+    MediaFrame* src = &input.AsFrame();
+    if (src->IsHardware()) {
+        downloaded = TransferToSoftware(*src);
+        if (!downloaded.IsValid()) {
+            SPDLOG_WARN("TransformEffectNode: hw frame download failed");
+            emit(std::move(input));
+            return;
+        }
+        src = &downloaded;
+    }
+
+    if (!src->IsValid()) { emit(std::move(input)); return; }
+
+    if (!IsPlanarYuvPixelFormat(src->format())) {
+        if (!logged_unsupported_format_) {
+            SPDLOG_WARN("TransformEffectNode: unsupported pixel format {}, passing through",
+                        src->format());
+            logged_unsupported_format_ = true;
+        }
+        emit(std::move(input));
+        return;
+    }
+
+    MediaFrame out_mf = output_pool_.Acquire(src->width(), src->height(),
+                                             src->format());
     if (!out_mf.IsValid()) { emit(std::move(input)); return; }
-    if (TryApplyPermute(src_mf, out_mf, input, emit)) return;
-    ApplyBilinear(src_mf, out_mf, input, emit);
+    if (TryApplyPermute(*src, out_mf, input, emit)) return;
+    ApplyBilinear(*src, out_mf, input, emit);
 }
 
 bool TransformEffectNode::TryApplyPermute(const MediaFrame& src, MediaFrame& dst,

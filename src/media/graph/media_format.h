@@ -29,6 +29,10 @@ struct VideoFormat {
     int width{0};
     int height{0};
     PixelFormat pixel_format{};
+    /// Software pixel format underneath a hardware-domain frame (e.g. kNV12
+    /// or 10-bit), used by consumers that need the real layout. kUnknown for
+    /// software frames and until the first hardware frame arrives.
+    PixelFormat hw_sw_format{PixelFormat::kUnknown};
     Rational frame_rate;
 };
 
@@ -50,7 +54,8 @@ class MediaFormat {
 
     // --- Factories ---
     static MediaFormat Video(int width, int height, PixelFormat fmt,
-                             Rational frame_rate = {});
+                             Rational frame_rate = {},
+                             PixelFormat hw_sw_format = PixelFormat::kUnknown);
     static MediaFormat Audio(int sample_rate, int channels, SampleFormat fmt);
     /// Compressed stream format from a demuxer (deep-copies codecpar).
     static MediaFormat FromStream(int codec_id, Rational time_base,

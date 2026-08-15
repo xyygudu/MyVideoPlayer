@@ -11,6 +11,7 @@ extern "C" {
 
 #include "clock.h"
 #include "effect_manager.h"
+#include "gpu/gpu_device.h"
 #include "graph/media_graph.h"
 #include "graph/port.h"
 #include "mvp/source_info.h"
@@ -122,13 +123,15 @@ bool MediaPlayer::Impl::Open(const std::string& filepath) {
     audio_stream_index_ = info_.audio_streams.empty() ? -1 : info_.audio_streams[0].index;
     sink_count_ = (video_stream_index_ >= 0 ? 1 : 0) + (audio_stream_index_ >= 0 ? 1 : 0);
 
-    // 3. Build the playback graph.
+    // 3. Open the renderer first: negotiation needs its backend device to
+    // decide whether the chain can run hardware decode.
+    video_renderer_.Open(window_handle_, window_width_, window_height_);
+
+    // 4. Build the playback graph.
     if (!BuildGraph()) {
         state_ = PlaybackState::kError;
         return false;
     }
-
-    video_renderer_.Open(window_handle_, window_width_, window_height_);
 
     state_ = PlaybackState::kReady;
     return true;
@@ -229,6 +232,14 @@ bool MediaPlayer::Impl::BuildGraph() {
     // 1. Create graph and nodes.
     graph_ = std::make_unique<graph::MediaGraph>();
     graph_->SetEventCallback([this](graph::GraphEvent e) { OnGraphEvent(e); });
+
+    // Share the renderer's GPU device with the graph so decode and present
+    // use one device (zero-copy). A null device keeps the pipeline software.
+    // The wrapper hands the interface to FFmpeg, so the graph must outlive
+    // the renderer — Close() destroys graph_ before video_renderer_.
+    if (void* native = video_renderer_.NativeDevice()) {
+        graph_->SetGpuDevice(gpu::GpuDevice::WrapExternal(native));
+    }
 
     auto* demux = static_cast<graph::DemuxNode*>(
         graph_->AddNode(std::make_unique<graph::DemuxNode>(

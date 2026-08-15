@@ -21,6 +21,14 @@ ColorEffectNode::ColorEffectNode() {
 
 ColorEffectNode::~ColorEffectNode() = default;
 
+void ColorEffectNode::DeclareCaps() {
+    // Format-transparent node: relay the downstream constraint upstream so
+    // the producer negotiates a format the whole remaining chain accepts.
+    if (output_port_->IsConnected()) {
+        input_port_->SetCaps(output_port_->Peer()->Caps());
+    }
+}
+
 bool ColorEffectNode::Negotiate() {
     if (!input_port_->IsConnected()) {
         SPDLOG_ERROR("ColorEffectNode: input port not connected");
@@ -75,15 +83,34 @@ void ColorEffectNode::Process(MediaBuffer input, OutputCallback emit) {
     float s = std::get<float>(saturation_.load());
     if (b == 0.0f && c == 1.0f && s == 1.0f) { emit(std::move(input)); return; }
 
-    MediaFrame mf = std::move(input.AsFrame()).MakeWritable();
-    if (!mf.IsValid()) { emit(std::move(input)); return; }
+    // CPU effects convert hardware frames at the node boundary (GPU→CPU);
+    // the GPU engine of a later stage will replace this download.
+    MediaFrame& src = input.AsFrame();
+    bool from_hw = src.IsHardware();
+    MediaFrame mf;
+    if (from_hw) {
+        mf = TransferToSoftware(src);
+        if (!mf.IsValid()) {
+            SPDLOG_WARN("ColorEffectNode: hw frame download failed");
+            emit(std::move(input));
+            return;
+        }
+    } else {
+        mf = std::move(src).MakeWritable();
+        if (!mf.IsValid()) { emit(std::move(input)); return; }
+    }
 
     if (!IsPlanarYuvPixelFormat(mf.format())) {
         if (!logged_unsupported_format_) {
-            SPDLOG_WARN("ColorEffectNode: unsupported pixel format {}, passing through", mf.format());
+            SPDLOG_WARN("ColorEffectNode: unsupported pixel format {}, passing through",
+                        mf.format());
             logged_unsupported_format_ = true;
         }
-        emit(std::move(input));
+        if (from_hw) {
+            emit(std::move(input));  // Keep the zero-copy hw frame untouched.
+        } else {
+            emit(MediaBuffer(std::move(mf), input.timestamp(), input.flags()));
+        }
         return;
     }
 
@@ -91,7 +118,6 @@ void ColorEffectNode::Process(MediaBuffer input, OutputCallback emit) {
     pixel_ops::ApplyLut(mf.PlaneData(0), mf.PlaneLinesize(0), mf.width(), mf.height(), lut.y);
 
     ChromaPlaneLayout layout = ComputeChromaPlaneLayout(mf.format(), mf.width(), mf.height());
-    int row_bytes = layout.interleaved ? layout.width * 2 : layout.width;
     int plane_count = layout.interleaved ? 1 : 2;
     for (int p = 0; p < plane_count; ++p) {
         pixel_ops::ApplyLut(mf.PlaneData(1 + p), mf.PlaneLinesize(1 + p),

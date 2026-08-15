@@ -5,6 +5,7 @@
 extern "C" {
 #include <libavutil/buffer.h>
 #include <libavutil/frame.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 }
 
@@ -32,6 +33,25 @@ MediaFrame& MediaFrame::operator=(MediaFrame&& other) noexcept {
 
 bool MediaFrame::IsValid() const {
     return frame_.get() && frame_.get()->data[0];
+}
+
+bool MediaFrame::IsHardware() const {
+    return frame_.get() && frame_->hw_frames_ctx != nullptr;
+}
+
+int MediaFrame::HwSwFormat() const {
+    if (!frame_.get() || !frame_->hw_frames_ctx) return -1;
+    const AVHWFramesContext* fctx =
+        reinterpret_cast<const AVHWFramesContext*>(frame_->hw_frames_ctx->data);
+    return fctx ? fctx->sw_format : -1;
+}
+
+MediaFrame TransferToSoftware(const MediaFrame& hw_frame) {
+    AVFrame* hw = hw_frame.RawFrame();
+    if (!hw || !hw->hw_frames_ctx) return MediaFrame();
+    AVFramePtr sw;
+    if (av_hwframe_transfer_data(sw.get(), hw, 0) < 0) return MediaFrame();
+    return MediaFrame(sw.get());
 }
 
 AVFrame* MediaFrame::RawFrame() const { return frame_.get(); }

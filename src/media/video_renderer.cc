@@ -12,26 +12,9 @@ extern "C" {
 #include <spdlog/spdlog.h>
 
 #include "ffmpeg_utils.h"
+#include "gpu/pixel_format_map.h"
 
 namespace mvp {
-
-namespace {
-
-inline PixelFormat MapPixelFormat(int av_pix_fmt) {
-    switch (av_pix_fmt) {
-        case 0:  return PixelFormat::kYUV420P;
-        case 4:  return PixelFormat::kYUV422P;
-        case 5:  return PixelFormat::kYUV444P;
-        case 23: return PixelFormat::kNV12;
-        case 26: return PixelFormat::kRGB32;
-        default:
-            if (av_pix_fmt == AV_PIX_FMT_D3D11)
-                return PixelFormat::kD3D11;
-            return PixelFormat::kUnknown;
-    }
-}
-
-}  // namespace
 
 VideoRenderer::VideoRenderer() = default;
 
@@ -62,7 +45,14 @@ bool VideoRenderer::Open(void* native_window_handle, int width, int height) {
         return false;
     }
 
+    // Prefer the D3D11 backend: it is the only one that can bind
+    // hardware-decoded textures directly for zero-copy presentation.
+    SDL_SetHint(SDL_HINT_RENDER_DRIVER, "direct3d11");
     renderer_ = SDL_CreateRenderer(window_, nullptr);
+    if (!renderer_) {
+        SDL_SetHint(SDL_HINT_RENDER_DRIVER, nullptr);  // let SDL pick any
+        renderer_ = SDL_CreateRenderer(window_, nullptr);
+    }
     if (!renderer_) {
         spdlog::error("SDL_CreateRenderer failed: {}", SDL_GetError());
         SDL_DestroyWindow(window_);
@@ -70,7 +60,18 @@ bool VideoRenderer::Open(void* native_window_handle, int width, int height) {
         return false;
     }
 
-    spdlog::info("VideoRenderer opened ({}x{})", width, height);
+    SDL_PropertiesID rprops = SDL_GetRendererProperties(renderer_);
+    const char* backend =
+        SDL_GetStringProperty(rprops, SDL_PROP_RENDERER_NAME_STRING, "unknown");
+    native_device_ = SDL_GetPointerProperty(
+        rprops, SDL_PROP_RENDERER_D3D11_DEVICE_POINTER, nullptr);
+    if (native_device_) {
+        bindable_domain_ = PixelFormat::kD3D11;
+    }
+
+    spdlog::info("VideoRenderer opened ({}x{}, backend '{}', hw binding {})",
+                 width, height, backend,
+                 bindable_domain_ != PixelFormat::kUnknown ? "on" : "off");
     return true;
 }
 
@@ -98,12 +99,14 @@ void VideoRenderer::Close() {
         SDL_DestroyWindow(window_);
         window_ = nullptr;
     }
+    native_device_ = nullptr;
+    bindable_domain_ = PixelFormat::kUnknown;
 }
 
 void VideoRenderer::Render(const MediaFrame& frame) {
     if (!renderer_ || !frame.IsValid()) return;
 
-    switch (MapPixelFormat(frame.RawFrame()->format)) {
+    switch (gpu::FromAvPixelFormat(frame.RawFrame()->format)) {
         case PixelFormat::kD3D11:
             RenderHWFrame(frame);
             break;
@@ -147,6 +150,53 @@ void VideoRenderer::RenderNV12(const MediaFrame& frame) {
 }
 
 void VideoRenderer::RenderHWFrame(const MediaFrame& frame) {
+    AVFrame* hw = frame.RawFrame();
+    if (hw->format == AV_PIX_FMT_D3D11 &&
+        bindable_domain_ != PixelFormat::kUnknown) {
+        if (RenderBoundHwFrame(frame)) {
+            return;
+        }
+        SPDLOG_WARN("VideoRenderer: texture binding failed, using transfer");
+    }
+    RenderHwTransfer(frame);
+}
+
+bool VideoRenderer::RenderBoundHwFrame(const MediaFrame& frame) {
+    AVFrame* hw = frame.RawFrame();
+    int sdl_format;
+    switch (frame.HwSwFormat()) {
+        case AV_PIX_FMT_NV12:
+            sdl_format = SDL_PIXELFORMAT_NV12;
+            break;
+        case AV_PIX_FMT_P010:
+            sdl_format = SDL_PIXELFORMAT_P010;
+            break;
+        default:
+            return false;  // Unknown layout: let the transfer fallback convert
+    }
+
+    SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetPointerProperty(props, SDL_PROP_TEXTURE_CREATE_D3D11_TEXTURE_POINTER,
+                           hw->data[0]);
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, hw->width);
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
+                          hw->height);
+    SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER,
+                          sdl_format);
+    SDL_Texture* bound = SDL_CreateTextureWithProperties(renderer_, props);
+    SDL_DestroyProperties(props);
+    if (!bound) {
+        return false;
+    }
+
+    // The MediaFrame owns the underlying D3D11 texture; it must outlive this
+    // call, which VideoSinkNode guarantees via current_frame_.
+    Present(bound, hw->width, hw->height);
+    SDL_DestroyTexture(bound);
+    return true;
+}
+
+void VideoRenderer::RenderHwTransfer(const MediaFrame& frame) {
     AVFrame* hw_frame = frame.RawFrame();
     if (!hw_frame || !hw_frame->hw_frames_ctx) {
         RenderFallback(frame);
@@ -225,11 +275,16 @@ void VideoRenderer::RenderFallback(const MediaFrame& frame) {
 }
 
 void VideoRenderer::Present(int frame_width, int frame_height) {
+    Present(texture_, frame_width, frame_height);
+}
+
+void VideoRenderer::Present(SDL_Texture* texture, int frame_width,
+                            int frame_height) {
     RenderClear();
     float dx, dy, dw, dh;
     ComputeDestRect(frame_width, frame_height, &dx, &dy, &dw, &dh);
     SDL_FRect dst{dx, dy, dw, dh};
-    SDL_RenderTexture(renderer_, texture_, nullptr, &dst);
+    SDL_RenderTexture(renderer_, texture, nullptr, &dst);
     SDL_RenderPresent(renderer_);
 }
 

@@ -7,6 +7,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include "gpu/gpu_device.h"
+
 namespace mvp::graph {
 
 MediaGraph::MediaGraph() = default;
@@ -18,6 +20,10 @@ INode* MediaGraph::AddNode(std::unique_ptr<INode> node) {
     node_ptrs_.push_back(ptr);
     ptr->Attach(this);
     return ptr;
+}
+
+void MediaGraph::SetGpuDevice(std::unique_ptr<gpu::GpuDevice> device) {
+    gpu_device_ = std::move(device);
 }
 
 bool MediaGraph::Connect(OutputPort* src, InputPort* dst,

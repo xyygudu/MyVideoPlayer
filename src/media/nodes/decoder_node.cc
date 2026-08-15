@@ -1,14 +1,18 @@
 #include "nodes/decoder_node.h"
 
+#include <algorithm>
 #include <chrono>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/hwcontext.h>
 }
 #include <spdlog/spdlog.h>
 
 #include "ffmpeg_utils.h"
+#include "gpu/gpu_device.h"
+#include "gpu/pixel_format_map.h"
 #include "graph/media_graph.h"
 #include "media_frame.h"
 
@@ -44,13 +48,17 @@ bool DecoderNode::Negotiate() {
     time_base_ = {fmt.time_base().num, fmt.time_base().den};
     media_type_ = fmt.media_type();
 
-    // Derive output format from codec params (no codec open).
-    // Pixel/sample format is a placeholder, refined at runtime from frames.
+    // Derive output format from codec params (no codec open). Pixel format
+    // may be a hardware domain when the downstream chain accepts one; the
+    // real format is refined at runtime once frames arrive.
     if (media_type_ == MediaType::kVideo) {
         name_ = "DecoderNode(video)";
+        frame_rate_ = enc.frame_rate;
+        const AVCodec* codec =
+            avcodec_find_decoder(negotiated_codecpar_->codec_id);
         output_port_->SetFormat(MediaFormat::Video(
             negotiated_codecpar_->width, negotiated_codecpar_->height,
-            PixelFormat::kYUV420P, enc.frame_rate));
+            PickOutputPixelFormat(codec), frame_rate_));
     } else if (media_type_ == MediaType::kAudio) {
         name_ = "DecoderNode(audio)";
         output_port_->SetFormat(MediaFormat::Audio(
@@ -58,6 +66,26 @@ bool DecoderNode::Negotiate() {
             negotiated_codecpar_->ch_layout.nb_channels, SampleFormat::kFloat));
     }
     return true;
+}
+
+PixelFormat DecoderNode::PickOutputPixelFormat(const AVCodec* codec) const {
+    // Downstream suggests, upstream decides: a hardware domain is only
+    // negotiated when the device exists, the codec supports it, and the
+    // immediate downstream accepts it. Software otherwise.
+    if (!output_port_->IsConnected()) {
+        return PixelFormat::kYUV420P;
+    }
+    gpu::GpuDevice* device = graph_ ? graph_->GpuDevice() : nullptr;
+    if (!device || !codec || !device->SupportsDecoder(codec)) {
+        return PixelFormat::kYUV420P;
+    }
+    const FormatCaps& peer = output_port_->Peer()->Caps();
+    PixelFormat domain = device->Domain();
+    bool accepted = peer.pixel_formats.empty() ||
+                    std::find(peer.pixel_formats.begin(),
+                              peer.pixel_formats.end(),
+                              domain) != peer.pixel_formats.end();
+    return accepted ? domain : PixelFormat::kYUV420P;
 }
 
 bool DecoderNode::Prepare() {
@@ -76,6 +104,7 @@ bool DecoderNode::Prepare() {
         return false;
     }
 
+    gpu_device_ = graph_ ? graph_->GpuDevice() : nullptr;
     if (!FindAndOpenCodec(negotiated_codecpar_)) {
         state_ = NodeState::kError;
         return false;
@@ -93,6 +122,24 @@ bool DecoderNode::FindAndOpenCodec(const AVCodecParameters* codecpar) {
         return false;
     }
 
+    const MediaFormat& out = output_port_->Format();
+    bool want_hw = gpu_device_ && media_type_ == MediaType::kVideo &&
+                   out.IsVideo() &&
+                   out.AsVideo().pixel_format == gpu_device_->Domain();
+    if (want_hw && TryOpenCodec(codec, codecpar, /*use_hw=*/true)) {
+        SPDLOG_INFO("DecoderNode: hardware decode enabled ({})", codec->name);
+        return true;
+    }
+    if (want_hw) {
+        SPDLOG_WARN("DecoderNode: hardware decode failed for '{}', "
+                    "retrying software",
+                    codec->name);
+    }
+    return TryOpenCodec(codec, codecpar, /*use_hw=*/false);
+}
+
+bool DecoderNode::TryOpenCodec(const AVCodec* codec,
+                               const AVCodecParameters* codecpar, bool use_hw) {
     codec_ctx_ = avcodec_alloc_context3(codec);
     if (!codec_ctx_) {
         return false;
@@ -104,6 +151,14 @@ bool DecoderNode::FindAndOpenCodec(const AVCodecParameters* codecpar) {
         return false;
     }
 
+    if (use_hw) {
+        // FFmpeg picks the actual format at open via GetFormat; `opaque`
+        // must outlive codec_ctx_ — the device is graph-owned.
+        codec_ctx_->opaque = gpu_device_;
+        codec_ctx_->get_format = &DecoderNode::GetFormat;
+        codec_ctx_->hw_device_ctx = av_buffer_ref(gpu_device_->DeviceRef());
+    }
+
     if (avcodec_open2(codec_ctx_, codec, nullptr) < 0) {
         SPDLOG_ERROR("DecoderNode: failed to open codec '{}'", codec->name);
         avcodec_free_context(&codec_ctx_);
@@ -111,6 +166,18 @@ bool DecoderNode::FindAndOpenCodec(const AVCodecParameters* codecpar) {
     }
 
     return true;
+}
+
+AVPixelFormat DecoderNode::GetFormat(AVCodecContext* ctx,
+                                     const AVPixelFormat* pix_fmts) {
+    auto* device = static_cast<gpu::GpuDevice*>(ctx->opaque);
+    AVPixelFormat hw = gpu::ToAvPixelFormat(device->Domain());
+    for (const AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
+        if (*p == hw) {
+            return hw;
+        }
+    }
+    return pix_fmts[0];  // Hardware not offered: decode in software.
 }
 
 bool DecoderNode::Start() {
@@ -189,6 +256,7 @@ void DecoderNode::DrainFrames() {
             SPDLOG_WARN("DecoderNode: receive_frame error {}", ret);
             break;
         }
+        MaybeAnnounceFormat(frame.get());
 
         double frame_pts = (frame->pts != AV_NOPTS_VALUE)
                                ? frame->pts * av_q2d(time_base_)
@@ -215,6 +283,26 @@ void DecoderNode::DrainFrames() {
         buf.set_serial(current_serial_);
         output_port_->Push(std::move(buf));
     }
+}
+
+void DecoderNode::MaybeAnnounceFormat(const AVFrame* frame) {
+    if (frame->format == announced_av_format_) {
+        return;
+    }
+    announced_av_format_ = frame->format;
+
+    PixelFormat pf = gpu::FromAvPixelFormat(frame->format);
+    PixelFormat sw = PixelFormat::kUnknown;
+    if (frame->hw_frames_ctx) {
+        auto* fctx =
+            reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
+        sw = fctx ? gpu::FromAvPixelFormat(fctx->sw_format)
+                  : PixelFormat::kUnknown;
+    }
+    SPDLOG_INFO("DecoderNode: actual output format av={} domain={} sw={}",
+                frame->format, static_cast<int>(pf), static_cast<int>(sw));
+    output_port_->SetFormat(MediaFormat::Video(frame->width, frame->height, pf,
+                                               frame_rate_, sw));
 }
 
 void DecoderNode::MaybeFlushOnSerialChange(int serial) {

@@ -19,12 +19,20 @@ enum class MediaType {
 /// Pixel format tag for decoded video frames.
 enum class PixelFormat {
     kUnknown = 0,
+    // Software formats: pixel data in system memory.
     kYUV420P,
     kYUV422P,
     kYUV444P,
     kNV12,
     kRGB32,
-    kD3D11,  // Hardware frame (D3D11VA output), data[0] is ID3D11Texture2D*
+    // Hardware frame domains: pixel data in GPU memory, mirroring FFmpeg's
+    // hardware AVPixelFormat variants. The negotiated domain names the owning
+    // device; nodes treat all of these uniformly as "hardware".
+    kD3D11,  // D3D11VA, data[0] is an ID3D11Texture2D*
+    kCuda,
+    kQsv,
+    kVAAPI,
+    kVideoToolbox,
 };
 
 /// Sample format tag for decoded audio frames.
@@ -60,6 +68,13 @@ class MediaFrame {
 
     bool IsValid() const;
 
+    /// True when pixel data lives in GPU memory (a hardware-domain frame).
+    bool IsHardware() const;
+
+    /// The software pixel format underneath a hardware frame (e.g. NV12,
+    /// P010), or -1 when not a hardware frame.
+    int HwSwFormat() const;
+
     int width() const;
     int height() const;
     int format() const;
@@ -82,6 +97,11 @@ class MediaFrame {
 
     AVFramePtr frame_;
 };
+
+/// GPU→CPU domain conversion: copies a hardware frame into system memory.
+/// Returns an invalid frame on failure. The explicit conversion point for
+/// software-only nodes (CPU effects) at their input boundary.
+MediaFrame TransferToSoftware(const MediaFrame& hw_frame);
 
 /// Reusable allocator for same-size/format output frames.
 /// Wraps an AVBufferPool so repeated calls with the same width/height/format

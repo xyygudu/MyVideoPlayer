@@ -33,6 +33,7 @@ class ColorEffectNode : public IEffectNode {
     ~ColorEffectNode() override;
 
     // --- INode interface ---
+    void DeclareCaps() override;
     bool Negotiate() override;
     bool Prepare() override;
     bool Start() override;

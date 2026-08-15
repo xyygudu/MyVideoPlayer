@@ -42,10 +42,10 @@ bool RangesOverlap(int min_a, int max_a, int min_b, int max_b) {
 // --- MediaFormat factory methods ---
 
 MediaFormat MediaFormat::Video(int width, int height, PixelFormat fmt,
-                              Rational frame_rate) {
+                              Rational frame_rate, PixelFormat hw_sw_format) {
     MediaFormat f;
     f.media_type_ = MediaType::kVideo;
-    f.payload_ = VideoFormat{width, height, fmt, frame_rate};
+    f.payload_ = VideoFormat{width, height, fmt, hw_sw_format, frame_rate};
     return f;
 }
 

@@ -39,6 +39,7 @@ class VideoSinkNode : public INode {
     ~VideoSinkNode() override;
 
     // --- INode interface ---
+    void DeclareCaps() override;
     bool Negotiate() override;
     bool Prepare() override;
     bool Start() override;

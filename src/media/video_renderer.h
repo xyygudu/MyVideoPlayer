@@ -11,9 +11,9 @@ struct SwsContext;
 namespace mvp {
 
 /// GPU-accelerated video renderer using SDL3.
-/// Creates an SDL renderer attached to a parent window (embedded mode)
-/// and uploads YUV textures for hardware-composited display.
-/// Supports zero-copy rendering of D3D11VA hardware frames.
+/// Creates an SDL renderer attached to a parent window (embedded mode).
+/// Software frames are uploaded as YUV textures; hardware frames are bound
+/// directly to the backend device (zero-copy) when the backend supports it.
 class VideoRenderer {
   public:
     VideoRenderer();
@@ -36,6 +36,17 @@ class VideoRenderer {
 
     bool IsOpen() const { return renderer_ != nullptr; }
 
+    /// Hardware frame domain this renderer can present zero-copy (kUnknown
+    /// when the backend has no external-texture binding support). Valid
+    /// after Open(); read by the sink during DeclareCaps.
+    PixelFormat BindableHardwareDomain() const { return bindable_domain_; }
+
+    /// The renderer backend's native device (ID3D11Device* on the D3D11
+    /// backend), nullptr otherwise. Non-owning, valid while the renderer is
+    /// open. The pipeline builder wraps it so decode and present share one
+    /// device.
+    void* NativeDevice() const { return native_device_; }
+
   private:
     // Software path: YUV420P direct upload
     void RenderYUV420P(const MediaFrame& frame);
@@ -43,10 +54,13 @@ class VideoRenderer {
     void RenderFallback(const MediaFrame& frame);
     // NV12 direct upload (used for hw_transfer or native NV12)
     void RenderNV12(const MediaFrame& frame);
-    // D3D11VA zero-copy path
+    // Hardware frame: direct binding or GPU→CPU transfer fallback
     void RenderHWFrame(const MediaFrame& frame);
+    bool RenderBoundHwFrame(const MediaFrame& frame);
+    void RenderHwTransfer(const MediaFrame& frame);
 
     void Present(int frame_width, int frame_height);
+    void Present(SDL_Texture* texture, int frame_width, int frame_height);
     void EnsureTexture(int frame_width, int frame_height, int sdl_format);
     void RenderClear();
     void ComputeDestRect(int frame_width, int frame_height,
@@ -61,6 +75,9 @@ class VideoRenderer {
     int texture_format_ = 0;
     int window_width_ = 0;
     int window_height_ = 0;
+
+    PixelFormat bindable_domain_{PixelFormat::kUnknown};
+    void* native_device_{nullptr};
 
     // Fallback conversion for non-YUV420P frames
     SwsContext* sws_ctx_ = nullptr;

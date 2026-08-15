@@ -13,10 +13,20 @@
 #include "graph/port.h"
 
 extern "C" {
+#include <libavutil/pixfmt.h>
 #include <libavutil/rational.h>
 }
 
 struct AVCodecContext;
+struct AVCodec;
+struct AVCodecParameters;
+struct AVFrame;
+
+namespace mvp {
+namespace gpu {
+class GpuDevice;
+}  // namespace gpu
+}  // namespace mvp
 
 namespace mvp::graph {
 
@@ -80,6 +90,20 @@ class DecoderNode : public INode {
 
     // Prepare helpers (resource allocation)
     bool FindAndOpenCodec(const AVCodecParameters* codecpar);
+    bool TryOpenCodec(const AVCodec* codec, const AVCodecParameters* codecpar,
+                      bool use_hw);
+
+    // Negotiation helpers (pure format reasoning)
+    PixelFormat PickOutputPixelFormat(const AVCodec* codec) const;
+
+    /// FFmpeg get_format callback: picks the graph device's hardware format
+    /// when the codec offers it, else falls back to the first software one.
+    static AVPixelFormat GetFormat(AVCodecContext* ctx,
+                                   const AVPixelFormat* pix_fmts);
+
+    /// Corrects the output port format once real frames reveal the actual
+    /// pixel format/domain (the negotiated value is a placeholder).
+    void MaybeAnnounceFormat(const AVFrame* frame);
 
     // DecodeLoop helpers (per-packet processing)
     void MaybeFlushOnSerialChange(int serial);
@@ -97,6 +121,11 @@ class DecoderNode : public INode {
     AVCodecContext* codec_ctx_{nullptr};
     MediaType media_type_{MediaType::kUnknown};
     AVRational time_base_{0, 1};
+    Rational frame_rate_;
+    // Graph-owned hardware device; only read on the decode thread after
+    // Prepare, and by FFmpeg through GetFormat during codec open.
+    gpu::GpuDevice* gpu_device_{nullptr};
+    int announced_av_format_{-1};  // Last AVPixelFormat pushed to the port
 
     // Ports
     std::unique_ptr<InputPort> input_port_;

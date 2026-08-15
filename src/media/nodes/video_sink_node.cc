@@ -28,6 +28,21 @@ ClockOffer VideoSinkNode::ProvideClock() {
     return {clock_, kClockPriority};
 }
 
+void VideoSinkNode::DeclareCaps() {
+    FormatCaps caps;
+    caps.media_type = MediaType::kVideo;
+    caps.pixel_formats = {PixelFormat::kYUV420P, PixelFormat::kYUV422P,
+                          PixelFormat::kYUV444P, PixelFormat::kNV12,
+                          PixelFormat::kRGB32};
+    // The renderer's backend decides whether hardware frames can be
+    // presented zero-copy; without binding support the chain stays software.
+    if (renderer_ &&
+        renderer_->BindableHardwareDomain() != PixelFormat::kUnknown) {
+        caps.pixel_formats.push_back(renderer_->BindableHardwareDomain());
+    }
+    input_port_->SetCaps(std::move(caps));
+}
+
 bool VideoSinkNode::Negotiate() {
     if (!input_port_->IsConnected()) {
         SPDLOG_ERROR("VideoSinkNode: input port not connected");
