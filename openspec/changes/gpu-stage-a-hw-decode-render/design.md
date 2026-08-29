@@ -36,13 +36,6 @@ CPU 特效只能处理系统内存平面。启用的特效遇到硬件帧时,在
 - **为什么必须复制**:D3D11VA 解码器输出纹理数组(FFmpeg 头文件明示 "decoding requires a single array texture",`data[1]` 是子资源索引),SDL3 包装外部纹理后要建非数组 SRV,数组纹理必然失败。
 - **下载回退也在解码线程**:CopyForPresentation 失败(不支持布局等)时,DecoderNode 直接 `av_hwframe_transfer_data` 下载为软件帧再推——与 ffmpeg CLI 单线程模型一致,已验证可行。
 - **渲染线程只碰 SDL 自己的上下文**:SDL 创建自己的 immediate context,与 FFmpeg 的设备上下文互不干扰;设备级操作(纹理引用计数、SRV 创建)线程安全。
-
-### 5b. 共享立即上下文的互斥(实测教训二)
-
-D3D11 设备通过 `GetImmediateContext` 对所有调用者返回**同一个单例上下文**——"SDL 用自己的上下文"是错的:SDL 渲染器(渲染线程)、FFmpeg 硬解提交与 CopyForPresentation(解码线程)实际共用同一个非线程安全的命令上下文。正常播放时偶发可活,seek 追赶期密集提交把它打挂(画面冻结 + 关闭挂起)。mpv 的 d3d11 后端为此强制 `ctx_lock`。
-
-修订后:`GpuDevice::DeviceContextMutex()` 暴露互斥锁;解码线程在 `avcodec_send_packet/receive_frame/flush_buffers` 与 CopyForPresentation/TransferToSoftware 外加锁(DeviceLock RAII,软件解码无设备则不锁);渲染器在每次 Render 的全部绘制提交外加锁。锁只串行化 CPU 侧命令提交,不阻塞链路(渲染线程 Pull 不加锁,解码线程在链路满时持锁阻塞会被 Pull 解除,无环状等待)。
-
 - **纹理指针运输**:MediaFrame 增加非拥有 `HwPresentationTexture()` 指针(池归设备所有),move 语义携带。环形池 8 > 在途帧数(链路 3 + current_frame 1),纹理被复用前所有引用早已呈现完毕——与解码器 surface 池同款余量论证。
 - **析构顺序**:`~MediaGraph` 显式先清节点再释放设备,避免池纹理先于节点保留帧销毁。
 

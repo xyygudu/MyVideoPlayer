@@ -32,14 +32,17 @@ class D3D11GpuDevice final : public GpuDevice {
     explicit D3D11GpuDevice(AVBufferRef* device_ref);
 
     // Returns a pool texture matching w/h/format, rebuilding the ring when
-    // the parameters change. Caller holds context_mutex_.
+    // the parameters change. Caller holds DeviceContextMutex().
     ID3D11Texture2D* AcquirePoolTexture(int width, int height, int dxgi_format);
 
     AVBufferRef* device_ref_{nullptr};
-    // The device's command context, used only on the decode thread
-    // (serialized by context_mutex_).
+    // The device's single immediate command context (D3D11 hands out one per
+    // device). Shared by FFmpeg decode/copy on the decode thread and SDL draw
+    // submission on the render thread; serialized by context_mutex_.
     ID3D11DeviceContext* device_context_{nullptr};
-    // Serializes the shared immediate context; also guards the pool.
+    // Serializes the shared immediate context; also guards the presentation
+    // pool bookkeeping. Non-recursive: CopyForPresentation must NOT re-lock
+    // it — its callers already hold it (see DecoderNode::DeviceLock).
     std::mutex context_mutex_;
 
     // Ring of individual shader-resource textures for presentation binding.

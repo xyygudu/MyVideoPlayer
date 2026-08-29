@@ -70,19 +70,6 @@ GpuDevice SHALL 提供 `CopyForPresentation(const AVFrame* hw_frame)`,把硬件�
 - **WHEN** 硬件帧 sw_format 非 NV12/P010
 - **THEN** 返回 nullptr,调用方在解码线程 av_hwframe_transfer_data 下载为软件帧
 
-### Requirement: 共享命令上下文的互斥
-GpuDevice SHALL 提供 `DeviceContextMutex()` 返回互斥锁,用于串行化设备唯一的命令上下文:D3D11 的 `GetImmediateContext` 对同一设备返回同一单例上下文,SDL 渲染器、FFmpeg 解码提交与呈现复制都经它提交命令,故 SHALL 全部互斥(mpv ctx_lock 模式)。
-
-解码节点 SHALL 在全部 FFmpeg 编解码调用(send_packet/receive_frame/flush_buffers)与 CopyForPresentation/TransferToSoftware 期间持锁;渲染器 SHALL 在每次绘制提交期间持锁。软件管线(无 GPU 设备)SHALL 不参与加锁。
-
-#### Scenario: 解码与绘制互斥
-- **WHEN** 解码线程持锁提交解码命令时,渲染线程提交绘制
-- **THEN** 渲染线程等待锁释放后再提交,命令上下文始终单线程访问
-
-#### Scenario: 软件管线不加锁
-- **WHEN** 图未注入 GPU 设备
-- **THEN** 解码节点与渲染器均不获取设备锁,行为与纯软件管线一致
-
 ### Requirement: 像素格式映射唯一收口
 系统 SHALL 提供 `gpu::FromAvPixelFormat` / `gpu::ToAvPixelFormat` 作为 FFmpeg AVPixelFormat 与项目 PixelFormat 之间的双向映射唯一实现点。未建模的格式 SHALL 映射为 `PixelFormat::kUnknown` / `AV_PIX_FMT_NONE`。其他模块 SHALL NOT 各自维护映射表。
 

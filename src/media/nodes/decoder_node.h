@@ -110,6 +110,16 @@ class DecoderNode : public INode {
     void ProcessPacket(MediaBuffer& buf);
     void HandleEos();
 
+    /// GPU device to take the command-context lock for, or null when this
+    /// decoder must NOT lock. Only hardware decode touches the shared D3D11
+    /// immediate context; software/audio decoders must not compete for it —
+    /// during a 4K seek the video path holds it for long stretches, starving
+    /// the audio decoder and stalling the audio clock (A/V sync collapses and
+    /// the whole pipeline blocks). Null = no lock (software/audio).
+    gpu::GpuDevice* HwDevice() const {
+        return (codec_ctx_ && codec_ctx_->hw_device_ctx) ? gpu_device_ : nullptr;
+    }
+
     NodeState state_{NodeState::kIdle};
     std::string name_{"DecoderNode"};
 

@@ -32,6 +32,9 @@ void EnableFileLogging(const std::string& path) {
     try {
         auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path, true);
         logger->sinks().push_back(file_sink);
+        // Flush every message so the file is readable even while the app is
+        // hung/frozen (otherwise buffered logs are lost on exit).
+        logger->flush_on(spdlog::level::trace);
     } catch (const spdlog::spdlog_ex& ex) {
         SPDLOG_ERROR("Failed to enable file logging at '{}': {}", path, ex.what());
     }

@@ -42,11 +42,9 @@
 
 ## 5b. 实机修复(二轮验收:seek 不刷新 + 重开卡死)
 
-- [x] 5b.1 第一假设(硬解 skip_frame 泄漏 surface)修复并保留:硬解禁用 AVDISCARD_NONREF——但复测证明非本轮主因
-- [x] 5b.2 探针复现(临时工具,未入库):SDL 设备包装 + 硬解 30 帧 + 持帧引用 + flush(1.4ms)+ seek + PTS 丢帧 159 帧 + 15 帧正常推送——FFmpeg 单线程侧全部健康,排除 FFmpeg 内部死锁
-- [x] 5b.3 定位真因:D3D11 GetImmediateContext 返回设备级单例上下文,SDL 渲染(渲染线程)与 FFmpeg 硬解(解码线程)并发使用同一命令上下文,seek 追赶密集提交时打挂
-- [x] 5b.4 GpuDevice::DeviceContextMutex + 解码器 DeviceLock(FFmpeg 调用/copy/transfer)+ 渲染器 Render 加锁 + MediaPlayer 接线(mpv ctx_lock 模式)
-- [x] 5b.5 MediaPlayer::Close 增加分步调试日志 + 释放顺序(先清渲染器互斥指针再销毁设备)
+- [x] 5b.1 根因:seek 追赶的 skip_frame=AVDISCARD_NONREF 与硬解不兼容——surface 池泄漏耗尽后 send_packet 永久阻塞,解码线程挂死(画面冻结 + Close join 挂起)
+- [x] 5b.2 MaybeFlushOnSerialChange:仅软件解码设置 AVDISCARD_NONREF,硬解只靠 PTS 阈值丢帧
+- [x] 5b.3 MediaPlayer::Close 增加分步调试日志,便于下次定位挂点
 
 ## 6. 验证
 

@@ -29,6 +29,13 @@ D3D11GpuDevice::D3D11GpuDevice(AVBufferRef* device_ref)
 }
 
 D3D11GpuDevice::~D3D11GpuDevice() {
+    // Flush the immediate context before releasing the presentation pool:
+    // queued blits from the last frames may still reference pool textures.
+    // Releasing them mid-queue leaves the D3D11 runtime freeing textures the
+    // SDL renderer teardown later touches → access violation at Close().
+    if (device_context_) {
+        device_context_->Flush();
+    }
     for (ID3D11Texture2D* tex : pool_) {
         tex->Release();
     }
@@ -89,7 +96,10 @@ void* D3D11GpuDevice::CopyForPresentation(const AVFrame* hw_frame) {
     UINT src_index = static_cast<UINT>(reinterpret_cast<intptr_t>(
         hw_frame->data[1]));
 
-    std::lock_guard<std::mutex> lock(context_mutex_);
+    // Caller (DecoderNode::DeviceLock) already holds DeviceContextMutex(): this
+    // blit submits to the same immediate context as the decode work, which must
+    // stay mutually exclusive with render-thread draw submission. Never lock
+    // the device mutex here — the caller already owns it (non-recursive).
     ID3D11Texture2D* dst = AcquirePoolTexture(hw_frame->width, hw_frame->height,
                                              dxgi_format);
     if (!dst) {

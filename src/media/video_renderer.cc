@@ -1,6 +1,8 @@
 #include "video_renderer.h"
 
 #include <algorithm>
+#include <chrono>
+#include <mutex>
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -107,9 +109,16 @@ void VideoRenderer::Render(const MediaFrame& frame) {
 
     // SDL and FFmpeg share the device's single immediate context; all draw
     // submission runs under the graph device's mutex (see SetDeviceContextMutex).
-    std::unique_lock<std::mutex> dev_lock(*device_ctx_mutex_, std::defer_lock);
+    // Null mutex = software pipeline, no shared command context to serialize.
+    const auto tl0 = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> dev_lock;
     if (device_ctx_mutex_) {
-        dev_lock.lock();
+        dev_lock = std::unique_lock<std::mutex>(*device_ctx_mutex_);
+    }
+    const double dtl = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - tl0).count();
+    if (dtl > 1.0) {
+        spdlog::warn("VideoRenderer: device-lock acquire stalled {:.3f}s", dtl);
     }
 
     switch (gpu::FromAvPixelFormat(frame.RawFrame()->format)) {

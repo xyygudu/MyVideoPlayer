@@ -44,12 +44,16 @@ class GpuDevice {
     /// single-threaded (same model as the ffmpeg CLI).
     virtual void* CopyForPresentation(const AVFrame* hw_frame) = 0;
 
-    /// Mutex serializing the device's single immediate context, which is
-    /// shared by FFmpeg decode/copy (decode thread) and the renderer backend
-    /// (render thread) — the D3D11 device hands out ONE immediate context to
-    /// every caller, so all command submission must be mutually exclusive
-    /// (mpv's d3d11 ctx_lock model). Nodes take it around FFmpeg codec calls;
-    /// the renderer takes it around draw operations.
+    /// Mutex serializing the device's single immediate command context.
+    /// The backend device hands out ONE immediate context to every caller
+    /// (D3D11 GetImmediateContext is a per-device singleton), so all command
+    /// submission must be mutually exclusive across threads — decode submit +
+    /// CopyForPresentation on the decode thread, and draw submission on the
+    /// render thread (mpv's d3d11 ctx_lock model).
+    ///
+    /// Ownership: this mutex belongs to the device, which the graph owns. The
+    /// renderer holds a non-owning pointer to it (SetDeviceContextMutex) and
+    /// must clear it before the graph (and device) is destroyed.
     virtual std::mutex& DeviceContextMutex() = 0;
 
     /// Wrap an externally owned native device (e.g. the ID3D11Device behind

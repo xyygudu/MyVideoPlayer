@@ -2,6 +2,7 @@
 #define MVP_GRAPH_MEDIA_BUFFER_H_
 
 #include <cstdint>
+#include <string>
 #include <variant>
 
 #include "ffmpeg_utils.h"
@@ -91,6 +92,29 @@ class MediaBuffer {
     const AVPacketPtr& AsPacket() const;
     MediaFrame& AsFrame();
     const MediaFrame& AsFrame() const;
+
+    // --- Debug helpers ---
+    /// Dump the frame payload to a file for debugging.
+    ///
+    /// Works for both software (CPU) and hardware (GPU) frames: a hardware
+    /// frame is first copied into system memory via av_hwframe_transfer_data,
+    /// so callers can inspect any frame regardless of its domain.
+    ///
+    /// Output format is chosen from the file extension:
+    ///   - ".png"           : PNG image
+    ///   - ".bmp"           : BMP image
+    ///   - ".jpg" / ".jpeg" : JPEG image
+    ///   - ".ppm" / ".pnm"  : RGB24 P6 PPM image
+    ///   - other            : raw dump preserving the native layout (video
+    ///                        planes, or interleaved/planar PCM for audio)
+    ///
+    /// Returns false (and logs) when the buffer holds no frame payload, the
+    /// frame is invalid, or the conversion / file write fails.
+    ///
+    /// Thread caveat: transferring a hardware frame reads back from the GPU
+    /// device, which shares one immediate command context. Call this from the
+    /// decode or render thread (or while paused), not concurrently with them.
+    bool SaveFrame(const std::string& path) const;
 
     // --- Metadata ---
     Timestamp timestamp() const { return timestamp_; }

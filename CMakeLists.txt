@@ -17,6 +17,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # MSVC: propagate INCLUDE and LIB env vars when building outside Developer Command Prompt
 if(MSVC)
+  # C4819: project sources are UTF-8 without BOM; on a non-UTF-8 system codepage
+  # MSVC would otherwise read them as the system charset and warn about
+  # "characters that cannot be represented". Treat source as UTF-8.
+  add_compile_options(/utf-8)
   if(DEFINED ENV{INCLUDE})
     string(REGEX REPLACE "[;]+" ";" _inc_list "$ENV{INCLUDE}")
     foreach(_inc IN LISTS _inc_list)

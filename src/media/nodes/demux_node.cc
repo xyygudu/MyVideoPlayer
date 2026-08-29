@@ -253,6 +253,9 @@ void DemuxNode::RoutePacket(AVPacketPtr pkt, OutputPort* video_port,
     if (pkt->flags & AV_PKT_FLAG_KEY) {
         flags = flags | BufferFlags::kKeyFrame;
     }
+    SPDLOG_DEBUG("DemuxNode: route stream={} -> {} serial={} pts={:.3f}",
+                 stream_index, target == video_port ? "video" : "audio",
+                 local_serial_, ts.pts);
     MediaBuffer buf(std::move(pkt), ts, flags);
     buf.set_serial(local_serial_);
     target->Push(std::move(buf));
@@ -278,6 +281,8 @@ void DemuxNode::DemuxLoop() {
 
         AVPacketPtr pkt;
         int ret = av_read_frame(format_ctx_, pkt.get());
+        SPDLOG_DEBUG("DemuxNode: av_read_frame ret={} stream={} serial={}",
+                     ret, pkt.get() ? pkt->stream_index : -1, local_serial_);
 
         if (ret < 0) {
             if (ret == AVERROR_EOF || avio_feof(format_ctx_->pb)) {
