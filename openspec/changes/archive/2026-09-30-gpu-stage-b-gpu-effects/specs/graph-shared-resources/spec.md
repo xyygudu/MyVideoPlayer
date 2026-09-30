@@ -1,8 +1,5 @@
-## Purpose
+## MODIFIED Requirements
 
-Defines the graph-level shared resource mechanism, allowing nodes to access
-shared resources (HW device, clock) via the MediaGraph.
-## Requirements
 ### Requirement: MediaGraph provides shared HW device resource
 MediaGraph SHALL 提供 `SetGpuDevice(std::shared_ptr<gpu::GpuDevice>)` 和 `GpuDevice()` 接口，与 Clock 设计平行。GPU 设备作为管线级共享资源，可被解码、编码、特效与采集等多个节点共享。graph 与提供设备的一方（渲染器）共享所有权；`GpuDevice()` 返回非拥有指针，在 graph 生命期内有效。设备在管线构建期由编排器注入，注入只提供能力，不决定任何节点的格式选择。
 
@@ -17,11 +14,3 @@ MediaGraph SHALL 提供 `SetGpuDevice(std::shared_ptr<gpu::GpuDevice>)` 和 `Gpu
 #### Scenario: Multiple nodes share same GPU device
 - **WHEN** DecoderNode 与特效节点都需要 GPU 设备
 - **THEN** 两者从同一 `graph->GpuDevice()` 获取同一设备引用
-
-### Requirement: Node accesses graph via SetGraph pattern
-需要 graph 级资源的节点 SHALL 通过 `SetGraph(MediaGraph*)` 注入 graph 指针（非拥有），在 Prepare/Start 中查询共享资源。
-
-#### Scenario: DecoderNode receives graph reference
-- **WHEN** MediaPlayer 创建 DecoderNode 后调用 SetGraph(graph)
-- **THEN** DecoderNode 持有 graph 非拥有指针，Prepare 中可查询 HWDevice
-

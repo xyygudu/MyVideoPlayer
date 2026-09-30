@@ -5,9 +5,7 @@ semantics, the demux thread and Demuxer stream accessors, and how
 DemuxNode / DecoderNode / AudioSinkNode configure themselves from port
 formats and graph resources (including hardware decode via the graph GPU
 device) and respond to seek.
-
 ## Requirements
-
 ### Requirement: FrameQueue supports serial
 FrameQueue SHALL 为模板类 `FrameQueue<T>`，管线中 SHALL 实例化为 `FrameQueue<MediaFrame>`。
 
@@ -126,17 +124,6 @@ DecoderNode SHALL 移除 SetHWAccel 方法。帧域决策 SHALL 在 `Negotiate()
 - **WHEN** 带硬件打开 `avcodec_open2` 失败
 - **THEN** 释放该上下文,重试软件打开;再次失败才置 NodeState::kError
 
-### Requirement: 硬件帧在解码线程完成呈现准备
-DecoderNode SHALL 在解码线程(设备命令上下文的唯一使用者)完成硬件帧的呈现准备:调用 `GpuDevice::CopyForPresentation` 生成呈现纹理并挂到 MediaFrame;生成失败时 SHALL 在同一线程 `av_hwframe_transfer_data` 下载为软件帧后推送。解码线程之外的任何节点 SHALL NOT 对硬件帧做设备操作或下载转换。
-
-#### Scenario: 硬件帧携带呈现纹理
-- **WHEN** CopyForPresentation 成功
-- **THEN** 推送的 MediaFrame 携带非空呈现纹理,渲染线程只做绑定与呈现
-
-#### Scenario: 下载回退保持单线程契约
-- **WHEN** CopyForPresentation 返回 nullptr 且下载成功
-- **THEN** 推送软件帧(实际格式经 MaybeAnnounceFormat 校正),渲染走软件上传路径;下载失败则丢帧告警
-
 ### Requirement: AudioSinkNode reads params from port format
 AudioSinkNode SHALL 移除 SetStream 方法和 stream_ 成员，从 input_port_->Format() 读取 sample_rate 和 channels。
 
@@ -168,3 +155,26 @@ DemuxNode/DecoderNode/AudioSinkNode SHALL 覆写 OnCommand 响应 kSeek：DemuxN
 #### Scenario: 节点自主响应 seek
 - **WHEN** 各节点收到 OnCommand({kSeek, pos})
 - **THEN** DemuxNode RequestSeek、DecoderNode SetDropUntilPts、AudioSinkNode FlushSdlBuffer
+
+### Requirement: 硬件解码帧池由解码器按设备细化
+DecoderNode 带硬件打开时 SHALL 设置 `extra_hw_frames`,为下游在途帧(链路深度 + sink 当前帧)预留解码 surface。`get_format` 选中设备硬件格式时 SHALL 自行创建帧池:`avcodec_get_hw_frames_parameters` 生成参数、补齐 FFmpeg 自动路径保证的工作 surface 数、调用 `GpuDevice::RefineDecoderFrames`、`av_hwframe_ctx_init`;任一步失败 SHALL 记录日志并退回 FFmpeg 默认帧池,不影响解码。解码器 SHALL 只依赖 `GpuDevice` 接口,不出现平台类型。
+
+#### Scenario: 细化后的帧池可被 GPU pass 读取
+- **WHEN** 硬件解码打开且设备支持对解码格式采样
+- **THEN** 解码帧所在纹理带着色器资源绑定,GPU pass 直接读取其切片
+
+#### Scenario: 细化失败回退默认帧池
+- **WHEN** 自建帧池的 `av_hwframe_ctx_init` 失败
+- **THEN** 记录告警,FFmpeg 以默认帧池继续硬件解码
+
+### Requirement: 解码器不持有设备锁
+DecoderNode SHALL NOT 在应用层为 `avcodec_send_packet` / `avcodec_receive_frame` / `avcodec_flush_buffers` 加设备锁:FFmpeg 通过交给它的递归锁在内部保护其命令上下文序列。DecoderNode SHALL 直接推送 FFmpeg 输出的原生硬件帧,不做呈现准备或下载。
+
+#### Scenario: 解码不阻塞渲染
+- **WHEN** 4K 关键帧在解码线程解析码流
+- **THEN** 渲染线程只在 FFmpeg 真正提交 D3D11 命令的短区间内等待设备锁
+
+#### Scenario: 推送原生硬件帧
+- **WHEN** 解码出 D3D11 帧
+- **THEN** 推送的 MediaFrame 即 FFmpeg 输出帧(数组纹理切片),呈现与下载由下游决定
+

@@ -1,12 +1,5 @@
-## Purpose
+## MODIFIED Requirements
 
-Defines the graph-level GPU device abstraction: a platform-agnostic interface
-wrapping FFmpeg's hardware device context, created by the pipeline builder
-from the renderer backend's native device, injected into MediaGraph as a
-shared resource, and consumed by nodes during negotiation (GStreamer-context
-style). Also owns the single bidirectional mapping between FFmpeg
-AVPixelFormat and the project PixelFormat enum.
-## Requirements
 ### Requirement: GpuDevice 接口与职责边界
 系统 SHALL 提供 `mvp::gpu::GpuDevice` 抽象接口,职责限于设备生命周期、能力查询,以及创建后端专属对象的工厂:
 
@@ -72,27 +65,7 @@ GpuDevice SHALL 由渲染器与 graph 以 `shared_ptr` 共享持有,最后一个
 - **WHEN** 某硬件帧在 GpuDevice 包装对象销毁后才被释放
 - **THEN** 帧仍持有 FFmpeg 设备上下文引用,锁与设备有效,释放不崩溃
 
-### Requirement: 硬件解码能力探测
-`SupportsDecoder` SHALL 通过 `avcodec_get_hw_config` 遍历该编码器的硬件配置，当存在 `AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX` 且 `device_type` 与本后端设备类型一致的配置时返回 true；遍历尽仍无匹配返回 false。
-
-#### Scenario: 支持硬解的编码器
-- **WHEN** 编码器(如 h264)声明了 D3D11VA 硬件配置
-- **THEN** D3D11 后端实例的 `SupportsDecoder(codec)` 返回 true
-
-#### Scenario: 不支持硬解的编码器
-- **WHEN** 编码器没有本设备类型的硬件配置
-- **THEN** 返回 false,调用方协商软格式
-
-### Requirement: 像素格式映射唯一收口
-系统 SHALL 提供 `gpu::FromAvPixelFormat` / `gpu::ToAvPixelFormat` 作为 FFmpeg AVPixelFormat 与项目 PixelFormat 之间的双向映射唯一实现点。未建模的格式 SHALL 映射为 `PixelFormat::kUnknown` / `AV_PIX_FMT_NONE`。其他模块 SHALL NOT 各自维护映射表。
-
-#### Scenario: 硬件帧域映射
-- **WHEN** `FromAvPixelFormat(AV_PIX_FMT_D3D11)`
-- **THEN** 返回 `PixelFormat::kD3D11`;`ToAvPixelFormat(PixelFormat::kD3D11)` 返回 `AV_PIX_FMT_D3D11`
-
-#### Scenario: 未建模格式
-- **WHEN** 输入格式不在映射表内
-- **THEN** 返回 kUnknown / AV_PIX_FMT_NONE,调用方据此走回退分支
+## ADDED Requirements
 
 ### Requirement: 解码帧池细化
 `RefineDecoderFrames(AVHWFramesContext*)` SHALL 在解码帧池初始化前由解码器调用,由后端按设备能力调整帧池参数。D3D11 后端 SHALL 在设备支持对该 sw_format 做着色器采样时为 `BindFlags` 加上 `D3D11_BIND_SHADER_RESOURCE`,使 GPU pass 能直接读取解码数组纹理的切片;不支持时 SHALL 不修改。
@@ -146,3 +119,8 @@ GPU pass 与其他应用侧 GPU 代码 SHALL 在执行前保存其将修改的�
 - **WHEN** 帧来自解码器(数组纹理切片)
 - **THEN** 拷贝可见区域到呈现器自有纹理并返回之;下一帧复用同一纹理
 
+## REMOVED Requirements
+
+### Requirement: 呈现纹理生成服务
+**Reason**: 呈现关注点错位到设备并由解码器调用;8 张环形纹理依赖"池大小 > 在途帧数"的隐式不变量,分辨率变化时在途指针悬空。
+**Migration**: 呈现由渲染器持有的 `FramePresenter` 在渲染线程完成;GPU pass 输出为 FFmpeg 帧池分配的独立纹理,可直接绑定。

@@ -1,8 +1,5 @@
-## Purpose
+## MODIFIED Requirements
 
-Defines the VideoRenderer's rendering interface, which consumes MediaFrame
-directly (no intermediate VideoFrame wrapper).
-## Requirements
 ### Requirement: Render 接口使用 MediaFrame
 VideoRenderer::Render SHALL 接受 `const MediaFrame&` 参数。
 
@@ -26,19 +23,6 @@ Render SHALL 通过 `frame.RawFrame()` 获取底层 `AVFrame*` 以访问帧数�
 - **WHEN** 硬件帧的 sw_format 非 NV12/P010
 - **THEN** 渲染器在持设备锁时下载为软件帧并按软件路径呈现
 
-### Requirement: 渲染器状态仅由渲染线程修改
-`VideoRenderer` 的窗口尺寸等渲染状态 SHALL 仅被持有渲染线程的节点在该线程上修改，SHALL NOT 被 UI 线程或其他控制线程直接写入。
-
-理由：这些字段在渲染时被读取。跨线程无同步读写是数据竞争；把修改点收敛到渲染线程即可消除竞态，而无需将每个字段原子化 —— 原子化只是掩盖症状，不改变"谁有权修改"这一职责问题。
-
-#### Scenario: 尺寸变化经由渲染线程落地
-- **WHEN** 窗口被缩放
-- **THEN** 新尺寸经命令传递到 VideoSinkNode，由其渲染线程调用 `Resize`，UI 线程不触碰 VideoRenderer
-
-#### Scenario: 无需原子成员即无竞态
-- **WHEN** 检查 VideoRenderer 的尺寸字段
-- **THEN** 它们只有一个写者（渲染线程），普通标量类型即满足线程安全
-
 ### Requirement: 渲染器后端能力声明
 VideoRenderer SHALL 在 Open() 时探测 SDL 渲染器后端；后端提供原生设备时 SHALL 调用 `GpuDevice::WrapExternal` 包装并以 `shared_ptr` 持有，同时创建 `FramePresenter`。渲染器 SHALL 暴露两项只读能力：`BindableHardwareDomain()`（设备包装成功时为其帧域，否则 kUnknown）与 `SharedGpuDevice()`（持有的设备，无则 nullptr）。二者 SHALL 仅由 Open/Close 修改，渲染线程与协商线程只读。Close() SHALL 先释放呈现器与设备引用，再销毁 SDL 渲染器。
 
@@ -55,4 +39,3 @@ VideoRenderer SHALL 在 Open() 时探测 SDL 渲染器后端；后端提供原�
 #### Scenario: 非 D3D11 后端
 - **WHEN** SDL 渲染器后端非 D3D11 或设备包装失败
 - **THEN** 两查询分别返回 kUnknown 与 nullptr，VideoSinkNode 据此拒绝硬件域
-

@@ -1,47 +1,4 @@
-## Purpose
-
-Defines the `IEffectNode` interface and the concrete real-time-tunable video
-effect nodes (`TransformEffectNode`, `ColorEffectNode`) that sit between
-`DecoderNode` and the video sink, wired in by `WireVideoEffects`
-(see playback-graph-builder). These are hand-written CPU implementations
-distinct from the libavfilter-based `AVFilterNode` (see graph-transform-nodes),
-chosen because their parameters need per-parameter reflection (name/type/
-range/current value) for real-time UI binding rather than a single opaque
-filter-graph string.
-## Requirements
-### Requirement: IEffectNode 定义类型化参数反射接口
-系统 SHALL 定义 `EffectParamType` 枚举（`kFloat`/`kInt`/`kBool`/`kEnum`），标识参数应使用的控件类型。系统 SHALL 定义 `EffectParamValue` 为 `std::variant<float, int, bool>`。系统 SHALL 定义 `EffectParam` 结构体，包含：
-- `id`（内部标识）、`display_name`（UI 展示名）、`type`（EffectParamType）
-- `value`（当前值快照）、`default_value`
-- `min_value`、`max_value`（对 `kBool` 无意义）
-- `enum_labels`（`std::vector<std::string>`，仅 `type == kEnum` 时使用，`value` 存整数索引）
-
-系统 SHALL 定义 `IEffectNode` 接口，继承 `INode`，作为所有可实时调参的特效节点的公共基类。IEffectNode SHALL 声明：
-- `std::vector<EffectParam> Params() const`：返回该节点全部参数的有序快照（含当前值）。
-- `void SetParam(const std::string& id, EffectParamValue value)`：按 id 设置参数值，SHALL 线程安全（可被 UI 线程调用，同时被节点自身处理线程读取）。若传入的 variant 类型与该参数声明的 `EffectParamType` 不匹配，SHALL 记录 spdlog 警告并忽略该次设置。
-- `bool IsEnabled() const` / `void SetEnabled(bool enabled)`：控制该节点是否生效，线程安全。禁用时 `Process()` SHALL 直接透传输入 buffer，不做任何计算。
-
-IEffectNode 的 `Type()` SHALL 返回 `NodeType::kTransform`。IEffectNode SHALL 不强制 `ThreadingMode`，具体子类可选择 `kPassive`（默认，与上游节点同线程同步执行）或 `kActive`（拥有独立线程，通过 `MediaGraph`/`Port` 既有机制自动获得前后 `Link`），复用现有调度机制，不需要新增队列或线程管理代码。
-
-#### Scenario: UI 通过参数类型选择控件
-- **WHEN** 调用某 IEffectNode 的 `Params()`
-- **THEN** 返回的每个 `EffectParam` 包含 `type`，UI 据此选择控件：`kFloat` 用连续滑块、`kInt` 用步进控件、`kBool` 用勾选框、`kEnum` 用下拉框（选项来自 `enum_labels`）
-
-#### Scenario: 跨线程设置参数立即对下一帧生效
-- **WHEN** UI 线程调用 `SetParam("brightness", 0.3f)`，此时节点处理线程正在处理某一帧
-- **THEN** 当前帧不受影响（读取的是设置前或设置后的有效值，不发生数据竞争），下一帧处理时读取到新值 0.3f
-
-#### Scenario: 未知参数 id 被安全忽略
-- **WHEN** 调用 `SetParam("nonexistent", 1.0f)`
-- **THEN** 节点不崩溃，SHALL 通过 spdlog 记录一条警告日志，参数状态不变
-
-#### Scenario: 参数类型不匹配被安全忽略
-- **WHEN** 对声明为 `kBool` 的参数（如 `flip_h`）调用 `SetParam("flip_h", 3.5f)`（传入 float 而非 bool）
-- **THEN** 节点记录 spdlog 警告并忽略该次设置，参数保持原值不变
-
-#### Scenario: 禁用节点后数据直通
-- **WHEN** 调用 `SetEnabled(false)`
-- **THEN** 后续 `Process()` 调用直接将输入 buffer 原样传递给下游，不执行任何像素运算
+## MODIFIED Requirements
 
 ### Requirement: TransformEffectNode 合并几何变换，支持任意角度旋转
 系统 SHALL 定义 `TransformEffectNode`（实现 IEffectNode，`ThreadingMode::kPassive`），将旋转、水平翻转、垂直翻转、缩放、平移合并为一次像素重映射处理，避免多趟遍历同一帧。
@@ -120,4 +77,3 @@ ColorEffectNode SHALL 提供参数（均为 `kFloat`）：`brightness`（默认 
 #### Scenario: GPU 不可用时回退下载
 - **WHEN** 输入为硬件帧但图中无 GPU 设备或设备不支持 pass
 - **THEN** 节点下载为软件帧后按 CPU 路径处理，输出软件帧
-

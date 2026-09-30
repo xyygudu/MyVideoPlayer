@@ -2,9 +2,7 @@
 
 Defines the MediaFrame class, MediaType enum, and associated PixelFormat/
 SampleFormat enums used throughout the media pipeline.
-
 ## Requirements
-
 ### Requirement: MediaFrame 作为管线传输的帧类型
 `MediaFrame` SHALL 是**纯数据载体**：持有 `AVFrame` 的所有权（RAII、move-only），并提供像素/采样访问（`width` / `height` / `format` / `PlaneData` / `PlaneLinesize` / `RawFrame` / `IsValid` / `MakeWritable`）。作为 `MediaBuffer` 的 variant 成员之一在 Link 中传输。
 
@@ -67,13 +65,3 @@ MediaFrame SHALL 提供 `IsHardware()`(帧数据在 GPU 内存时为真)与 `HwS
 - **WHEN** av_hwframe_transfer_data 失败
 - **THEN** TransferToSoftware 返回 IsValid() 为假的 MediaFrame,调用方保持原帧不变
 
-### Requirement: 硬件帧携带呈现纹理
-MediaFrame SHALL 提供 `HwPresentationTexture()` / `SetHwPresentationTexture(void*)` 存取非拥有的呈现纹理指针(GPU 设备纹理池所有,帧生命期内有效,默认 nullptr)。移动构造/赋值 SHALL 携带该指针并使源置空,拷贝语义(禁用)不受影响。
-
-#### Scenario: 呈现纹理随帧运输
-- **WHEN** 解码器把 CopyForPresentation 的返回指针挂到 MediaFrame 后推送
-- **THEN** 帧经链路/直通节点 move 运输后,HwPresentationTexture() 仍返回同一指针,渲染器据此绑定呈现
-
-#### Scenario: 软件帧无呈现纹理
-- **WHEN** 帧为软件帧
-- **THEN** HwPresentationTexture() 返回 nullptr
