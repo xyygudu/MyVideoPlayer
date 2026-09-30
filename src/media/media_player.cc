@@ -163,6 +163,7 @@ void MediaPlayer::Impl::Close() {
 void MediaPlayer::Impl::Play() {
     if (state_ == PlaybackState::kReady || state_ == PlaybackState::kPaused) {
         if (state_ == PlaybackState::kPaused) {
+            SPDLOG_INFO("MediaPlayer: resume");
             graph_->SetPaused(false);
             state_ = PlaybackState::kPlaying;
             return;
@@ -185,6 +186,7 @@ void MediaPlayer::Impl::Play() {
 void MediaPlayer::Impl::Pause() {
     if (state_ != PlaybackState::kPlaying) return;
 
+    SPDLOG_INFO("MediaPlayer: pause");
     graph_->SetPaused(true);
     state_ = PlaybackState::kPaused;
 }
@@ -192,6 +194,8 @@ void MediaPlayer::Impl::Pause() {
 void MediaPlayer::Impl::Seek(double position_seconds) {
     if (!graph_ || state_ == PlaybackState::kIdle) return;
 
+    SPDLOG_INFO("MediaPlayer: seek to {:.3f}s (state={})", position_seconds,
+                static_cast<int>(state_));
     // Graph coordinates the seek: flush all links, broadcast a seek command
     // so each node resets its own state (demux repositions, decoder drops to
     // target, audio sink clears its buffer), then reposition every clock.
