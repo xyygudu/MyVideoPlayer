@@ -15,9 +15,6 @@ namespace mvp::gpu {
 /// D3D11VA backend: the only place in the codebase that mentions D3D11.
 class D3D11GpuDevice final : public GpuDevice {
   public:
-    /// Wrap an externally owned ID3D11Device (SDL3 renderer backend).
-    /// FFmpeg takes ownership of the interface, so the wrapper must be
-    /// destroyed before the external owner releases its own reference.
     static std::unique_ptr<GpuDevice> Wrap(void* native_device);
 
     ~D3D11GpuDevice() override;

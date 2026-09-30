@@ -274,7 +274,7 @@ MediaFrame EncoderNode::ConvertVideoFrame(const MediaFrame& src) {
 AVFramePtr EncoderNode::ConvertAudioFrame(const MediaFrame& src) {
     AVFrame* src_frame = src.RawFrame();
     if (!swr_ctx_) {
-        AVChannelLayout out_layout;
+        AVChannelLayout out_layout{};
         av_channel_layout_copy(&out_layout, &codec_ctx_->ch_layout);
         int ret = swr_alloc_set_opts2(
             &swr_ctx_, &out_layout, codec_ctx_->sample_fmt, codec_ctx_->sample_rate,

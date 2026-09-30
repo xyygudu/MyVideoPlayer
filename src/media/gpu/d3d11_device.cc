@@ -57,6 +57,7 @@ std::unique_ptr<GpuDevice> D3D11GpuDevice::Wrap(void* native_device) {
     auto* device_ctx = reinterpret_cast<AVHWDeviceContext*>(ref->data);
     auto* hwctx = reinterpret_cast<AVD3D11VADeviceContext*>(device_ctx->hwctx);
     hwctx->device = static_cast<ID3D11Device*>(native_device);
+    hwctx->device->AddRef();
     if (av_hwdevice_ctx_init(ref) < 0) {
         av_buffer_unref(&ref);
         SPDLOG_WARN("GpuDevice(D3D11): wrapping the external device failed");

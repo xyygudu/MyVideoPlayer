@@ -199,7 +199,7 @@ void AudioSinkNode::ConvertAndFeed(AVFrame* frame) {
 
     // Lazy-init resampler (owned by this audio thread)
     if (!swr_ctx_) {
-        AVChannelLayout out_layout, in_layout;
+        AVChannelLayout out_layout{}, in_layout{};
         av_channel_layout_default(&out_layout, channels_);
 
         // 检查输入布局有效性，无效则降级
