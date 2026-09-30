@@ -103,27 +103,31 @@ inline bool IsPlanarYuvPixelFormat(int av_pix_fmt) {
 // `width` counts *component pairs* (i.e. matches the U-only/V-only sample
 // count per row, not raw bytes) so callers can address individual U/V
 // samples with a component stride of 2, offset 0 (U) or 1 (V).
+// `row_bytes` is the visible byte count per row, for byte-wise operations.
 struct ChromaPlaneLayout {
     bool interleaved{false};
     int width{0};
     int height{0};
+    int row_bytes{0};
 };
 
-// Returns {false, 0, 0} for formats IsPlanarYuvPixelFormat() rejects —
+// Returns {false, 0, 0, 0} for formats IsPlanarYuvPixelFormat() rejects —
 // callers should treat that as "no chroma plane to process".
 inline ChromaPlaneLayout ComputeChromaPlaneLayout(int av_pix_fmt, int luma_width,
                                                   int luma_height) {
+    const int half_w = (luma_width + 1) / 2;
+    const int half_h = (luma_height + 1) / 2;
     switch (av_pix_fmt) {
         case AV_PIX_FMT_YUV420P:
-            return {false, (luma_width + 1) / 2, (luma_height + 1) / 2};
+            return {false, half_w, half_h, half_w};
         case AV_PIX_FMT_YUV422P:
-            return {false, (luma_width + 1) / 2, luma_height};
+            return {false, half_w, luma_height, half_w};
         case AV_PIX_FMT_YUV444P:
-            return {false, luma_width, luma_height};
+            return {false, luma_width, luma_height, luma_width};
         case AV_PIX_FMT_NV12:
-            return {true, (luma_width + 1) / 2, (luma_height + 1) / 2};
+            return {true, half_w, half_h, half_w * 2};
         default:
-            return {false, 0, 0};
+            return {false, 0, 0, 0};
     }
 }
 

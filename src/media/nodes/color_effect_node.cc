@@ -14,6 +14,23 @@ extern "C" {
 
 namespace mvp::graph {
 
+namespace {
+
+void ApplyColorLut(MediaFrame& mf, float brightness, float contrast, float saturation) {
+    auto lut = pixel_ops::BuildColorLut(brightness, contrast, saturation);
+    pixel_ops::ApplyLut(mf.PlaneData(0), mf.PlaneLinesize(0), mf.width(), mf.height(), lut.y);
+
+    // U and V share one LUT, so an interleaved plane is processed as whole rows of bytes.
+    ChromaPlaneLayout layout = ComputeChromaPlaneLayout(mf.format(), mf.width(), mf.height());
+    int plane_count = layout.interleaved ? 1 : 2;
+    for (int p = 0; p < plane_count; ++p) {
+        pixel_ops::ApplyLut(mf.PlaneData(1 + p), mf.PlaneLinesize(1 + p),
+                            layout.row_bytes, layout.height, lut.uv);
+    }
+}
+
+}  // namespace
+
 ColorEffectNode::ColorEffectNode() {
     input_port_ = std::make_unique<InputPort>(this);
     output_port_ = std::make_unique<OutputPort>(this);
@@ -114,18 +131,8 @@ void ColorEffectNode::Process(MediaBuffer input, OutputCallback emit) {
         return;
     }
 
-    auto lut = pixel_ops::BuildColorLut(b, c, s);
-    pixel_ops::ApplyLut(mf.PlaneData(0), mf.PlaneLinesize(0), mf.width(), mf.height(), lut.y);
-
-    ChromaPlaneLayout layout = ComputeChromaPlaneLayout(mf.format(), mf.width(), mf.height());
-    int plane_count = layout.interleaved ? 1 : 2;
-    for (int p = 0; p < plane_count; ++p) {
-        pixel_ops::ApplyLut(mf.PlaneData(1 + p), mf.PlaneLinesize(1 + p),
-                            layout.width, layout.height, lut.uv);
-    }
-
-    MediaBuffer out(std::move(mf), input.timestamp(), input.flags());
-    emit(std::move(out));
+    ApplyColorLut(mf, b, c, s);
+    emit(MediaBuffer(std::move(mf), input.timestamp(), input.flags()));
 }
 
 }  // namespace mvp::graph
