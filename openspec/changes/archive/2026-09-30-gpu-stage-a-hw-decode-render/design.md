@@ -35,11 +35,32 @@ CPU 特效只能处理系统内存平面。启用的特效遇到硬件帧时,在
 - **呈现纹理在解码线程生成**:`GpuDevice::CopyForPresentation(hw_frame)` 用 `CopySubresourceRegion` 把解码器数组纹理的当前子资源 blit 到设备拥有的独立纹理池(环形 8 个,D3D11_BIND_SHADER_RESOURCE)。同一命令上下文按提交顺序执行,blit 必然发生在解码写完之后——不需要额外 fence(mpv d3d11 interop 同款论证)。
 - **为什么必须复制**:D3D11VA 解码器输出纹理数组(FFmpeg 头文件明示 "decoding requires a single array texture",`data[1]` 是子资源索引),SDL3 包装外部纹理后要建非数组 SRV,数组纹理必然失败。
 - **下载回退也在解码线程**:CopyForPresentation 失败(不支持布局等)时,DecoderNode 直接 `av_hwframe_transfer_data` 下载为软件帧再推——与 ffmpeg CLI 单线程模型一致,已验证可行。
-- **渲染线程只碰 SDL 自己的上下文**:SDL 创建自己的 immediate context,与 FFmpeg 的设备上下文互不干扰;设备级操作(纹理引用计数、SRV 创建)线程安全。
+- **渲染线程与解码线程共享同一 immediate context**:D3D11 每个设备只有一个 immediate context,SDL 与 FFmpeg 拿到的是同一个。多调用序列(SDL 绘制+Present、FFmpeg 解码提交+blit)由 `GpuDevice::DeviceContextMutex()` 互斥(mpv ctx_lock 同款)。
+- **共享设备必须线程安全**(实测根因,见 §5.1):设备级操作(纹理 Release、SRV 创建)只在非单线程设备上是线程安全的。
 - **纹理指针运输**:MediaFrame 增加非拥有 `HwPresentationTexture()` 指针(池归设备所有),move 语义携带。环形池 8 > 在途帧数(链路 3 + current_frame 1),纹理被复用前所有引用早已呈现完毕——与解码器 surface 池同款余量论证。
 - **析构顺序**:`~MediaGraph` 显式先清节点再释放设备,避免池纹理先于节点保留帧销毁。
 
 Open() 请求 direct3d11 驱动,失败回退任意后端;探测 `SDL_PROP_RENDERER_D3D11_DEVICE_POINTER` 决定绑定能力,写入 `bindable_domain_`。RenderHWFrame 绑定 `HwPresentationTexture()` 逐帧呈现(NV12/P010 按 HwSwFormat 选格式);绑定失败或缺失纹理时丢帧并告警——绝不在渲染线程转换(会破坏单线程契约)。
+
+### 5.1 共享设备的线程安全(seek 冻结的真实根因)
+
+**现象**:4K 硬解播放中 seek,画面停在旧帧、声音约 1 秒后消失,关闭时 join 挂起。排查中曾先后误判为「skip_frame 导致 surface 泄漏」与「surface 池耗尽」,均被数据否定(surface 索引统计:全程只用到 20 个中的 9 个)。
+
+**调用栈证据**:解码线程 `avcodec_send_packet → d3d11.dll → nvwgf2umx.dll → 等待`;渲染线程 `PresentFrame → current_frame_ = move(frame) → av_frame_free → avutil → d3d11.dll → nvwgf2umx.dll → 等待`。两线程在驱动内部互等。
+
+**因果链**:
+1. SDL3 默认以 `D3D11_CREATE_DEVICE_SINGLETHREADED` 创建设备(`SDL_HINT_RENDER_DIRECT3D_THREADSAFE` 默认 0),此时连 `ID3D10Multithread` 都拿不到,设备级调用也不是线程安全的。
+2. h264 解码器 flush 后 `context_initialized=0`,下一个关键帧重走 `get_format`:FFmpeg 拆掉旧 hwaccel、放弃旧 hw_frames_ctx,新建解码器与 20 个 surface 的纹理数组(日志 `hw frames context replaced` 每次 seek 出现一次)。
+3. 旧纹理数组随最后一个引用它的 AVFrame 释放而销毁——那是 VideoSink 的 `current_frame_`,在渲染线程、DeviceContextMutex 之外 Release;同一时刻解码线程正在同一设备上做 D3D11 视频解码调用 → 驱动死锁。
+
+**决策**:`VideoRenderer::Open` 设置 `SDL_HINT_RENDER_DIRECT3D_THREADSAFE=1`;`D3D11GpuDevice::Wrap` 对被包装设备 `SetMultithreadProtected(TRUE)`,拿不到 `ID3D10Multithread`(单线程设备)时拒绝包装、整条管线回软解。应用层互斥锁无法覆盖「引用计数归零时在任意线程释放」的资源,只能交给 D3D11 运行时保护。
+硬解追赶只按 PTS 阈值丢弃已完整解码的帧。原先「NONREF 导致 surface 泄漏、send_packet 永久阻塞」的论断已被 §5.1 否定(冻结根因是单线程设备),NONREF 与 D3D11VA 的组合尚未验证,作为 seek 提速候选记录在 docs/improvements/seek-performance.md
+| | 设备来源 | 多线程保护 | 与解码共享的锁 |
+|---|---|---|---|
+| FFmpeg 自建设备 | `d3d11va_device_create` | 创建时开启 | 内部 `lock/unlock`(递归) |
+| mpv d3d11 hwdec | 渲染器设备 | `SetMultithreadProtected(TRUE)` | FFmpeg 设备锁 |
+| VLC d3d11 | 自建共享设备 | 创建时开启 | `context_mutex` 交给 FFmpeg |
+| 本项目 | SDL 渲染器设备 | THREADSAFE hint + 包装时开启 | 应用层 DeviceContextMutex(粒度待收窄,见 docs/improvements/sink-threading-and-render.md) |
 
 ## 6. 回退矩阵(每处均有日志)
 

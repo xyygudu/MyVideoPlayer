@@ -1,7 +1,23 @@
 ## MODIFIED Requirements
 
 ### Requirement: PixelFormat 和 SampleFormat 枚举
+系统 SHALL 在 media_frame.h 中定义 `PixelFormat` 和 `SampleFormat` 枚举，供 media_format.h（VideoFormat/AudioFormat/FormatCaps）和 decoder_node.cc 使用。
+
 PixelFormat SHALL 区分两类取值:软件格式(kYUV420P/kYUV422P/kYUV444P/kNV12/kRGB32,像素数据在系统内存)与硬件帧域(kD3D11/kCuda/kQsv/kVAAPI/kVideoToolbox,像素数据在 GPU 内存,镜像 FFmpeg 的硬件 AVPixelFormat 变体)。硬件帧域命名的是持有数据的设备,节点对全部硬件域统一按"硬件帧"处理。
+
+```cpp
+enum class PixelFormat {
+    kUnknown = 0, kYUV420P, kYUV422P, kYUV444P, kNV12, kRGB32,
+    kD3D11, kCuda, kQsv, kVAAPI, kVideoToolbox,
+};
+enum class SampleFormat {
+    kUnknown = 0, kS16, kS32, kFloat, kS16Planar, kFloatPlanar,
+};
+```
+
+#### Scenario: media_format.h 引用无额外依赖
+- **WHEN** media_format.h 使用 PixelFormat/SampleFormat
+- **THEN** 仅需 `#include "media_frame.h"`
 
 #### Scenario: 硬件域参与格式协商
 - **WHEN** 端口 caps 的 pixel_formats 包含硬件域枚举值

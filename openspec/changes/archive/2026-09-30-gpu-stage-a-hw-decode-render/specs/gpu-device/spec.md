@@ -29,7 +29,7 @@ AVPixelFormat and the project PixelFormat enum.
 ### Requirement: 设备从渲染器后端提取并共享
 管线编排器 SHALL 通过 `GpuDevice::WrapExternal(native_device)` 包装渲染器后端的原生设备(如 SDL3 D3D11 后端的 ID3D11Device),使解码与呈现共享同一设备。
 
-`WrapExternal` SHALL 返回 nullptr(不抛异常)当:传入空指针、设备上下文分配失败、包装初始化失败。调用方 SHALL 在返回 nullptr 时继续以软件路径构图。
+`WrapExternal` SHALL 返回 nullptr(不抛异常)当:传入空指针、设备不支持多线程保护、设备上下文分配失败、包装初始化失败。调用方 SHALL 在返回 nullptr 时继续以软件路径构图。
 
 #### Scenario: 成功包装
 - **WHEN** 渲染器后端为 D3D11 且 `WrapExternal` 收到其设备指针
@@ -38,6 +38,17 @@ AVPixelFormat and the project PixelFormat enum.
 #### Scenario: 包装失败不阻塞构图
 - **WHEN** `WrapExternal` 因平台无后端返回 nullptr
 - **THEN** 管线继续以软件路径构建,日志记录原因
+
+### Requirement: 共享设备必须线程安全
+被包装的设备会被多个线程使用:解码线程提交解码,渲染线程提交绘制,且硬件帧按引用计数在任意线程(渲染、控制线程)被释放,连带销毁 FFmpeg 重建前的旧纹理数组。`WrapExternal` SHALL 对被包装设备开启运行时多线程保护(D3D11:`ID3D10Multithread::SetMultithreadProtected(TRUE)`);设备以单线程模式创建、无法开启保护时 SHALL 返回 nullptr。
+
+#### Scenario: 开启多线程保护
+- **WHEN** 渲染器以线程安全模式创建了 D3D11 设备
+- **THEN** `WrapExternal` 开启多线程保护并记录原状态,返回有效 GpuDevice
+
+#### Scenario: 单线程设备被拒绝
+- **WHEN** 设备以 `D3D11_CREATE_DEVICE_SINGLETHREADED` 创建
+- **THEN** `WrapExternal` 返回 nullptr 并告警,管线以软件路径构建,不会进入跨线程死锁
 
 ### Requirement: 设备析构顺序契约
 FFmpeg 释放 AVHWDeviceContext 时会释放被包装的设备接口,因此持有设备的 MediaGraph SHALL 先于提供设备的渲染器析构。该契约 SHALL 在注入点以注释固化。

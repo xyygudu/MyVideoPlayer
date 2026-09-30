@@ -26,6 +26,12 @@ Render SHALL 通过 `frame.RawFrame()` 获取底层 `AVFrame*` 以访问帧数�
 ### Requirement: 渲染器后端能力声明
 VideoRenderer SHALL 在 Open() 时探测 SDL 渲染器后端并暴露两项只读能力：`BindableHardwareDomain()`（可零拷贝绑定的硬件帧域，无则 kUnknown）与 `NativeDevice()`（后端原生设备指针，无则 nullptr）。二者 SHALL 仅由 Open/Close 修改，渲染线程与协商线程只读。
 
+由于 `NativeDevice()` 会被解码线程共享，Open() SHALL 在创建渲染器前请求线程安全的后端设备（SDL3：`SDL_HINT_RENDER_DIRECT3D_THREADSAFE=1`；SDL 默认创建单线程 D3D11 设备）。
+
+#### Scenario: 请求线程安全设备
+- **WHEN** VideoRenderer::Open 创建 D3D11 渲染器
+- **THEN** 创建前已设置 THREADSAFE hint，所得设备可开启多线程保护
+
 #### Scenario: D3D11 后端探测
 - **WHEN** SDL 渲染器后端为 D3D11
 - **THEN** `BindableHardwareDomain()` 返回 kD3D11，`NativeDevice()` 返回其 ID3D11Device 指针

@@ -1,4 +1,4 @@
-﻿## Purpose
+## Purpose
 
 Defines the MediaFrame class, MediaType enum, and associated PixelFormat/
 SampleFormat enums used throughout the media pipeline.
@@ -27,12 +27,19 @@ SampleFormat enums used throughout the media pipeline.
 ### Requirement: MediaType 枚举
 系统 SHALL 定义 `enum class MediaType { kUnknown, kAudio, kVideo, kSubtitle }`。
 
+#### Scenario: MediaType supports subtitle extension
+- **WHEN** 未来需要字幕流支持
+- **THEN** 可直接使用 MediaType::kSubtitle，无需修改现有枚举
+
 ### Requirement: PixelFormat 和 SampleFormat 枚举
 系统 SHALL 在 media_frame.h 中定义 `PixelFormat` 和 `SampleFormat` 枚举，供 media_format.h（VideoFormat/AudioFormat/FormatCaps）和 decoder_node.cc 使用。
 
+PixelFormat SHALL 区分两类取值:软件格式(kYUV420P/kYUV422P/kYUV444P/kNV12/kRGB32,像素数据在系统内存)与硬件帧域(kD3D11/kCuda/kQsv/kVAAPI/kVideoToolbox,像素数据在 GPU 内存,镜像 FFmpeg 的硬件 AVPixelFormat 变体)。硬件帧域命名的是持有数据的设备,节点对全部硬件域统一按"硬件帧"处理。
+
 ```cpp
 enum class PixelFormat {
-    kUnknown = 0, kYUV420P, kYUV422P, kYUV444P, kNV12, kRGB32, kD3D11,
+    kUnknown = 0, kYUV420P, kYUV422P, kYUV444P, kNV12, kRGB32,
+    kD3D11, kCuda, kQsv, kVAAPI, kVideoToolbox,
 };
 enum class SampleFormat {
     kUnknown = 0, kS16, kS32, kFloat, kS16Planar, kFloatPlanar,
@@ -42,3 +49,31 @@ enum class SampleFormat {
 #### Scenario: media_format.h 引用无额外依赖
 - **WHEN** media_format.h 使用 PixelFormat/SampleFormat
 - **THEN** 仅需 `#include "media_frame.h"`
+
+#### Scenario: 硬件域参与格式协商
+- **WHEN** 端口 caps 的 pixel_formats 包含硬件域枚举值
+- **THEN** 该端口可接受/生产对应设备的硬件帧,与软格式在同一维度参与兼容性判断
+
+### Requirement: MediaFrame 硬件感知访问
+MediaFrame SHALL 提供 `IsHardware()`(帧数据在 GPU 内存时为真)与 `HwSwFormat()`(硬件帧底下的软件格式,非硬件帧返回 -1)。
+
+系统 SHALL 提供 `TransferToSoftware(const MediaFrame&)`,将硬件帧显式下载为系统内存帧(av_hwframe_transfer_data),失败返回无效帧。域转换 SHALL 只发生在显式调用点(特效节点边界、渲染器回退路径),不存在隐式转换。
+
+#### Scenario: 硬件帧识别
+- **WHEN** 解码器输出 D3D11VA 帧
+- **THEN** 对应 MediaFrame 的 IsHardware() 为真,HwSwFormat() 为 NV12/P010 等实际布局
+
+#### Scenario: 下载失败返回无效帧
+- **WHEN** av_hwframe_transfer_data 失败
+- **THEN** TransferToSoftware 返回 IsValid() 为假的 MediaFrame,调用方保持原帧不变
+
+### Requirement: 硬件帧携带呈现纹理
+MediaFrame SHALL 提供 `HwPresentationTexture()` / `SetHwPresentationTexture(void*)` 存取非拥有的呈现纹理指针(GPU 设备纹理池所有,帧生命期内有效,默认 nullptr)。移动构造/赋值 SHALL 携带该指针并使源置空,拷贝语义(禁用)不受影响。
+
+#### Scenario: 呈现纹理随帧运输
+- **WHEN** 解码器把 CopyForPresentation 的返回指针挂到 MediaFrame 后推送
+- **THEN** 帧经链路/直通节点 move 运输后,HwPresentationTexture() 仍返回同一指针,渲染器据此绑定呈现
+
+#### Scenario: 软件帧无呈现纹理
+- **WHEN** 帧为软件帧
+- **THEN** HwPresentationTexture() 返回 nullptr

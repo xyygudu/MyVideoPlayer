@@ -42,9 +42,19 @@
 
 ## 5b. 实机修复(二轮验收:seek 不刷新 + 重开卡死)
 
-- [x] 5b.1 根因:seek 追赶的 skip_frame=AVDISCARD_NONREF 与硬解不兼容——surface 池泄漏耗尽后 send_packet 永久阻塞,解码线程挂死(画面冻结 + Close join 挂起)
-- [x] 5b.2 MaybeFlushOnSerialChange:仅软件解码设置 AVDISCARD_NONREF,硬解只靠 PTS 阈值丢帧
+- [x] 5b.1 ~~根因:seek 追赶的 skip_frame=AVDISCARD_NONREF 与硬解不兼容——surface 池泄漏耗尽后 send_packet 永久阻塞~~ **误判**,见 5c 与 design §5.1(surface 统计全程只用到 20 个中的 9 个)
+- [x] 5b.2 MaybeFlushOnSerialChange:仅软件解码设置 AVDISCARD_NONREF,硬解只靠 PTS 阈值丢帧(保留,但理由改为「未验证」)
 - [x] 5b.3 MediaPlayer::Close 增加分步调试日志,便于下次定位挂点
+
+## 5c. 实机修复(三轮:seek 冻结真实根因)
+
+- [x] 5c.1 诊断:FFmpeg av_log 桥接到 spdlog(`[ffmpeg]` 前缀),日志增加线程号 `[t%t]`,MediaPlayer 记录 pause/resume/seek
+- [x] 5c.2 根因(调用栈确认):SDL3 默认创建 `D3D11_CREATE_DEVICE_SINGLETHREADED` 设备;FFmpeg 每次 flush 后重建 hwaccel,旧纹理数组在渲染线程随最后一帧释放,与解码线程的 D3D11 视频调用在 NVIDIA 驱动内死锁
+- [x] 5c.3 VideoRenderer::Open 设置 `SDL_HINT_RENDER_DIRECT3D_THREADSAFE=1`
+- [x] 5c.4 D3D11GpuDevice::Wrap 开启 `SetMultithreadProtected(TRUE)`,单线程设备拒绝包装(回软解)
+- [x] 5c.5 删除失效代码:TryOpenCodec 自建 32-surface 帧上下文(恒报 80070057:缺 D3D11_BIND_DECODER、高度未对齐)
+- [x] 5c.6 清理排查期逐包/逐帧日志与 stalled 计时;DrainFrames 拆出 DropForSeek/ToDownstreamFrame,VideoRenderer::Open 拆出 CreateRenderer/ProbeBackend(均 ≤50 行)
+- [x] 5c.7 DecoderNode 记录 FFmpeg 重建 hw frames context 事件(`hw frames context replaced`)
 
 ## 6. 验证
 
@@ -52,7 +62,7 @@
 - [x] 6.2 软件路径回归:ffmpeg 生成 2s 测试视频 → mvp_transcode_cli 转码成功、输出有效(解码/编码软路径不受影响)
 - [x] 6.3 ffmpeg CLI 对照:本机 d3d11va 硬解 + 下载正常(机器级硬解能力确认)
 - [x] 6.4 硬解播放有画面(用户确认)
-- [ ] 6.5 seek 复测:多次 seek 后画面正常刷新、无卡顿
-- [ ] 6.6 重开文件复测:关闭再打开新视频,无卡死(若复现,Close 分步日志可定位挂点)
-- [ ] 6.7 特效开关验收:播放中启用色彩特效,画面生效;禁用后恢复零拷贝
-- [ ] 6.8 `openspec validate gpu-stage-a-hw-decode-render --strict` 通过后 archive
+- [x] 6.5 seek 复测:多次 seek(含拖动、暂停中 seek)后画面正常刷新、无卡死(用户确认;seek 延迟 0.02~0.97s 为精确 seek 追帧开销,见 docs/improvements/seek-performance.md)
+- [x] 6.6 重开文件复测:关闭再打开新视频,无卡死(用户确认)
+- [x] 6.7 特效开关验收:播放中启用色彩特效,画面生效;禁用后恢复零拷贝(用户确认;验收暴露硬解下载的 NV12 帧调饱和度只生效左半幅,已修复:ChromaPlaneLayout 增加 row_bytes,见 docs/improvements/effect-nodes.md;修复后复测通过)
+- [x] 6.8 `openspec validate gpu-stage-a-hw-decode-render --strict` 通过后 archive

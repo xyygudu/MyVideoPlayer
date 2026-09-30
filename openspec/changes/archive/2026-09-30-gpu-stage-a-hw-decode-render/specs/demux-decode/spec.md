@@ -29,7 +29,7 @@ DecoderNode SHALL 在解码线程(设备命令上下文的唯一使用者)完成
 - **THEN** 推送软件帧(实际格式经 MaybeAnnounceFormat 校正),渲染走软件上传路径;下载失败则丢帧告警
 
 ### Requirement: Decoder supports skip_frame during seek
-DecoderNode SHALL 在 seek 追赶期设置 `codec_ctx_->skip_frame = AVDISCARD_NONREF` 加速软件解码,到达目标 PTS 后恢复 AVDISCARD_DEFAULT。硬件解码(`codec_ctx_->hw_device_ctx` 非空)SHALL NOT 设置 skip_frame:硬解 surface 池在输出被丢弃时会泄漏,池耗尽后 `avcodec_send_packet` 永久阻塞等待空闲 surface;硬解追赶仅靠 PTS 阈值丢帧(帧完整解码后丢弃,surface 正常归还)。
+DecoderNode SHALL 在 seek 追赶期设置 `codec_ctx_->skip_frame = AVDISCARD_NONREF` 加速软件解码,到达目标 PTS 后恢复 AVDISCARD_DEFAULT。硬件解码(`codec_ctx_->hw_device_ctx` 非空)SHALL NOT 设置 skip_frame:NONREF 与硬件解码器的组合尚未验证;硬解追赶仅靠 PTS 阈值丢帧(帧完整解码后丢弃,surface 正常归还)。
 
 #### Scenario: 软件解码 seek 追赶跳帧
 - **WHEN** 软件解码且 seek 后尚未到达目标 PTS
