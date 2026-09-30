@@ -8,7 +8,7 @@ namespace mvp::gpu {
 
 // Platform registry: each backend registers here as it lands. The factory is
 // deliberately tiny so adding the next backend is one line, not a refactor.
-std::unique_ptr<GpuDevice> GpuDevice::WrapExternal(void* native_device) {
+std::shared_ptr<GpuDevice> GpuDevice::WrapExternal(void* native_device) {
 #if defined(_WIN32)
     return D3D11GpuDevice::Wrap(native_device);
 #else

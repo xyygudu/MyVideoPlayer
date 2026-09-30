@@ -1,24 +1,21 @@
 #include "gpu/d3d11_device.h"
 
-#include <utility>
+#include <mutex>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
-#include <libavutil/frame.h>
-#include <libavutil/hwcontext.h>
 }
-// Pulls in <d3d11.h>; must stay in C++ linkage (operator overloads).
-#include <libavutil/hwcontext_d3d11va.h>
-#include <d3d10.h>
 #include <spdlog/spdlog.h>
+
+#include "gpu/d3d11_frame_presenter.h"
+#include "gpu/d3d11_util.h"
+#include "gpu/d3d11_video_pass.h"
+// After <d3d11.h> (pulled in above): d3d10_1.h rejects an earlier d3d10.h.
+#include <d3d10.h>
 
 namespace mvp::gpu {
 
 namespace {
-// Presentation pool ring size: must exceed the frames a sink and the links
-// can hold simultaneously (link depth 3 + current frame), so a texture is
-// only reused after every outstanding reference to it has been presented.
-constexpr size_t kPoolSize = 8;
 
 // Refcounted AVFrames release D3D11 textures on whichever thread drops the
 // last reference (sink, control), outside any app-level lock. FFmpeg, mpv and
@@ -36,57 +33,77 @@ bool EnableMultithreadProtection(ID3D11Device* device) {
                 was_on ? "already on" : "was off, enabled");
     return true;
 }
-}  // namespace
 
-D3D11GpuDevice::D3D11GpuDevice(AVBufferRef* device_ref)
-    : device_ref_(device_ref) {
-    auto* device_ctx = reinterpret_cast<AVHWDeviceContext*>(device_ref_->data);
-    auto* hwctx =
-        reinterpret_cast<AVD3D11VADeviceContext*>(device_ctx->hwctx);
-    device_context_ = hwctx->device_context;
+// FFmpeg requires the context lock to be recursive (hwcontext_d3d11va.h).
+void LockMutex(void* mutex) { static_cast<std::recursive_mutex*>(mutex)->lock(); }
+void UnlockMutex(void* mutex) { static_cast<std::recursive_mutex*>(mutex)->unlock(); }
+
+// Frames, frame pools and codecs reference the FFmpeg device context and can
+// outlive the GpuDevice wrapper, so the lock dies with the context instead.
+void FreeMutex(AVHWDeviceContext* ctx) {
+    delete static_cast<std::recursive_mutex*>(ctx->user_opaque);
 }
 
+// The lock must be installed before av_hwdevice_ctx_init; otherwise FFmpeg
+// creates a private one and app-side GPU work would be unsynchronized with it.
+AVBufferRef* WrapWithSharedLock(ID3D11Device* device) {
+    AVBufferRef* ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+    if (!ref) {
+        return nullptr;
+    }
+    auto* device_ctx = reinterpret_cast<AVHWDeviceContext*>(ref->data);
+    auto* hwctx = static_cast<AVD3D11VADeviceContext*>(device_ctx->hwctx);
+    auto* mutex = new std::recursive_mutex();
+    device_ctx->user_opaque = mutex;
+    device_ctx->free = &FreeMutex;
+    hwctx->lock_ctx = mutex;
+    hwctx->lock = &LockMutex;
+    hwctx->unlock = &UnlockMutex;
+    hwctx->device = device;
+    device->AddRef();
+    if (av_hwdevice_ctx_init(ref) < 0) {
+        av_buffer_unref(&ref);
+    }
+    return ref;
+}
+
+}  // namespace
+
+D3D11GpuDevice::D3D11GpuDevice(AVBufferRef* device_ref, bool video_passes_supported)
+    : device_ref_(device_ref), video_passes_supported_(video_passes_supported) {}
+
 D3D11GpuDevice::~D3D11GpuDevice() {
-    // Flush the immediate context before releasing the presentation pool:
-    // queued blits from the last frames may still reference pool textures.
-    // Releasing them mid-queue leaves the D3D11 runtime freeing textures the
-    // SDL renderer teardown later touches → access violation at Close().
-    if (device_context_) {
-        device_context_->Flush();
+    // Submit what the last frames queued before the SDL renderer teardown.
+    AVD3D11VADeviceContext* hwctx = d3d11::DeviceHwctx(device_ref_);
+    {
+        d3d11::ContextLock lock(hwctx);
+        hwctx->device_context->Flush();
     }
-    for (ID3D11Texture2D* tex : pool_) {
-        tex->Release();
-    }
-    pool_.clear();
     av_buffer_unref(&device_ref_);
 }
 
-std::unique_ptr<GpuDevice> D3D11GpuDevice::Wrap(void* native_device) {
-    if (!native_device) {
+std::shared_ptr<GpuDevice> D3D11GpuDevice::Wrap(void* native_device) {
+    auto* device = static_cast<ID3D11Device*>(native_device);
+    if (!device) {
         SPDLOG_WARN("GpuDevice(D3D11): null native device");
         return nullptr;
     }
-    if (!EnableMultithreadProtection(static_cast<ID3D11Device*>(native_device))) {
+    if (!EnableMultithreadProtection(device)) {
         SPDLOG_WARN("GpuDevice(D3D11): device is single-threaded, cannot be "
                     "shared across decode/render threads; hw decode disabled");
         return nullptr;
     }
-
-    AVBufferRef* ref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+    AVBufferRef* ref = WrapWithSharedLock(device);
     if (!ref) {
-        SPDLOG_WARN("GpuDevice(D3D11): av_hwdevice_ctx_alloc failed");
-        return nullptr;
-    }
-    auto* device_ctx = reinterpret_cast<AVHWDeviceContext*>(ref->data);
-    auto* hwctx = reinterpret_cast<AVD3D11VADeviceContext*>(device_ctx->hwctx);
-    hwctx->device = static_cast<ID3D11Device*>(native_device);
-    hwctx->device->AddRef();
-    if (av_hwdevice_ctx_init(ref) < 0) {
-        av_buffer_unref(&ref);
         SPDLOG_WARN("GpuDevice(D3D11): wrapping the external device failed");
         return nullptr;
     }
-    return std::unique_ptr<GpuDevice>(new D3D11GpuDevice(ref));
+    const bool passes = d3d11::SupportsFormat(
+        device, DXGI_FORMAT_NV12,
+        D3D11_FORMAT_SUPPORT_RENDER_TARGET | D3D11_FORMAT_SUPPORT_SHADER_SAMPLE);
+    SPDLOG_INFO("GpuDevice(D3D11): wrapped, GPU video passes {}",
+                passes ? "available" : "unavailable (no NV12 render target)");
+    return std::shared_ptr<GpuDevice>(new D3D11GpuDevice(ref, passes));
 }
 
 bool D3D11GpuDevice::SupportsDecoder(const AVCodec* codec) const {
@@ -101,84 +118,39 @@ bool D3D11GpuDevice::SupportsDecoder(const AVCodec* codec) const {
     }
 }
 
-void* D3D11GpuDevice::CopyForPresentation(const AVFrame* hw_frame) {
-    if (!hw_frame || hw_frame->format != AV_PIX_FMT_D3D11 ||
-        !hw_frame->data[0] || !hw_frame->hw_frames_ctx) {
-        return nullptr;
+void D3D11GpuDevice::RefineDecoderFrames(AVHWFramesContext* frames) const {
+    d3d11::PlaneFormats fmt;
+    if (frames->format != AV_PIX_FMT_D3D11 ||
+        !d3d11::LookupPlaneFormats(frames->sw_format, &fmt)) {
+        return;
     }
-
-    const AVHWFramesContext* fctx = reinterpret_cast<const AVHWFramesContext*>(
-        hw_frame->hw_frames_ctx->data);
-    int dxgi_format;
-    switch (fctx ? fctx->sw_format : -1) {
-        case AV_PIX_FMT_NV12: dxgi_format = DXGI_FORMAT_NV12; break;
-        case AV_PIX_FMT_P010: dxgi_format = DXGI_FORMAT_P010; break;
-        default: return nullptr;  // Unsupported layout: caller converts.
+    ID3D11Device* device = d3d11::DeviceHwctx(device_ref_)->device;
+    if (!d3d11::SupportsFormat(device, fmt.texture, D3D11_FORMAT_SUPPORT_SHADER_SAMPLE)) {
+        return;
     }
-
-    auto* src = reinterpret_cast<ID3D11Texture2D*>(hw_frame->data[0]);
-    UINT src_index = static_cast<UINT>(reinterpret_cast<intptr_t>(
-        hw_frame->data[1]));
-
-    // Caller (DecoderNode::DeviceLock) already holds DeviceContextMutex(): this
-    // blit submits to the same immediate context as the decode work, which must
-    // stay mutually exclusive with render-thread draw submission. Never lock
-    // the device mutex here — the caller already owns it (non-recursive).
-    ID3D11Texture2D* dst = AcquirePoolTexture(hw_frame->width, hw_frame->height,
-                                             dxgi_format);
-    if (!dst) {
-        return nullptr;
-    }
-    // Same command context that submitted the decode work: submission order
-    // guarantees the blit runs after the surface is fully decoded.
-    device_context_->CopySubresourceRegion(dst, 0, 0, 0, 0, src, src_index,
-                                           nullptr);
-    return dst;
+    auto* frames_hwctx = static_cast<AVD3D11VAFramesContext*>(frames->hwctx);
+    frames_hwctx->BindFlags |= D3D11_BIND_SHADER_RESOURCE;
 }
 
-ID3D11Texture2D* D3D11GpuDevice::AcquirePoolTexture(int width, int height,
-                                                    int dxgi_format) {
-    if (width != pool_width_ || height != pool_height_ ||
-        dxgi_format != pool_format_) {
-        for (ID3D11Texture2D* tex : pool_) {
-            tex->Release();
-        }
-        pool_.clear();
-        pool_next_ = 0;
+void D3D11GpuDevice::LockContext() {
+    const AVD3D11VADeviceContext* hwctx = d3d11::DeviceHwctx(device_ref_);
+    hwctx->lock(hwctx->lock_ctx);
+}
 
-        auto* device_ctx =
-            reinterpret_cast<AVHWDeviceContext*>(device_ref_->data);
-        auto* hwctx = reinterpret_cast<AVD3D11VADeviceContext*>(
-            device_ctx->hwctx);
-        D3D11_TEXTURE2D_DESC desc{};
-        desc.Width = static_cast<UINT>(width);
-        desc.Height = static_cast<UINT>(height);
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = static_cast<DXGI_FORMAT>(dxgi_format);
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        for (size_t i = 0; i < kPoolSize; ++i) {
-            ID3D11Texture2D* tex = nullptr;
-            if (FAILED(hwctx->device->CreateTexture2D(&desc, nullptr, &tex)) ||
-                !tex) {
-                SPDLOG_ERROR("GpuDevice(D3D11): presentation pool alloc failed");
-                break;
-            }
-            pool_.push_back(tex);
-        }
-        if (pool_.empty()) {
-            return nullptr;
-        }
-        pool_width_ = width;
-        pool_height_ = height;
-        pool_format_ = dxgi_format;
+void D3D11GpuDevice::UnlockContext() {
+    const AVD3D11VADeviceContext* hwctx = d3d11::DeviceHwctx(device_ref_);
+    hwctx->unlock(hwctx->lock_ctx);
+}
+
+std::unique_ptr<VideoPass> D3D11GpuDevice::CreateVideoPass(VideoKernel kernel) {
+    if (!video_passes_supported_) {
+        return nullptr;
     }
+    return D3D11VideoPass::Create(device_ref_, kernel);
+}
 
-    ID3D11Texture2D* tex = pool_[pool_next_];
-    pool_next_ = (pool_next_ + 1) % pool_.size();
-    return tex;
+std::unique_ptr<FramePresenter> D3D11GpuDevice::CreatePresenter() {
+    return std::make_unique<D3D11FramePresenter>(device_ref_);
 }
 
 }  // namespace mvp::gpu

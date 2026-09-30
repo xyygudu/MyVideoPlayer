@@ -74,6 +74,11 @@ class MediaPlayer::Impl {
     /// to the video sink. Split out so BuildGraph itself stays ≤ 40 lines.
     graph::OutputPort* WireVideoEffects(graph::DecoderNode* vdec);
 
+    /// Decoder -> effects -> video sink, fed from the given demux output.
+    void WireVideoBranch(graph::OutputPort* demux_output);
+    /// Decoder -> audio sink, fed from the given demux output.
+    void WireAudioBranch(graph::OutputPort* demux_output);
+
     // Source meta (populated by SourceProbe in Open, consumed by BuildGraph)
     SourceInfo info_;
 
@@ -143,9 +148,7 @@ void MediaPlayer::Impl::Close() {
         SPDLOG_DEBUG("MediaPlayer: stopping graph");
         graph_->Stop();
         SPDLOG_DEBUG("MediaPlayer: destroying graph");
-        // The mutex belongs to the graph's GPU device; drop the pointer
-        // before the device (and mutex) is destroyed.
-        video_renderer_.SetDeviceContextMutex(nullptr);
+        // Nodes and their frames go before the SDL renderer they present on.
         graph_.reset();
     }
     SPDLOG_DEBUG("MediaPlayer: closing renderer");
@@ -239,63 +242,26 @@ void MediaPlayer::Impl::NotifyWindowResized(int w, int h) {
 bool MediaPlayer::Impl::BuildGraph() {
     // Precondition: info_ populated by Open(), stream indices selected.
 
-    // 1. Create graph and nodes.
+    // Create graph and nodes.
     graph_ = std::make_unique<graph::MediaGraph>();
     graph_->SetEventCallback([this](graph::GraphEvent e) { OnGraphEvent(e); });
 
-    // Share the renderer's GPU device with the graph so decode and present
-    // use one device (zero-copy). A null device keeps the pipeline software.
-    // The wrapper hands the interface to FFmpeg, so the graph must outlive
-    // the renderer — Close() destroys graph_ before video_renderer_.
-    if (void* native = video_renderer_.NativeDevice()) {
-        if (auto device = gpu::GpuDevice::WrapExternal(native)) {
-            // The shared device's single immediate context is serialized by
-            // this mutex: decoder FFmpeg calls and renderer draw ops.
-            video_renderer_.SetDeviceContextMutex(&device->DeviceContextMutex());
-            graph_->SetGpuDevice(std::move(device));
-        }
-    }
+    // Decode and effects use the renderer's GPU device so frames stay on the
+    // GPU until presented. A null device keeps the pipeline software.
+    graph_->SetGpuDevice(video_renderer_.SharedGpuDevice());
 
     auto* demux = static_cast<graph::DemuxNode*>(
         graph_->AddNode(std::make_unique<graph::DemuxNode>(
             info_.filepath, video_stream_index_, audio_stream_index_)));
-
-    graph::DecoderNode* vdec = nullptr;
-    graph::VideoSinkNode* vsink = nullptr;
     if (video_stream_index_ >= 0) {
-        vdec = static_cast<graph::DecoderNode*>(graph_->AddNode(std::make_unique<graph::DecoderNode>()));
-        vsink = static_cast<graph::VideoSinkNode*>(graph_->AddNode(std::make_unique<graph::VideoSinkNode>()));
+        WireVideoBranch(demux->Outputs()[0]);
     }
-
-    graph::DecoderNode* adec = nullptr;
-    graph::AudioSinkNode* asink = nullptr;
     if (audio_stream_index_ >= 0) {
-        adec = static_cast<graph::DecoderNode*>(graph_->AddNode(std::make_unique<graph::DecoderNode>()));
-        asink = static_cast<graph::AudioSinkNode*>(graph_->AddNode(std::make_unique<graph::AudioSinkNode>()));
-    }
-
-    // 2. Configure sink nodes.
-    if (vsink) {
-        vsink->SetRenderer(&video_renderer_);
-    }
-
-    // 3. Wire pipeline (inline).
-    if (vdec && vsink) {
-        graph_->Connect(demux->Outputs()[0], vdec->Inputs()[0],
-                        graph::LinkCapacity::ForPackets());
-        graph::OutputPort* effect_out = WireVideoEffects(vdec);
-        graph_->Connect(effect_out, vsink->Inputs()[0],
-                        graph::LinkCapacity::ForFrames(kVideoFrameDepth));
-    }
-    if (adec && asink) {
         int audio_port = (video_stream_index_ >= 0) ? 1 : 0;
-        graph_->Connect(demux->Outputs()[audio_port], adec->Inputs()[0],
-                        graph::LinkCapacity::ForPackets());
-        graph_->Connect(adec->Outputs()[0], asink->Inputs()[0],
-                        graph::LinkCapacity::ForFrames(kAudioFrameDepth));
+        WireAudioBranch(demux->Outputs()[audio_port]);
     }
 
-    // 4. Finalize.
+    // Finalize.
     if (!graph_->Open()) {
         SPDLOG_ERROR("MediaPlayer: graph Open failed");
         return false;
@@ -310,6 +276,30 @@ bool MediaPlayer::Impl::BuildGraph() {
     }
 
     return true;
+}
+
+void MediaPlayer::Impl::WireVideoBranch(graph::OutputPort* demux_output) {
+    auto* vdec = static_cast<graph::DecoderNode*>(
+        graph_->AddNode(std::make_unique<graph::DecoderNode>()));
+    auto* vsink = static_cast<graph::VideoSinkNode*>(
+        graph_->AddNode(std::make_unique<graph::VideoSinkNode>()));
+    vsink->SetRenderer(&video_renderer_);
+
+    graph_->Connect(demux_output, vdec->Inputs()[0], graph::LinkCapacity::ForPackets());
+    graph::OutputPort* effect_out = WireVideoEffects(vdec);
+    graph_->Connect(effect_out, vsink->Inputs()[0],
+                    graph::LinkCapacity::ForFrames(kVideoFrameDepth));
+}
+
+void MediaPlayer::Impl::WireAudioBranch(graph::OutputPort* demux_output) {
+    auto* adec = static_cast<graph::DecoderNode*>(
+        graph_->AddNode(std::make_unique<graph::DecoderNode>()));
+    auto* asink = static_cast<graph::AudioSinkNode*>(
+        graph_->AddNode(std::make_unique<graph::AudioSinkNode>()));
+
+    graph_->Connect(demux_output, adec->Inputs()[0], graph::LinkCapacity::ForPackets());
+    graph_->Connect(adec->Outputs()[0], asink->Inputs()[0],
+                    graph::LinkCapacity::ForFrames(kAudioFrameDepth));
 }
 
 graph::OutputPort* MediaPlayer::Impl::WireVideoEffects(graph::DecoderNode* vdec) {

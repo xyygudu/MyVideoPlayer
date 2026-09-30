@@ -21,20 +21,9 @@ MediaFrame::MediaFrame(AVFrame* src) {
 
 MediaFrame::~MediaFrame() = default;
 
-MediaFrame::MediaFrame(MediaFrame&& other) noexcept
-    : frame_(std::move(other.frame_)),
-      presentation_texture_(other.presentation_texture_) {
-    other.presentation_texture_ = nullptr;
-}
+MediaFrame::MediaFrame(MediaFrame&& other) noexcept = default;
 
-MediaFrame& MediaFrame::operator=(MediaFrame&& other) noexcept {
-    if (this != &other) {
-        frame_ = std::move(other.frame_);
-        presentation_texture_ = other.presentation_texture_;
-        other.presentation_texture_ = nullptr;
-    }
-    return *this;
-}
+MediaFrame& MediaFrame::operator=(MediaFrame&& other) noexcept = default;
 
 bool MediaFrame::IsValid() const {
     return frame_.get() && frame_.get()->data[0];

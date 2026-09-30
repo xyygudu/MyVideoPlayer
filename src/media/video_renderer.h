@@ -1,7 +1,7 @@
 #ifndef MVP_VIDEO_RENDERER_H_
 #define MVP_VIDEO_RENDERER_H_
 
-#include <mutex>
+#include <memory>
 
 #include "media_frame.h"
 
@@ -12,10 +12,16 @@ struct SwsContext;
 
 namespace mvp {
 
+namespace gpu {
+class FramePresenter;
+class GpuDevice;
+}  // namespace gpu
+
 /// GPU-accelerated video renderer using SDL3.
 /// Creates an SDL renderer attached to a parent window (embedded mode).
 /// Software frames are uploaded as YUV textures; hardware frames are bound
 /// directly to the backend device (zero-copy) when the backend supports it.
+/// Owns the GPU device it presents with and shares it with the graph.
 class VideoRenderer {
   public:
     VideoRenderer();
@@ -39,37 +45,30 @@ class VideoRenderer {
     bool IsOpen() const { return renderer_ != nullptr; }
 
     /// Hardware frame domain this renderer can present zero-copy (kUnknown
-    /// when the backend has no external-texture binding support). Valid
-    /// after Open(); read by the sink during DeclareCaps.
+    /// when the backend has no shareable GPU device). Valid after Open();
+    /// read by the sink during DeclareCaps.
     PixelFormat BindableHardwareDomain() const { return bindable_domain_; }
 
-    /// The renderer backend's native device (ID3D11Device* on the D3D11
-    /// backend), nullptr otherwise. Non-owning, valid while the renderer is
-    /// open. The pipeline builder wraps it so decode and present share one
-    /// device.
-    void* NativeDevice() const { return native_device_; }
-
-    /// Set the mutex serializing the shared device command context (owned by
-    /// the graph's GpuDevice). When set, every draw operation runs under it:
-    /// the D3D11 device hands out one immediate context to all callers, so
-    /// render submission must exclude FFmpeg decode submission (mpv ctx_lock
-    /// model). Non-owning; clear it before the device is destroyed.
-    void SetDeviceContextMutex(std::mutex* mutex) { device_ctx_mutex_ = mutex; }
+    /// The GPU device behind the renderer backend, shared with the graph so
+    /// decode, GPU effects and presentation use one device. nullptr when the
+    /// backend has none. Set by Open(), released by Close().
+    std::shared_ptr<gpu::GpuDevice> SharedGpuDevice() const { return gpu_device_; }
 
   private:
     // Open helpers
     bool CreateRenderer();
     void ProbeBackend();
 
+    void RenderSoftwareFrame(const MediaFrame& frame);
     // Software path: YUV420P direct upload
     void RenderYUV420P(const MediaFrame& frame);
     // Software path: format conversion fallback
     void RenderFallback(const MediaFrame& frame);
-    // NV12 direct upload (used for hw_transfer or native NV12)
+    // NV12 direct upload
     void RenderNV12(const MediaFrame& frame);
-    // Hardware frame: bind the decoder-prepared presentation texture
+    // Hardware frame: bind through the presenter, download when unbindable
     void RenderHWFrame(const MediaFrame& frame);
-    bool RenderBoundHwFrame(const MediaFrame& frame);
+    bool RenderBoundTexture(const MediaFrame& frame, void* texture);
 
     void Present(int frame_width, int frame_height);
     void Present(SDL_Texture* texture, int frame_width, int frame_height);
@@ -89,10 +88,9 @@ class VideoRenderer {
     int window_height_ = 0;
 
     PixelFormat bindable_domain_{PixelFormat::kUnknown};
-    void* native_device_{nullptr};
-    // Non-owning; the graph's GPU device owns the mutex. Null = software
-    // pipeline, no shared command context to serialize.
-    std::mutex* device_ctx_mutex_{nullptr};
+    // Shared with the graph; null = software pipeline, no context to serialize.
+    std::shared_ptr<gpu::GpuDevice> gpu_device_;
+    std::unique_ptr<gpu::FramePresenter> presenter_;
 
     // Fallback conversion for non-YUV420P frames
     SwsContext* sws_ctx_ = nullptr;

@@ -9,6 +9,8 @@ extern "C" {
 #include <spdlog/spdlog.h>
 
 #include "ffmpeg_utils.h"
+#include "gpu/gpu_device.h"
+#include "graph/media_graph.h"
 #include "media_frame.h"
 #include "pixel_ops.h"
 
@@ -57,6 +59,12 @@ bool ColorEffectNode::Negotiate() {
 
 bool ColorEffectNode::Prepare() {
     if (state_ == NodeState::kPrepared || state_ == NodeState::kRunning) return true;
+    gpu::GpuDevice* device = graph_ ? graph_->GpuDevice() : nullptr;
+    gpu_pass_ = device ? device->CreateVideoPass(gpu::VideoKernel::kColorAdjust) : nullptr;
+    if (device) {
+        SPDLOG_INFO("ColorEffectNode: GPU pass {}",
+                    gpu_pass_ ? "ready" : "unavailable, hardware frames use the CPU");
+    }
     state_ = NodeState::kPrepared;
     return true;
 }
@@ -100,8 +108,35 @@ void ColorEffectNode::Process(MediaBuffer input, OutputCallback emit) {
     float s = std::get<float>(saturation_.load());
     if (b == 0.0f && c == 1.0f && s == 1.0f) { emit(std::move(input)); return; }
 
-    // CPU effects convert hardware frames at the node boundary (GPU→CPU);
-    // the GPU engine of a later stage will replace this download.
+    // Hardware in, hardware out: toggling the effect never changes the frame domain.
+    if (input.AsFrame().IsHardware() && TryProcessOnGpu(input, emit, b, c, s)) {
+        return;
+    }
+    ProcessOnCpu(std::move(input), emit, b, c, s);
+}
+
+bool ColorEffectNode::TryProcessOnGpu(MediaBuffer& input, OutputCallback& emit,
+                                      float brightness, float contrast, float saturation) {
+    if (!gpu_pass_) {
+        return false;
+    }
+    const gpu::ColorAdjustUniforms uniforms{brightness, contrast, saturation, 0.0f};
+    MediaFrame out = gpu_pass_->Run(input.AsFrame(), &uniforms, sizeof(uniforms));
+    if (!out.IsValid()) {
+        if (!logged_gpu_failure_) {
+            SPDLOG_WARN("ColorEffectNode: GPU pass failed, falling back to CPU");
+            logged_gpu_failure_ = true;
+        }
+        return false;
+    }
+    emit(MediaBuffer(std::move(out), input.timestamp(), input.flags()));
+    return true;
+}
+
+void ColorEffectNode::ProcessOnCpu(MediaBuffer input, OutputCallback& emit, float b, float c,
+                                   float s) {
+    // Hardware frames reach here only without a usable GPU pass; they are
+    // downloaded at the node boundary.
     MediaFrame& src = input.AsFrame();
     bool from_hw = src.IsHardware();
     MediaFrame mf;

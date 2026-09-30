@@ -1,7 +1,6 @@
 #include "video_renderer.h"
 
 #include <algorithm>
-#include <mutex>
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -12,6 +11,7 @@ extern "C" {
 #include <spdlog/spdlog.h>
 
 #include "ffmpeg_utils.h"
+#include "gpu/gpu_device.h"
 #include "gpu/pixel_format_map.h"
 
 namespace mvp {
@@ -58,7 +58,7 @@ bool VideoRenderer::CreateRenderer() {
     // Prefer the D3D11 backend: it is the only one that can bind
     // hardware-decoded textures directly for zero-copy presentation.
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "direct3d11");
-    // NativeDevice() is shared with the decode thread; SDL defaults to a
+    // The backend device is shared with the decode thread; SDL defaults to a
     // D3D11_CREATE_DEVICE_SINGLETHREADED device.
     SDL_SetHint(SDL_HINT_RENDER_DIRECT3D_THREADSAFE, "1");
     renderer_ = SDL_CreateRenderer(window_, nullptr);
@@ -77,10 +77,16 @@ void VideoRenderer::ProbeBackend() {
     SDL_PropertiesID rprops = SDL_GetRendererProperties(renderer_);
     const char* backend =
         SDL_GetStringProperty(rprops, SDL_PROP_RENDERER_NAME_STRING, "unknown");
-    native_device_ = SDL_GetPointerProperty(
+    void* native_device = SDL_GetPointerProperty(
         rprops, SDL_PROP_RENDERER_D3D11_DEVICE_POINTER, nullptr);
-    if (native_device_) {
-        bindable_domain_ = PixelFormat::kD3D11;
+    // The presenting device is the one decode and GPU effects must use, so
+    // hardware frames reach the screen without leaving the GPU.
+    if (native_device) {
+        gpu_device_ = gpu::GpuDevice::WrapExternal(native_device);
+    }
+    if (gpu_device_) {
+        presenter_ = gpu_device_->CreatePresenter();
+        bindable_domain_ = gpu_device_->Domain();
     }
 
     spdlog::info("VideoRenderer opened ({}x{}, backend '{}', hw binding {})",
@@ -104,6 +110,9 @@ void VideoRenderer::Close() {
         texture_width_ = 0;
         texture_height_ = 0;
     }
+    // Before the SDL renderer: the device flushes its context on release.
+    presenter_.reset();
+    gpu_device_.reset();
     if (renderer_) {
         SDL_DestroyRenderer(renderer_);
         renderer_ = nullptr;
@@ -112,25 +121,24 @@ void VideoRenderer::Close() {
         SDL_DestroyWindow(window_);
         window_ = nullptr;
     }
-    native_device_ = nullptr;
     bindable_domain_ = PixelFormat::kUnknown;
 }
 
 void VideoRenderer::Render(const MediaFrame& frame) {
     if (!renderer_ || !frame.IsValid()) return;
 
-    // SDL and FFmpeg share the device's single immediate context; all draw
-    // submission runs under the graph device's mutex (see SetDeviceContextMutex).
-    // Null mutex = software pipeline, no shared command context to serialize.
-    std::unique_lock<std::mutex> dev_lock;
-    if (device_ctx_mutex_) {
-        dev_lock = std::unique_lock<std::mutex>(*device_ctx_mutex_);
+    // SDL, FFmpeg and GPU passes share the device's single immediate context;
+    // no device = software pipeline, nothing to serialize.
+    gpu::ScopedContextLock lock(gpu_device_.get());
+    if (frame.IsHardware()) {
+        RenderHWFrame(frame);
+    } else {
+        RenderSoftwareFrame(frame);
     }
+}
 
+void VideoRenderer::RenderSoftwareFrame(const MediaFrame& frame) {
     switch (gpu::FromAvPixelFormat(frame.RawFrame()->format)) {
-        case PixelFormat::kD3D11:
-            RenderHWFrame(frame);
-            break;
         case PixelFormat::kNV12:
             RenderNV12(frame);
             break;
@@ -171,21 +179,20 @@ void VideoRenderer::RenderNV12(const MediaFrame& frame) {
 }
 
 void VideoRenderer::RenderHWFrame(const MediaFrame& frame) {
-    AVFrame* hw = frame.RawFrame();
-    if (hw->format != AV_PIX_FMT_D3D11 ||
-        bindable_domain_ == PixelFormat::kUnknown) {
-        // Negotiation should have prevented this: without a binding backend
-        // the chain stays software. Dropping is safer than converting here —
-        // the device command context must never be used from this thread.
-        SPDLOG_WARN("VideoRenderer: hardware frame on non-binding backend");
+    void* texture = presenter_ ? presenter_->BindableTexture(frame.RawFrame()) : nullptr;
+    if (texture && RenderBoundTexture(frame, texture)) {
         return;
     }
-    if (!frame.HwPresentationTexture() || !RenderBoundHwFrame(frame)) {
+    // Layout the backend cannot bind: download under the (recursive) device lock.
+    MediaFrame sw = TransferToSoftware(frame);
+    if (!sw.IsValid()) {
         SPDLOG_WARN("VideoRenderer: hardware frame not presentable, dropped");
+        return;
     }
+    RenderSoftwareFrame(sw);
 }
 
-bool VideoRenderer::RenderBoundHwFrame(const MediaFrame& frame) {
+bool VideoRenderer::RenderBoundTexture(const MediaFrame& frame, void* texture) {
     AVFrame* hw = frame.RawFrame();
     int sdl_format;
     switch (frame.HwSwFormat()) {
@@ -196,12 +203,11 @@ bool VideoRenderer::RenderBoundHwFrame(const MediaFrame& frame) {
             sdl_format = SDL_PIXELFORMAT_P010;
             break;
         default:
-            return false;  // Unknown layout: nothing presentable was prepared
+            return false;
     }
 
     SDL_PropertiesID props = SDL_CreateProperties();
-    SDL_SetPointerProperty(props, SDL_PROP_TEXTURE_CREATE_D3D11_TEXTURE_POINTER,
-                           frame.HwPresentationTexture());
+    SDL_SetPointerProperty(props, SDL_PROP_TEXTURE_CREATE_D3D11_TEXTURE_POINTER, texture);
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, hw->width);
     SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER,
                           hw->height);
@@ -215,8 +221,7 @@ bool VideoRenderer::RenderBoundHwFrame(const MediaFrame& frame) {
         return false;
     }
 
-    // The device pool keeps the texture alive until the ring reuses it; the
-    // frame holds a reference through this call via VideoSinkNode.
+    // The frame (held by VideoSinkNode) keeps the texture alive through the draw.
     Present(bound, hw->width, hw->height);
     SDL_DestroyTexture(bound);
     return true;
@@ -225,14 +230,6 @@ bool VideoRenderer::RenderBoundHwFrame(const MediaFrame& frame) {
 void VideoRenderer::RenderFallback(const MediaFrame& frame) {
     AVFrame* av = frame.RawFrame();
     if (!av) return;
-
-    // Hardware frames are converted by the decoder before reaching a
-    // software path; converting here would touch the device command context
-    // from the render thread, which is forbidden (single-thread contract).
-    if (av->hw_frames_ctx) {
-        SPDLOG_WARN("VideoRenderer: unexpected hardware frame in fallback");
-        return;
-    }
 
     int fw = av->width;
     int fh = av->height;

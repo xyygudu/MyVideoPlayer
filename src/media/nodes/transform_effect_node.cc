@@ -1,11 +1,16 @@
 #include "nodes/transform_effect_node.h"
 
+#include <algorithm>
+#include <iterator>
+
 extern "C" {
 #include <libavutil/frame.h>
 }
 #include <spdlog/spdlog.h>
 
 #include "ffmpeg_utils.h"
+#include "gpu/gpu_device.h"
+#include "graph/media_graph.h"
 #include "media_frame.h"
 #include "pixel_ops.h"
 
@@ -43,6 +48,12 @@ bool TransformEffectNode::Negotiate() {
 
 bool TransformEffectNode::Prepare() {
     if (state_ == NodeState::kPrepared || state_ == NodeState::kRunning) return true;
+    gpu::GpuDevice* device = graph_ ? graph_->GpuDevice() : nullptr;
+    gpu_pass_ = device ? device->CreateVideoPass(gpu::VideoKernel::kAffineRemap) : nullptr;
+    if (device) {
+        SPDLOG_INFO("TransformEffectNode: GPU pass {}",
+                    gpu_pass_ ? "ready" : "unavailable, hardware frames use the CPU");
+    }
     state_ = NodeState::kPrepared;
     return true;
 }
@@ -121,8 +132,11 @@ void TransformEffectNode::Process(MediaBuffer input, OutputCallback emit) {
         return;
     }
 
-    // CPU effects convert hardware frames at the node boundary (GPU→CPU);
-    // the GPU engine of a later stage will replace this download.
+    if (input.AsFrame().IsHardware() && TryProcessOnGpu(input, emit, params)) {
+        return;
+    }
+    // CPU path: hardware frames without a usable GPU pass are downloaded here.
+    // FFmpeg takes the shared device lock internally for the download.
     MediaFrame downloaded;
     MediaFrame* src = &input.AsFrame();
     if (src->IsHardware()) {
@@ -152,6 +166,30 @@ void TransformEffectNode::Process(MediaBuffer input, OutputCallback emit) {
     if (!out_mf.IsValid()) { emit(std::move(input)); return; }
     if (TryApplyPermute(*src, out_mf, input, emit)) return;
     ApplyBilinear(*src, out_mf, input, emit);
+}
+
+bool TransformEffectNode::TryProcessOnGpu(MediaBuffer& input, OutputCallback& emit,
+                                          const TransformAffineParams& params) {
+    if (!gpu_pass_) {
+        return false;
+    }
+    // The inverse matrix is plane-size independent; the shader applies each
+    // plane's own centre and translation, exactly like the CPU remap.
+    const pixel_ops::AffineMapping mapping = pixel_ops::ComputeAffineMapping(params, 1, 1);
+    gpu::AffineRemapUniforms uniforms;
+    std::copy(std::begin(mapping.inv), std::end(mapping.inv), uniforms.inverse);
+    uniforms.translate[0] = params.translate_x;
+    uniforms.translate[1] = params.translate_y;
+    MediaFrame out = gpu_pass_->Run(input.AsFrame(), &uniforms, sizeof(uniforms));
+    if (!out.IsValid()) {
+        if (!logged_gpu_failure_) {
+            SPDLOG_WARN("TransformEffectNode: GPU pass failed, falling back to CPU");
+            logged_gpu_failure_ = true;
+        }
+        return false;
+    }
+    emit(MediaBuffer(std::move(out), input.timestamp(), input.flags()));
+    return true;
 }
 
 bool TransformEffectNode::TryApplyPermute(const MediaFrame& src, MediaFrame& dst,

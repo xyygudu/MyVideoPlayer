@@ -1,13 +1,22 @@
 #ifndef MVP_FFMPEG_UTILS_H_
 #define MVP_FFMPEG_UTILS_H_
 
+#include <memory>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/buffer.h>
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
 }
 
 namespace mvp {
+
+// Owns one AVBufferRef reference (e.g. a hardware device or frames context).
+struct AVBufferRefDeleter {
+    void operator()(AVBufferRef* ref) const { av_buffer_unref(&ref); }
+};
+using AVBufferRefPtr = std::unique_ptr<AVBufferRef, AVBufferRefDeleter>;
 
 // RAII wrapper for AVFrame.
 // Move-only: AVFrame* has unique ownership (like unique_ptr).

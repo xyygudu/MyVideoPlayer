@@ -111,6 +111,8 @@ std::atomic<int> window_height_{0};
 
 ## 4. 设备锁包住整个 avcodec 调用，粒度过粗
 
+> **已解决（2026-10-01，change gpu-stage-b-gpu-effects）**：递归锁在 `av_hwdevice_ctx_init` 前交给 FFmpeg（`AVD3D11VADeviceContext.lock/unlock`），锁随 FFmpeg 设备上下文释放；解码器不再加锁，GPU pass、呈现拷贝、SDL 绘制共用这一把锁。下文保留作为问题记录。
+
 > 记录时间：2026-09-30，关联 change gpu-stage-a-hw-decode-render（seek 冻结排查）
 
 ### 问题
@@ -141,3 +143,40 @@ hwctx->unlock = [](void* c) { static_cast<D3D11GpuDevice*>(c)->context_mutex_.un
 ```
 
 前提：共享设备已开启多线程保护（已完成），FFmpeg 的 `d3d11va_transfer_data` 等路径同样走该锁，特效节点的下载也因此被正确串行化。
+
+---
+
+## 5. 渲染器与 GPU 设备每个文件重建
+
+> 记录时间：2026-10-01，关联 change gpu-stage-b-gpu-effects（design Open Questions）
+
+### 问题
+
+`MediaPlayer::Open` 每次先 `Close()`，`VideoRenderer::Close/Open` 随之销毁并重建 SDL 窗口、SDL 渲染器、D3D11 设备、`GpuDevice` 包装与呈现器。设备是会话级资源，却跟着文件生灭。
+
+### 影响场景
+
+- **打开文件延迟**：每次打开都要重建设备与交换链，GPU pass 的着色器、常量缓冲也随之重建
+- **切换文件闪烁**：窗口与交换链重建期间画面空白
+
+### 改进建议（参考 MPV VO 生命周期 / VLC vout 复用）
+
+mpv 的 VO 与 hwdec 设备跨播放列表条目存活，只有输出参数不兼容时才重配；VLC 在格式兼容时复用 vout 与 decoder device。让 `VideoRenderer` 在窗口句柄不变时跨文件保持打开，`MediaPlayer::Close` 只销毁 graph；GPU pass 若也要跨文件复用，可由设备提供着色器/管线缓存（GStreamer `GstD3D11Device` 缓存 ps/vs/sampler）。
+
+---
+
+## 6. 硬件帧每次呈现都新建 SDL 包装纹理
+
+### 问题
+
+`VideoRenderer::RenderBoundTexture` 每帧 `SDL_CreateTextureWithProperties` 包装外部纹理（SDL 内部为其创建两个 SRV），画完即销毁。
+
+### 影响场景
+
+- **4K60 播放**：每秒 60 次纹理包装对象与 SRV 的创建/释放，驱动调用微秒级，目前可接受
+- **高帧率/多路视频**：开销线性增长
+
+### 改进建议（参考 GStreamer `GstD3D11Memory` 视图缓存 / mpv `ra_hwdec_mapper`）
+
+呈现器自有的拷贝纹理指针稳定，可长期缓存其 SDL 包装；GPU pass 输出纹理来自 FFmpeg 帧池、会被复用，可按纹理指针做小容量缓存（包装对象持有纹理引用，指针不会被复用到别的资源上）。
+

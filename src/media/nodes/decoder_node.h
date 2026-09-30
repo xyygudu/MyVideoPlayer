@@ -88,12 +88,9 @@ class DecoderNode : public INode {
     void DrainFrames();
     void CloseCodec();
 
-    // DrainFrames helpers; called with the device lock held.
+    // DrainFrames helper.
     /// True while seek catch-up discards frames before the target PTS.
     bool DropForSeek(double frame_pts);
-    /// Hardware frames get a presentation copy, or a software download when
-    /// the layout cannot be bound. Invalid result = download failed.
-    MediaFrame ToDownstreamFrame(AVFrame* frame);
 
     // Prepare helpers (resource allocation)
     bool FindAndOpenCodec(const AVCodecParameters* codecpar);
@@ -104,7 +101,8 @@ class DecoderNode : public INode {
     PixelFormat PickOutputPixelFormat(const AVCodec* codec) const;
 
     /// FFmpeg get_format callback: picks the graph device's hardware format
-    /// when the codec offers it, else falls back to the first software one.
+    /// when the codec offers it (building a device-refined surface pool),
+    /// else falls back to the first software one.
     static AVPixelFormat GetFormat(AVCodecContext* ctx,
                                    const AVPixelFormat* pix_fmts);
 
@@ -116,16 +114,6 @@ class DecoderNode : public INode {
     void MaybeFlushOnSerialChange(int serial);
     void ProcessPacket(MediaBuffer& buf);
     void HandleEos();
-
-    /// GPU device to take the command-context lock for, or null when this
-    /// decoder must NOT lock. Only hardware decode touches the shared D3D11
-    /// immediate context; software/audio decoders must not compete for it —
-    /// during a 4K seek the video path holds it for long stretches, starving
-    /// the audio decoder and stalling the audio clock (A/V sync collapses and
-    /// the whole pipeline blocks). Null = no lock (software/audio).
-    gpu::GpuDevice* HwDevice() const {
-        return (codec_ctx_ && codec_ctx_->hw_device_ctx) ? gpu_device_ : nullptr;
-    }
 
     NodeState state_{NodeState::kIdle};
     std::string name_{"DecoderNode"};

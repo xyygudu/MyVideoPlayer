@@ -2,55 +2,33 @@
 #define MVP_GPU_D3D11_DEVICE_H_
 
 #include <memory>
-#include <mutex>
-#include <vector>
 
 #include "gpu/gpu_device.h"
 
-struct ID3D11DeviceContext;
-struct ID3D11Texture2D;
-
 namespace mvp::gpu {
 
-/// D3D11VA backend: the only place in the codebase that mentions D3D11.
+/// D3D11VA backend. D3D11 types stay inside the gpu/d3d11_* sources.
 class D3D11GpuDevice final : public GpuDevice {
   public:
-    static std::unique_ptr<GpuDevice> Wrap(void* native_device);
+    static std::shared_ptr<GpuDevice> Wrap(void* native_device);
 
     ~D3D11GpuDevice() override;
 
     PixelFormat Domain() const override { return PixelFormat::kD3D11; }
     AVBufferRef* DeviceRef() const override { return device_ref_; }
     bool SupportsDecoder(const AVCodec* codec) const override;
-    void* CopyForPresentation(const AVFrame* hw_frame) override;
-    std::mutex& DeviceContextMutex() override { return context_mutex_; }
+    void RefineDecoderFrames(AVHWFramesContext* frames) const override;
+    void LockContext() override;
+    void UnlockContext() override;
+    std::unique_ptr<VideoPass> CreateVideoPass(VideoKernel kernel) override;
+    std::unique_ptr<FramePresenter> CreatePresenter() override;
 
   private:
-    explicit D3D11GpuDevice(AVBufferRef* device_ref);
-
-    // Returns a pool texture matching w/h/format, rebuilding the ring when
-    // the parameters change. Caller holds DeviceContextMutex().
-    ID3D11Texture2D* AcquirePoolTexture(int width, int height, int dxgi_format);
+    D3D11GpuDevice(AVBufferRef* device_ref, bool video_passes_supported);
 
     AVBufferRef* device_ref_{nullptr};
-    // The device's single immediate command context (D3D11 hands out one per
-    // device). Shared by FFmpeg decode/copy on the decode thread and SDL draw
-    // submission on the render thread; serialized by context_mutex_.
-    ID3D11DeviceContext* device_context_{nullptr};
-    // Serializes the shared immediate context; also guards the presentation
-    // pool bookkeeping. Non-recursive: CopyForPresentation must NOT re-lock
-    // it — its callers already hold it (see DecoderNode::DeviceLock).
-    std::mutex context_mutex_;
-
-    // Ring of individual shader-resource textures for presentation binding.
-    // Sized larger than the max frames in flight so a texture is never
-    // overwritten while the sink or a link still references it (same
-    // pool-size argument as the decoder's surface pool).
-    std::vector<ID3D11Texture2D*> pool_;
-    size_t pool_next_{0};
-    int pool_width_{0};
-    int pool_height_{0};
-    int pool_format_{0};
+    // Passes render into NV12 planes; not every GPU exposes planar targets.
+    bool video_passes_supported_{false};
 };
 
 }  // namespace mvp::gpu

@@ -1,7 +1,6 @@
 #include "nodes/decoder_node.h"
 
 #include <algorithm>
-#include <mutex>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -20,23 +19,33 @@ namespace mvp::graph {
 
 namespace {
 
-/// Serializes the shared device command context for FFmpeg codec calls.
-/// No-op without a GPU device (software decode shares nothing).
-/// NOT recursive: CopyForPresentation relies on being called while this lock
-/// is held, so it must never acquire the device mutex itself.
-class DeviceLock {
-  public:
-    explicit DeviceLock(gpu::GpuDevice* device)
-        : mutex_(device ? &device->DeviceContextMutex() : nullptr) {
-        if (mutex_) mutex_->lock();
-    }
-    ~DeviceLock() {
-        if (mutex_) mutex_->unlock();
-    }
+// Frames held downstream at once (link depth + the sink's current frame) must
+// not starve the decoder's fixed surface pool (mpv hwdec-extra-frames).
+constexpr int kExtraHwFrames = 6;
 
-  private:
-    std::mutex* mutex_;
-};
+// Builds the decoder surface pool here instead of letting FFmpeg do it, so the
+// GPU device can refine it (e.g. shader-readable surfaces for GPU passes).
+// Must run inside get_format (avcodec_get_hw_frames_parameters contract).
+bool InitHwFramesContext(AVCodecContext* ctx, gpu::GpuDevice* device,
+                         AVPixelFormat hw_format) {
+    AVBufferRef* params = nullptr;
+    if (avcodec_get_hw_frames_parameters(ctx, ctx->hw_device_ctx, hw_format, &params) < 0) {
+        return false;
+    }
+    AVBufferRefPtr frames(params);
+    auto* frames_ctx = reinterpret_cast<AVHWFramesContext*>(frames->data);
+    if (frames_ctx->initial_pool_size > 0) {
+        // FFmpeg's automatic path guarantees 4 work surfaces; the parameters above hold 1.
+        frames_ctx->initial_pool_size += 3;
+    }
+    device->RefineDecoderFrames(frames_ctx);
+    if (av_hwframe_ctx_init(frames.get()) < 0) {
+        return false;
+    }
+    av_buffer_unref(&ctx->hw_frames_ctx);
+    ctx->hw_frames_ctx = frames.release();
+    return true;
+}
 
 }  // namespace
 
@@ -179,6 +188,7 @@ bool DecoderNode::TryOpenCodec(const AVCodec* codec,
         codec_ctx_->opaque = gpu_device_;
         codec_ctx_->get_format = &DecoderNode::GetFormat;
         codec_ctx_->hw_device_ctx = av_buffer_ref(gpu_device_->DeviceRef());
+        codec_ctx_->extra_hw_frames = kExtraHwFrames;
     }
 
     if (avcodec_open2(codec_ctx_, codec, nullptr) < 0) {
@@ -195,9 +205,13 @@ AVPixelFormat DecoderNode::GetFormat(AVCodecContext* ctx,
     auto* device = static_cast<gpu::GpuDevice*>(ctx->opaque);
     AVPixelFormat hw = gpu::ToAvPixelFormat(device->Domain());
     for (const AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; ++p) {
-        if (*p == hw) {
-            return hw;
+        if (*p != hw) {
+            continue;
         }
+        if (!InitHwFramesContext(ctx, device, hw)) {
+            SPDLOG_WARN("DecoderNode: refined hw frame pool failed, using FFmpeg's default");
+        }
+        return hw;
     }
     return pix_fmts[0];  // Hardware not offered: decode in software.
 }
@@ -268,43 +282,32 @@ void DecoderNode::CloseCodec() {
 }
 
 void DecoderNode::DrainFrames() {
-    // Device ops (receive + copy/download) run under the device lock; the
-    // downstream Push runs OUTSIDE it. Push blocks when the link is full, and
-    // the sink needs the same device lock to render and free link space —
-    // holding the lock across Push would deadlock the pipeline.
+    // FFmpeg locks the shared device context internally (the device handed it
+    // its lock), so no app-level lock here: Push may block on a full link.
     while (running_.load(std::memory_order_relaxed)) {
-        MediaBuffer buf;
-        {
-            DeviceLock dev_lock(HwDevice());
-            AVFramePtr frame;
-            int ret = avcodec_receive_frame(codec_ctx_, frame.get());
-            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-                break;
-            }
-            if (ret < 0) {
-                SPDLOG_WARN("{}: receive_frame error {}", name_, ret);
-                break;
-            }
+        AVFramePtr frame;
+        int ret = avcodec_receive_frame(codec_ctx_, frame.get());
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+            break;
+        }
+        if (ret < 0) {
+            SPDLOG_WARN("{}: receive_frame error {}", name_, ret);
+            break;
+        }
 
-            double frame_pts = (frame->pts != AV_NOPTS_VALUE)
-                                   ? frame->pts * av_q2d(time_base_)
-                                   : 0.0;
-            if (DropForSeek(frame_pts)) {
-                continue;
-            }
-            MediaFrame mf = ToDownstreamFrame(frame.get());
-            if (!mf.IsValid()) {
-                continue;
-            }
-            MaybeAnnounceFormat(mf.RawFrame());
+        double frame_pts = (frame->pts != AV_NOPTS_VALUE)
+                               ? frame->pts * av_q2d(time_base_)
+                               : 0.0;
+        if (DropForSeek(frame_pts)) {
+            continue;
+        }
+        MaybeAnnounceFormat(frame.get());
 
-            Timestamp ts;
-            ts.pts = frame_pts;
-            ts.time_base = {time_base_.num, time_base_.den};
-            buf = MediaBuffer(std::move(mf), ts);
-            buf.set_serial(current_serial_);
-        }  // DeviceLock released: Push below must never run under it.
-
+        Timestamp ts;
+        ts.pts = frame_pts;
+        ts.time_base = {time_base_.num, time_base_.den};
+        MediaBuffer buf(MediaFrame(frame.get()), ts);
+        buf.set_serial(current_serial_);
         output_port_->Push(std::move(buf));
     }
 }
@@ -321,24 +324,6 @@ bool DecoderNode::DropForSeek(double frame_pts) {
     drop_until_pts_.store(0.0, std::memory_order_release);
     SPDLOG_DEBUG("{}: drop cleared at pts={:.3f}", name_, frame_pts);
     return false;
-}
-
-MediaFrame DecoderNode::ToDownstreamFrame(AVFrame* frame) {
-    MediaFrame mf(frame);
-    if (!frame->hw_frames_ctx || !gpu_device_) {
-        return mf;
-    }
-    if (void* tex = gpu_device_->CopyForPresentation(frame)) {
-        mf.SetHwPresentationTexture(tex);
-        return mf;
-    }
-    // Convert on the decode thread: the device command context must never be
-    // touched from the render thread, so the GPU→CPU fallback happens here.
-    MediaFrame sw = TransferToSoftware(mf);
-    if (!sw.IsValid()) {
-        SPDLOG_WARN("{}: hw frame download failed", name_);
-    }
-    return sw;
 }
 
 void DecoderNode::MaybeAnnounceFormat(const AVFrame* frame) {
@@ -383,12 +368,7 @@ void DecoderNode::MaybeFlushOnSerialChange(int serial) {
     if (serial == last_serial_) {
         return;
     }
-    {
-        // avcodec_flush_buffers submits to the shared device context; keep it
-        // exclusive with render-thread draw submission.
-        DeviceLock dev_lock(HwDevice());
-        avcodec_flush_buffers(codec_ctx_);
-    }
+    avcodec_flush_buffers(codec_ctx_);
     last_serial_ = serial;
     // AVDISCARD_NONREF accelerates software catch-up by skipping non-ref
     // frames. Hardware decode keeps AVDISCARD_DEFAULT: NONREF is not yet
@@ -400,13 +380,8 @@ void DecoderNode::MaybeFlushOnSerialChange(int serial) {
 }
 
 void DecoderNode::HandleEos() {
-    // Drain remaining frames, then propagate EOS downstream. The codec call
-    // submits to the shared device context; DrainFrames takes the device lock
-    // per frame internally and pushes outside it.
-    {
-        DeviceLock dev_lock(HwDevice());
-        avcodec_send_packet(codec_ctx_, nullptr);
-    }
+    // Drain remaining frames, then propagate EOS downstream.
+    avcodec_send_packet(codec_ctx_, nullptr);
     DrainFrames();
     output_port_->Push(MediaBuffer::MakeEos(current_serial_));
 }
@@ -416,14 +391,9 @@ void DecoderNode::ProcessPacket(MediaBuffer& buf) {
         return;  // Unexpected buffer type
     }
     AVPacketPtr& pkt = buf.AsPacket();
-    // A null/empty packet is a drain request. The send runs under the device
-    // lock; DrainFrames locks per frame and must not inherit it across Push.
+    // A null/empty packet is a drain request.
     AVPacket* to_send = (pkt.get() && pkt->data) ? pkt.get() : nullptr;
-    int ret;
-    {
-        DeviceLock dev_lock(HwDevice());
-        ret = avcodec_send_packet(codec_ctx_, to_send);
-    }
+    int ret = avcodec_send_packet(codec_ctx_, to_send);
     if (to_send && ret < 0 && ret != AVERROR(EAGAIN)) {
         SPDLOG_WARN("{}: send_packet error {}", name_, ret);
         return;

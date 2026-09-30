@@ -15,9 +15,7 @@ MediaGraph::MediaGraph() = default;
 
 MediaGraph::~MediaGraph() {
     Stop();
-    // Explicit order: nodes (which may still reference presentation pool
-    // textures in retained frames) must go before the GPU device frees the
-    // pool. Default member order would free the device first.
+    // Nodes (and the frames they retain) go before the graph's device reference.
     nodes_.clear();
     node_ptrs_.clear();
     gpu_device_.reset();
@@ -31,7 +29,7 @@ INode* MediaGraph::AddNode(std::unique_ptr<INode> node) {
     return ptr;
 }
 
-void MediaGraph::SetGpuDevice(std::unique_ptr<gpu::GpuDevice> device) {
+void MediaGraph::SetGpuDevice(std::shared_ptr<gpu::GpuDevice> device) {
     gpu_device_ = std::move(device);
 }
 

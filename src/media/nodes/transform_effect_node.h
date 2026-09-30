@@ -13,7 +13,13 @@
 
 struct AVFrame;
 
+namespace mvp::gpu {
+class VideoPass;
+}  // namespace mvp::gpu
+
 namespace mvp::graph {
+
+class MediaGraph;
 
 /// Snapshot of TransformEffectNode's geometry parameters, read once per
 /// frame (not once per pixel) so the remap loops only touch plain floats.
@@ -77,8 +83,13 @@ class TransformEffectNode : public IEffectNode {
     bool IsEnabled() const override { return enabled_.load(); }
     void SetEnabled(bool enabled) override { enabled_.store(enabled); }
 
+    void Attach(MediaGraph* graph) override { graph_ = graph; }
+
   private:
     TransformAffineParams SnapshotParams() const;
+    /// Hardware frames through the GPU pass; false = not handled (no pass or it failed).
+    bool TryProcessOnGpu(MediaBuffer& input, OutputCallback& emit,
+                         const TransformAffineParams& params);
     bool TryApplyPermute(const MediaFrame& src, MediaFrame& dst,
                          MediaBuffer& input, OutputCallback& emit);
     void ApplyBilinear(const MediaFrame& src, MediaFrame& dst,
@@ -104,6 +115,12 @@ class TransformEffectNode : public IEffectNode {
     std::atomic<bool> enabled_{true};
 
     bool logged_unsupported_format_{false};
+
+    MediaGraph* graph_{nullptr};
+    // Created in Prepare from the graph GPU device; null = CPU path only.
+    // Used on the processing (upstream decode) thread only.
+    std::unique_ptr<gpu::VideoPass> gpu_pass_;
+    bool logged_gpu_failure_{false};
 };
 
 }  // namespace mvp::graph

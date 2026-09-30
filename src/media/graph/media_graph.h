@@ -106,8 +106,8 @@ class MediaGraph {
 
     /// Set the GPU device shared by all nodes (injected by the pipeline
     /// builder before Open; decode/encode/effects derive their own contexts
-    /// from it). The graph owns it for its lifetime.
-    void SetGpuDevice(std::unique_ptr<gpu::GpuDevice> device);
+    /// from it). Co-owned with the renderer that provides it.
+    void SetGpuDevice(std::shared_ptr<gpu::GpuDevice> device);
 
     /// Non-owning accessor; valid until the graph is destroyed.
     gpu::GpuDevice* GpuDevice() const { return gpu_device_.get(); }
@@ -146,7 +146,7 @@ class MediaGraph {
     std::atomic<int> seek_epoch_{0};
     std::vector<std::shared_ptr<IClock>> clocks_;  // Every offered clock
     std::shared_ptr<IClock> master_clock_;
-    std::unique_ptr<gpu::GpuDevice> gpu_device_;   // Shared GPU device
+    std::shared_ptr<gpu::GpuDevice> gpu_device_;   // Shared GPU device
     EventCallback event_cb_;
 };
 

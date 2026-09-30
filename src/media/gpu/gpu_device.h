@@ -2,21 +2,21 @@
 #define MVP_GPU_GPU_DEVICE_H_
 
 #include <memory>
-#include <mutex>
 
+#include "gpu/frame_presenter.h"
+#include "gpu/video_pass.h"
 #include "media_frame.h"
 
 struct AVBufferRef;
 struct AVCodec;
-struct AVFrame;
+struct AVHWFramesContext;
 
 namespace mvp::gpu {
 
-/// GPU device shared by an entire graph (GStreamer-context style). The
-/// pipeline builder wraps the platform/backend device and injects it into
-/// MediaGraph before negotiation; decode, encode and effects then derive
-/// their own per-context resources from it. The graph is the sole owner;
-/// nodes hold non-owning pointers valid for the graph's lifetime.
+/// GPU device shared by the renderer that provides it and the graph that
+/// uses it (GStreamer-context style). Decode, effects and presentation derive
+/// their own resources from it through the factory methods below; the
+/// platform code lives only in the backend implementations.
 class GpuDevice {
   public:
     virtual ~GpuDevice() = default;
@@ -31,35 +31,42 @@ class GpuDevice {
     /// Whether the codec advertises hardware decoding on this device.
     virtual bool SupportsDecoder(const AVCodec* codec) const = 0;
 
-    /// Copies a decoded hardware frame into an individual texture owned by
-    /// the device, suitable for direct presentation binding. Decoder frames
-    /// live in array textures that presentation APIs cannot wrap, so this
-    /// is a GPU-side blit (mpv d3d11 interop pattern). Returns nullptr when
-    /// the frame layout is unsupported — the caller then converts on its own
-    /// thread via av_hwframe_transfer_data.
-    ///
-    /// Thread contract: SHALL be called on the decode thread only. The
-    /// device's command context is not thread-safe; keeping every device
-    /// operation on the thread that submits decode work is what keeps it
-    /// single-threaded (same model as the ffmpeg CLI).
-    virtual void* CopyForPresentation(const AVFrame* hw_frame) = 0;
+    /// Adjusts a decoder frame pool before av_hwframe_ctx_init so its
+    /// surfaces can also feed GPU passes (mpv hwframes_refine).
+    virtual void RefineDecoderFrames(AVHWFramesContext* frames) const = 0;
 
-    /// Mutex serializing the device's single immediate command context.
-    /// The backend device hands out ONE immediate context to every caller
-    /// (D3D11 GetImmediateContext is a per-device singleton), so all command
-    /// submission must be mutually exclusive across threads — decode submit +
-    /// CopyForPresentation on the decode thread, and draw submission on the
-    /// render thread (mpv's d3d11 ctx_lock model).
-    ///
-    /// Ownership: this mutex belongs to the device, which the graph owns. The
-    /// renderer holds a non-owning pointer to it (SetDeviceContextMutex) and
-    /// must clear it before the graph (and device) is destroyed.
-    virtual std::mutex& DeviceContextMutex() = 0;
+    /// The device command-context lock. Recursive, and the same lock FFmpeg
+    /// takes internally around decode submission and transfers. Hold it for
+    /// a single GPU operation only (one pass, one presentation copy + draw).
+    virtual void LockContext() = 0;
+    virtual void UnlockContext() = 0;
+
+    /// nullptr when the device cannot render into video surfaces.
+    virtual std::unique_ptr<VideoPass> CreateVideoPass(VideoKernel kernel) = 0;
+
+    virtual std::unique_ptr<FramePresenter> CreatePresenter() = 0;
 
     /// Wrap an externally owned native device (e.g. the ID3D11Device behind
-    /// an SDL3 renderer) so decode and presentation share one device.
+    /// an SDL3 renderer) so decode, effects and presentation share one device.
     /// Returns nullptr when the platform has no usable backend.
-    static std::unique_ptr<GpuDevice> WrapExternal(void* native_device);
+    static std::shared_ptr<GpuDevice> WrapExternal(void* native_device);
+};
+
+/// Holds the device context lock for a scope; no-op without a device.
+class ScopedContextLock {
+  public:
+    explicit ScopedContextLock(GpuDevice* device) : device_(device) {
+        if (device_) device_->LockContext();
+    }
+    ~ScopedContextLock() {
+        if (device_) device_->UnlockContext();
+    }
+
+    ScopedContextLock(const ScopedContextLock&) = delete;
+    ScopedContextLock& operator=(const ScopedContextLock&) = delete;
+
+  private:
+    GpuDevice* device_;
 };
 
 }  // namespace mvp::gpu

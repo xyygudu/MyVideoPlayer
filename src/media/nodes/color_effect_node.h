@@ -11,7 +11,13 @@
 #include "graph/node.h"
 #include "graph/port.h"
 
+namespace mvp::gpu {
+class VideoPass;
+}  // namespace mvp::gpu
+
 namespace mvp::graph {
+
+class MediaGraph;
 
 /// Transform node: adjusts brightness/contrast/saturation of decoded video
 /// frames.
@@ -55,7 +61,16 @@ class ColorEffectNode : public IEffectNode {
     bool IsEnabled() const override { return enabled_.load(); }
     void SetEnabled(bool enabled) override { enabled_.store(enabled); }
 
+    void Attach(MediaGraph* graph) override { graph_ = graph; }
+
   private:
+    /// Hardware frames through the GPU pass; false = not handled (no pass or it failed).
+    bool TryProcessOnGpu(MediaBuffer& input, OutputCallback& emit, float brightness,
+                         float contrast, float saturation);
+    /// LUT path; hardware frames are downloaded at the node boundary.
+    void ProcessOnCpu(MediaBuffer input, OutputCallback& emit, float brightness,
+                      float contrast, float saturation);
+
     NodeState state_{NodeState::kIdle};
 
     std::unique_ptr<InputPort> input_port_;
@@ -72,6 +87,12 @@ class ColorEffectNode : public IEffectNode {
     // Logs the "unsupported pixel format" warning at most once, to avoid
     // flooding spdlog every frame for an unsupported source.
     bool logged_unsupported_format_{false};
+
+    MediaGraph* graph_{nullptr};
+    // Created in Prepare from the graph GPU device; null = CPU path only.
+    // Used on the processing (upstream decode) thread only.
+    std::unique_ptr<gpu::VideoPass> gpu_pass_;
+    bool logged_gpu_failure_{false};
 };
 
 }  // namespace mvp::graph
