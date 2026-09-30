@@ -71,9 +71,9 @@ void PermuteCopy(const uint8_t* src, int src_ls, uint8_t* dst, int dst_ls,
         for (int x = 0; x < w; ++x) {
             int sx = x, sy = y;
             switch (rot) {
-                case 90:  sx = h - 1 - y; sy = x; break;
+                case 90:  sx = y; sy = w - 1 - x; break;  // Clockwise, as RemapPlane
                 case 180: sx = w - 1 - x; sy = h - 1 - y; break;
-                case 270: sx = y; sy = w - 1 - x; break;
+                case 270: sx = h - 1 - y; sy = x; break;
             }
             if (flip_h) sx = w - 1 - sx;
             if (flip_v) sy = h - 1 - sy;
@@ -120,9 +120,10 @@ AffineMapping ComputeAffineMapping(const graph::TransformAffineParams& p, int pl
     if (p.flip_h) sx = -sx;
     if (p.flip_v) sy = -sy;
 
+    // Flip/scale act in the image's own axes, then rotate: inverse = diag(sx, sy) * R(-t).
     m.inv[0] = sx * cos_t;
-    m.inv[1] = sx * sin_t * (p.flip_h ? -1.0f : 1.0f);
-    m.inv[2] = -sy * sin_t * (p.flip_v ? -1.0f : 1.0f);
+    m.inv[1] = sx * sin_t;
+    m.inv[2] = -sy * sin_t;
     m.inv[3] = sy * cos_t;
     return m;
 }
