@@ -1,7 +1,6 @@
 #include "video_renderer.h"
 
 #include <algorithm>
-#include <chrono>
 #include <mutex>
 
 extern "C" {
@@ -46,9 +45,22 @@ bool VideoRenderer::Open(void* native_window_handle, int width, int height) {
         return false;
     }
 
+    if (!CreateRenderer()) {
+        SDL_DestroyWindow(window_);
+        window_ = nullptr;
+        return false;
+    }
+    ProbeBackend();
+    return true;
+}
+
+bool VideoRenderer::CreateRenderer() {
     // Prefer the D3D11 backend: it is the only one that can bind
     // hardware-decoded textures directly for zero-copy presentation.
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "direct3d11");
+    // NativeDevice() is shared with the decode thread; SDL defaults to a
+    // D3D11_CREATE_DEVICE_SINGLETHREADED device.
+    SDL_SetHint(SDL_HINT_RENDER_DIRECT3D_THREADSAFE, "1");
     renderer_ = SDL_CreateRenderer(window_, nullptr);
     if (!renderer_) {
         SDL_SetHint(SDL_HINT_RENDER_DRIVER, nullptr);  // let SDL pick any
@@ -56,11 +68,12 @@ bool VideoRenderer::Open(void* native_window_handle, int width, int height) {
     }
     if (!renderer_) {
         spdlog::error("SDL_CreateRenderer failed: {}", SDL_GetError());
-        SDL_DestroyWindow(window_);
-        window_ = nullptr;
         return false;
     }
+    return true;
+}
 
+void VideoRenderer::ProbeBackend() {
     SDL_PropertiesID rprops = SDL_GetRendererProperties(renderer_);
     const char* backend =
         SDL_GetStringProperty(rprops, SDL_PROP_RENDERER_NAME_STRING, "unknown");
@@ -71,9 +84,8 @@ bool VideoRenderer::Open(void* native_window_handle, int width, int height) {
     }
 
     spdlog::info("VideoRenderer opened ({}x{}, backend '{}', hw binding {})",
-                 width, height, backend,
+                 window_width_, window_height_, backend,
                  bindable_domain_ != PixelFormat::kUnknown ? "on" : "off");
-    return true;
 }
 
 void VideoRenderer::Close() {
@@ -110,15 +122,9 @@ void VideoRenderer::Render(const MediaFrame& frame) {
     // SDL and FFmpeg share the device's single immediate context; all draw
     // submission runs under the graph device's mutex (see SetDeviceContextMutex).
     // Null mutex = software pipeline, no shared command context to serialize.
-    const auto tl0 = std::chrono::steady_clock::now();
     std::unique_lock<std::mutex> dev_lock;
     if (device_ctx_mutex_) {
         dev_lock = std::unique_lock<std::mutex>(*device_ctx_mutex_);
-    }
-    const double dtl = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - tl0).count();
-    if (dtl > 1.0) {
-        spdlog::warn("VideoRenderer: device-lock acquire stalled {:.3f}s", dtl);
     }
 
     switch (gpu::FromAvPixelFormat(frame.RawFrame()->format)) {

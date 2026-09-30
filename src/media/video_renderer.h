@@ -57,6 +57,10 @@ class VideoRenderer {
     void SetDeviceContextMutex(std::mutex* mutex) { device_ctx_mutex_ = mutex; }
 
   private:
+    // Open helpers
+    bool CreateRenderer();
+    void ProbeBackend();
+
     // Software path: YUV420P direct upload
     void RenderYUV420P(const MediaFrame& frame);
     // Software path: format conversion fallback

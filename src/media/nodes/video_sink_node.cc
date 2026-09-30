@@ -191,7 +191,6 @@ void VideoSinkNode::SyncAndRender(MediaBuffer buf, double& last_pts,
     double pts = buf.timestamp().pts;
 
     double delay = ComputeDisplayDelay(pts, last_pts, last_display_time);
-    SPDLOG_DEBUG("VideoSinkNode: render pts={:.3f} delay={:.3f}", pts, delay);
     if (delay > 0.0) {
         std::this_thread::sleep_for(
             std::chrono::microseconds(static_cast<int64_t>(delay * 1e6)));
@@ -205,20 +204,12 @@ void VideoSinkNode::SyncAndRender(MediaBuffer buf, double& last_pts,
 
 void VideoSinkNode::PresentFrame(MediaFrame frame) {
     current_frame_ = std::move(frame);
-    const auto t0 = std::chrono::steady_clock::now();
     renderer_->Render(current_frame_);
-    const double dt = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - t0).count();
-    if (dt > 1.0) {
-        SPDLOG_WARN("VideoSinkNode: Render stalled {:.3f}s", dt);
-    }
 }
 
 void VideoSinkNode::RedrawCurrent() {
     if (current_frame_.IsValid()) {
-        SPDLOG_DEBUG("VideoSinkNode: redraw enter");
         renderer_->Render(current_frame_);
-        SPDLOG_DEBUG("VideoSinkNode: redraw leave");
     }
 }
 
@@ -256,8 +247,6 @@ void VideoSinkNode::RenderLoop() {
         }
         MediaBuffer& buf = *opt_buf;
 
-        SPDLOG_DEBUG("VideoSinkNode: pulled frame pts={:.3f}",
-                     buf.timestamp().pts);
         if (HasFlag(buf.flags(), BufferFlags::kEos)) {
             if (graph_) {
                 graph_->ReportEvent(GraphEvent::kEos);
@@ -270,6 +259,8 @@ void VideoSinkNode::RenderLoop() {
         }
 
         if (paused_.load(std::memory_order_relaxed)) {
+            SPDLOG_DEBUG("VideoSinkNode: step present pts={:.3f}",
+                         buf.timestamp().pts);
             last_pts = buf.timestamp().pts;
             last_display_time = Clock::Now();
             clock_->Set(last_pts);

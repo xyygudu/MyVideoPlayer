@@ -1,7 +1,6 @@
 #include "nodes/decoder_node.h"
 
 #include <algorithm>
-#include <chrono>
 #include <mutex>
 
 extern "C" {
@@ -38,23 +37,6 @@ class DeviceLock {
   private:
     std::mutex* mutex_;
 };
-
-/// D3D11VA backing software format for the surface pool, derived from the
-/// source pixel format (8-bit -> NV12, 10-bit -> P010, 12-bit -> P016).
-/// NV12 (not YUV420P) is required: AV_PIX_FMT_YUV420P maps to the opaque
-/// DXGI_FORMAT_420_OPAQUE, which av_hwframe_transfer_data cannot handle.
-AVPixelFormat D3d11SwFormat(AVPixelFormat src) {
-    switch (src) {
-        case AV_PIX_FMT_YUV420P10:
-        case AV_PIX_FMT_YUV420P10BE:
-            return AV_PIX_FMT_P010;
-        case AV_PIX_FMT_YUV420P12:
-        case AV_PIX_FMT_YUV420P12BE:
-            return AV_PIX_FMT_P016;
-        default:
-            return AV_PIX_FMT_NV12;
-    }
-}
 
 }  // namespace
 
@@ -197,35 +179,6 @@ bool DecoderNode::TryOpenCodec(const AVCodec* codec,
         codec_ctx_->opaque = gpu_device_;
         codec_ctx_->get_format = &DecoderNode::GetFormat;
         codec_ctx_->hw_device_ctx = av_buffer_ref(gpu_device_->DeviceRef());
-
-        // FFmpeg's default D3D11VA surface pool (20) is too small for 4K
-        // H.264: the DPB plus in-flight surfaces can reach the pool size
-        // right after a seek's PTS-drop catch-up, after which
-        // avcodec_send_packet blocks forever waiting for a free surface.
-        // Build the frames context by hand with more headroom
-        // (avcodec_get_hw_frames_parameters crashes before open2 for
-        // D3D11VA, so it cannot be used here).
-        AVBufferRef* hw_frames_ref =
-            av_hwframe_ctx_alloc(codec_ctx_->hw_device_ctx);
-        if (hw_frames_ref) {
-            auto* fctx =
-                reinterpret_cast<AVHWFramesContext*>(hw_frames_ref->data);
-            fctx->format = AV_PIX_FMT_D3D11;
-            fctx->sw_format = D3d11SwFormat(codec_ctx_->sw_pix_fmt);
-            fctx->width = codec_ctx_->width;
-            fctx->height = codec_ctx_->height;
-            fctx->initial_pool_size = 32;
-            if (av_hwframe_ctx_init(hw_frames_ref) >= 0) {
-                av_buffer_unref(&codec_ctx_->hw_frames_ctx);
-                codec_ctx_->hw_frames_ctx = hw_frames_ref;
-                SPDLOG_INFO("DecoderNode: D3D11VA pool set to {} surfaces",
-                            fctx->initial_pool_size);
-            } else {
-                av_buffer_unref(&hw_frames_ref);
-                SPDLOG_WARN("DecoderNode: explicit D3D11VA frames context "
-                            "failed, keeping FFmpeg default pool");
-            }
-        }
     }
 
     if (avcodec_open2(codec_ctx_, codec, nullptr) < 0) {
@@ -320,105 +273,85 @@ void DecoderNode::DrainFrames() {
     // the sink needs the same device lock to render and free link space —
     // holding the lock across Push would deadlock the pipeline.
     while (running_.load(std::memory_order_relaxed)) {
-        AVFramePtr frame;
         MediaBuffer buf;
         {
-            const auto tl0 = std::chrono::steady_clock::now();
             DeviceLock dev_lock(HwDevice());
-            const double dtl = std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - tl0).count();
-            if (dtl > 1.0) {
-                SPDLOG_WARN("{}: device-lock acquire stalled {:.3f}s", name_, dtl);
-            }
-            SPDLOG_DEBUG("{}: drain receive start", name_);
-            const auto t0 = std::chrono::steady_clock::now();
+            AVFramePtr frame;
             int ret = avcodec_receive_frame(codec_ctx_, frame.get());
-            SPDLOG_DEBUG("{}: receive returned ret={}", name_, ret);
-            const double dt = std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - t0).count();
-            if (dt > 1.0) {
-                SPDLOG_WARN("{}: receive_frame stalled {:.3f}s", name_, dt);
-            }
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                 break;
             }
             if (ret < 0) {
-                SPDLOG_WARN("DecoderNode: receive_frame error {}", ret);
+                SPDLOG_WARN("{}: receive_frame error {}", name_, ret);
                 break;
             }
 
             double frame_pts = (frame->pts != AV_NOPTS_VALUE)
                                    ? frame->pts * av_q2d(time_base_)
                                    : 0.0;
-
-            // Seek optimization: drop frames before target PTS
-            double target = drop_until_pts_.load(std::memory_order_acquire);
-            if (target > 0.0 && frame_pts < target) {
-                SPDLOG_DEBUG("{}: DROP frame pts={:.3f} (target={:.3f})",
-                             name_, frame_pts, target);
+            if (DropForSeek(frame_pts)) {
                 continue;
             }
-
-            // Reached target: restore normal decode
-            if (target > 0.0) {
-                codec_ctx_->skip_frame = AVDISCARD_DEFAULT;
-                drop_until_pts_.store(0.0, std::memory_order_release);
-                SPDLOG_DEBUG("{}: drop cleared at pts={:.3f}", name_, frame_pts);
-            }
-
-            MediaFrame mf(frame.get());
-            if (frame->hw_frames_ctx && gpu_device_) {
-                const auto tc = std::chrono::steady_clock::now();
-                void* tex = gpu_device_->CopyForPresentation(frame.get());
-                const double dtc = std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - tc).count();
-                if (dtc > 1.0) {
-                    SPDLOG_WARN("{}: CopyForPresentation stalled {:.3f}s", name_, dtc);
-                }
-                if (tex) {
-                    mf.SetHwPresentationTexture(tex);
-                } else {
-                    // Convert on the decode thread: the device command context
-                    // must never be touched from the render thread, so the
-                    // GPU→CPU fallback happens here (ffmpeg CLI single-thread).
-                    const auto tt = std::chrono::steady_clock::now();
-                    mf = TransferToSoftware(mf);
-                    const double dtt = std::chrono::duration<double>(
-                        std::chrono::steady_clock::now() - tt).count();
-                    if (dtt > 1.0) {
-                        SPDLOG_WARN("{}: TransferToSoftware stalled {:.3f}s",
-                                    name_, dtt);
-                    }
-                    if (!mf.IsValid()) {
-                        SPDLOG_WARN("DecoderNode: hw frame download failed");
-                        continue;
-                    }
-                }
+            MediaFrame mf = ToDownstreamFrame(frame.get());
+            if (!mf.IsValid()) {
+                continue;
             }
             MaybeAnnounceFormat(mf.RawFrame());
 
             Timestamp ts;
             ts.pts = frame_pts;
             ts.time_base = {time_base_.num, time_base_.den};
-
             buf = MediaBuffer(std::move(mf), ts);
             buf.set_serial(current_serial_);
-            SPDLOG_DEBUG("{}: PUSH frame pts={:.3f}", name_, frame_pts);
         }  // DeviceLock released: Push below must never run under it.
 
-        {
-            const auto t0 = std::chrono::steady_clock::now();
-            output_port_->Push(std::move(buf));
-            const double dt = std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - t0).count();
-            if (dt > 1.0) {
-                SPDLOG_WARN("{}: push stalled {:.3f}s", name_, dt);
-            }
-        }
+        output_port_->Push(std::move(buf));
     }
 }
 
+bool DecoderNode::DropForSeek(double frame_pts) {
+    const double target = drop_until_pts_.load(std::memory_order_acquire);
+    if (target <= 0.0) {
+        return false;
+    }
+    if (frame_pts < target) {
+        return true;
+    }
+    codec_ctx_->skip_frame = AVDISCARD_DEFAULT;
+    drop_until_pts_.store(0.0, std::memory_order_release);
+    SPDLOG_DEBUG("{}: drop cleared at pts={:.3f}", name_, frame_pts);
+    return false;
+}
+
+MediaFrame DecoderNode::ToDownstreamFrame(AVFrame* frame) {
+    MediaFrame mf(frame);
+    if (!frame->hw_frames_ctx || !gpu_device_) {
+        return mf;
+    }
+    if (void* tex = gpu_device_->CopyForPresentation(frame)) {
+        mf.SetHwPresentationTexture(tex);
+        return mf;
+    }
+    // Convert on the decode thread: the device command context must never be
+    // touched from the render thread, so the GPU→CPU fallback happens here.
+    MediaFrame sw = TransferToSoftware(mf);
+    if (!sw.IsValid()) {
+        SPDLOG_WARN("{}: hw frame download failed", name_);
+    }
+    return sw;
+}
+
 void DecoderNode::MaybeAnnounceFormat(const AVFrame* frame) {
+    // FFmpeg's get_format rebuilds the hw decoder + surface pool after every
+    // flush; the old pool dies with the last frame still referencing it.
+    if (frame->hw_frames_ctx && frame->hw_frames_ctx->data != announced_frames_ctx_) {
+        if (announced_frames_ctx_) {
+            SPDLOG_INFO("{}: hw frames context replaced (old={}, new={})", name_,
+                        announced_frames_ctx_,
+                        static_cast<const void*>(frame->hw_frames_ctx->data));
+        }
+        announced_frames_ctx_ = frame->hw_frames_ctx->data;
+    }
     // Audio frames use the same AVFrame::format field for sample formats;
     // this correction applies to video only.
     if (media_type_ != MediaType::kVideo || frame->format == announced_av_format_) {
@@ -453,26 +386,13 @@ void DecoderNode::MaybeFlushOnSerialChange(int serial) {
     {
         // avcodec_flush_buffers submits to the shared device context; keep it
         // exclusive with render-thread draw submission.
-        const auto tml = std::chrono::steady_clock::now();
         DeviceLock dev_lock(HwDevice());
-        const double dtml = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - tml).count();
-        if (dtml > 1.0) {
-            SPDLOG_WARN("{}: flush device-lock acquire stalled {:.3f}s", name_, dtml);
-        }
-        const auto t0 = std::chrono::steady_clock::now();
         avcodec_flush_buffers(codec_ctx_);
-        const double dt = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - t0).count();
-        if (dt > 1.0) {
-            SPDLOG_WARN("{}: flush_buffers stalled {:.3f}s", name_, dt);
-        }
     }
     last_serial_ = serial;
     // AVDISCARD_NONREF accelerates software catch-up by skipping non-ref
-    // frames. Hardware decode must not use it: D3D11VA surfaces leak when
-    // outputs are discarded, the pool drains and send_packet blocks forever
-    // (mpv/ffplay likewise rely on PTS-drop only under hwaccel).
+    // frames. Hardware decode keeps AVDISCARD_DEFAULT: NONREF is not yet
+    // validated with D3D11VA (see docs/improvements/seek-performance.md).
     if (codec_ctx_->hw_device_ctx == nullptr &&
         drop_until_pts_.load(std::memory_order_acquire) > 0.0) {
         codec_ctx_->skip_frame = AVDISCARD_NONREF;
@@ -496,60 +416,19 @@ void DecoderNode::ProcessPacket(MediaBuffer& buf) {
         return;  // Unexpected buffer type
     }
     AVPacketPtr& pkt = buf.AsPacket();
-    const auto tp = std::chrono::steady_clock::now();
-    SPDLOG_DEBUG("{}: process_packet start serial={}", name_, buf.serial());
-    // avcodec_send_packet submits to the shared device context; keep the
-    // critical section short — DrainFrames below locks/unlocks per frame and
-    // must not inherit this lock across its blocking Push.
-    if (!pkt.get() || !pkt->data) {
-        // Null/empty packet — treat as a flush request.
-        {
-            const auto tfl = std::chrono::steady_clock::now();
-            DeviceLock dev_lock(HwDevice());
-            const double dtfl = std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - tfl).count();
-            if (dtfl > 1.0) {
-                SPDLOG_WARN("{}: flush device-lock acquire stalled {:.3f}s",
-                            name_, dtfl);
-            }
-            avcodec_send_packet(codec_ctx_, nullptr);
-        }
-        DrainFrames();
-        const double dtpf = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - tp).count();
-        if (dtpf > 1.0) {
-            SPDLOG_WARN("{}: ProcessPacket(flush) stalled {:.3f}s", name_, dtpf);
-        }
+    // A null/empty packet is a drain request. The send runs under the device
+    // lock; DrainFrames locks per frame and must not inherit it across Push.
+    AVPacket* to_send = (pkt.get() && pkt->data) ? pkt.get() : nullptr;
+    int ret;
+    {
+        DeviceLock dev_lock(HwDevice());
+        ret = avcodec_send_packet(codec_ctx_, to_send);
+    }
+    if (to_send && ret < 0 && ret != AVERROR(EAGAIN)) {
+        SPDLOG_WARN("{}: send_packet error {}", name_, ret);
         return;
     }
-    {
-        const auto tsl = std::chrono::steady_clock::now();
-        DeviceLock dev_lock(HwDevice());
-        const double dts = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - tsl).count();
-        if (dts > 1.0) {
-            SPDLOG_WARN("{}: send device-lock acquire stalled {:.3f}s", name_, dts);
-        }
-        SPDLOG_DEBUG("{}: send_packet start", name_);
-        const auto t0 = std::chrono::steady_clock::now();
-        int ret = avcodec_send_packet(codec_ctx_, pkt.get());
-        SPDLOG_DEBUG("{}: send_packet returned ret={}", name_, ret);
-        const double dt = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - t0).count();
-        if (dt > 1.0) {
-            SPDLOG_WARN("{}: send_packet stalled {:.3f}s", name_, dt);
-        }
-        if (ret < 0 && ret != AVERROR(EAGAIN)) {
-            SPDLOG_WARN("DecoderNode: send_packet error {}", ret);
-            return;
-        }
-    }
     DrainFrames();
-    const double dtp = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - tp).count();
-    if (dtp > 1.0) {
-        SPDLOG_WARN("{}: ProcessPacket stalled {:.3f}s", name_, dtp);
-    }
 }
 
 void DecoderNode::DecodeLoop() {
@@ -561,7 +440,6 @@ void DecoderNode::DecodeLoop() {
         MediaBuffer& buf = *opt_buf;
 
         current_serial_ = buf.serial();
-        SPDLOG_DEBUG("{}: pulled packet serial={}", name_, buf.serial());
         MaybeFlushOnSerialChange(buf.serial());
 
         if (HasFlag(buf.flags(), BufferFlags::kEos)) {

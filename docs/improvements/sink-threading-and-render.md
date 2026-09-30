@@ -106,3 +106,38 @@ std::atomic<int> window_height_{0};
 两条路二选一：
 - 若采纳 link-and-buffer-design 第 3 条的「生产者自我节流」改造，该场景成为真实保证，spec 可保留
 - 若不改造，spec 应改为如实描述：容量参数只是降低支路互相饿死的概率
+
+---
+
+## 4. 设备锁包住整个 avcodec 调用，粒度过粗
+
+> 记录时间：2026-09-30，关联 change gpu-stage-a-hw-decode-render（seek 冻结排查）
+
+### 问题
+
+`GpuDevice::DeviceContextMutex()` 由应用层在 DecoderNode 中包住**整个** `avcodec_send_packet` / `avcodec_receive_frame` / `avcodec_flush_buffers`，渲染线程的 `VideoRenderer::Render` 也拿同一把锁。FFmpeg 内部另有一把自己的 D3D11 设备锁（`AVD3D11VADeviceContext.lock`，默认是内部 Windows mutex），两把锁互不知情：
+
+- 解码调用中的纯 CPU 部分（码流解析、slice 头处理、PTS 计算）也把渲染线程挡在门外
+- 解码一旦卡在驱动里，渲染线程一定跟着卡死（seek 冻结时正是这样表现为「画面不刷新」）
+- 两把锁并存，将来若有代码在持有其一时去拿另一把，就有锁序反转风险
+
+### 影响场景
+
+- **4K 高码率播放**：关键帧解码持锁 10ms+，渲染线程 Present 被推迟，出现偶发掉帧
+- **故障放大**：解码侧任何阻塞都直接冻结画面，而不是只影响解码
+
+### 改进建议（参考 VLC d3d11va `context_mutex` / FFmpeg `AVD3D11VADeviceContext.lock` 文档）
+
+FFmpeg 文档说明 `lock/unlock` 回调「保护对 device_context 与 video_context 的访问」，且**必须是递归锁**。在 `D3D11GpuDevice::Wrap` 中于 `av_hwdevice_ctx_init` 之前把设备锁交给 FFmpeg，让 FFmpeg 只在真正提交 D3D11 命令时加锁；应用层只保留 blit 与渲染两处：
+
+```cpp
+// D3D11GpuDevice::Wrap
+hwctx->lock_ctx = this;
+hwctx->lock   = [](void* c) { static_cast<D3D11GpuDevice*>(c)->context_mutex_.lock(); };
+hwctx->unlock = [](void* c) { static_cast<D3D11GpuDevice*>(c)->context_mutex_.unlock(); };
+// context_mutex_ 改为 std::recursive_mutex
+
+// DecoderNode：删除 send/receive/flush 外层的 DeviceLock，仅 CopyForPresentation 保留
+```
+
+前提：共享设备已开启多线程保护（已完成），FFmpeg 的 `d3d11va_transfer_data` 等路径同样走该锁，特效节点的下载也因此被正确串行化。

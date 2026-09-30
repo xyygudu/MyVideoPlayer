@@ -9,6 +9,7 @@ extern "C" {
 }
 // Pulls in <d3d11.h>; must stay in C++ linkage (operator overloads).
 #include <libavutil/hwcontext_d3d11va.h>
+#include <d3d10.h>
 #include <spdlog/spdlog.h>
 
 namespace mvp::gpu {
@@ -18,6 +19,23 @@ namespace {
 // can hold simultaneously (link depth 3 + current frame), so a texture is
 // only reused after every outstanding reference to it has been presented.
 constexpr size_t kPoolSize = 8;
+
+// Refcounted AVFrames release D3D11 textures on whichever thread drops the
+// last reference (sink, control), outside any app-level lock. FFmpeg, mpv and
+// VLC all enable this on devices shared between decode and presentation.
+// Fails for devices created with D3D11_CREATE_DEVICE_SINGLETHREADED.
+bool EnableMultithreadProtection(ID3D11Device* device) {
+    ID3D10Multithread* mt = nullptr;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&mt))) || !mt) {
+        return false;
+    }
+    const BOOL was_on = mt->GetMultithreadProtected();
+    mt->SetMultithreadProtected(TRUE);
+    mt->Release();
+    SPDLOG_INFO("GpuDevice(D3D11): multithread protection {}",
+                was_on ? "already on" : "was off, enabled");
+    return true;
+}
 }  // namespace
 
 D3D11GpuDevice::D3D11GpuDevice(AVBufferRef* device_ref)
@@ -46,6 +64,11 @@ D3D11GpuDevice::~D3D11GpuDevice() {
 std::unique_ptr<GpuDevice> D3D11GpuDevice::Wrap(void* native_device) {
     if (!native_device) {
         SPDLOG_WARN("GpuDevice(D3D11): null native device");
+        return nullptr;
+    }
+    if (!EnableMultithreadProtection(static_cast<ID3D11Device*>(native_device))) {
+        SPDLOG_WARN("GpuDevice(D3D11): device is single-threaded, cannot be "
+                    "shared across decode/render threads; hw decode disabled");
         return nullptr;
     }
 

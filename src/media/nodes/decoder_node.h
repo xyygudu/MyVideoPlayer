@@ -88,6 +88,13 @@ class DecoderNode : public INode {
     void DrainFrames();
     void CloseCodec();
 
+    // DrainFrames helpers; called with the device lock held.
+    /// True while seek catch-up discards frames before the target PTS.
+    bool DropForSeek(double frame_pts);
+    /// Hardware frames get a presentation copy, or a software download when
+    /// the layout cannot be bound. Invalid result = download failed.
+    MediaFrame ToDownstreamFrame(AVFrame* frame);
+
     // Prepare helpers (resource allocation)
     bool FindAndOpenCodec(const AVCodecParameters* codecpar);
     bool TryOpenCodec(const AVCodec* codec, const AVCodecParameters* codecpar,
@@ -136,6 +143,7 @@ class DecoderNode : public INode {
     // Prepare, and by FFmpeg through GetFormat during codec open.
     gpu::GpuDevice* gpu_device_{nullptr};
     int announced_av_format_{-1};  // Last AVPixelFormat pushed to the port
+    const void* announced_frames_ctx_{nullptr};  // Decode thread only
 
     // Ports
     std::unique_ptr<InputPort> input_port_;

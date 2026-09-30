@@ -14,6 +14,8 @@ seek 期间 CPU 采样显示：**78.74% 时间在 `Decoder::DecodeLoop`**，其�
 
 ## 1. 未启用硬件解码，纯 CPU 软解 2K H.264（最大瓶颈）
 
+> **已解决（2026-09-30，change gpu-stage-a-hw-decode-render）**：D3D11VA 硬解 + 零拷贝呈现，4K H.264 硬解约 240 帧/秒。剩余延迟见第 9 项。
+
 ### 问题
 
 当前 `Decoder::Open` 直接使用软件解码器（`avcodec_find_decoder`），2K H.264 每帧软解约 5ms。seek 时需要解码整个 GOP 前部的参考帧（60fps, GOP=2-5s, 120-300 帧），纯 CPU 计算耗时 600ms+。
@@ -52,6 +54,8 @@ bool Decoder::Open(AVStream* stream) {
 
 ## 2. Seek 期间未使用 `skip_frame` 跳过非参考帧（低难度高收益）
 
+> **部分解决**：软解已启用 `AVDISCARD_NONREF`；硬解未启用，见第 11 项。
+
 ### 问题
 
 seek 期间 FFmpeg 解码器默认解码所有帧（包括 B 帧等非参考帧）。这些非参考帧对后续帧的解码无贡献，seek 时解码它们纯属浪费 CPU。
@@ -78,6 +82,8 @@ codec_ctx_->skip_frame = AVDISCARD_DEFAULT;  // 恢复正常解码
 ---
 
 ## 3. 解码器层面未做帧丢弃，目标前帧仍入队流转
+
+> **已解决**：`DecoderNode::DropForSeek` 在解码线程按目标 PTS 丢帧，不进入链路。
 
 ### 问题
 
@@ -251,6 +257,8 @@ class VideoRenderer {
 
 ## 8. 渲染管线缺少全链路 GPU 零拷贝架构
 
+> **已解决（2026-09-30，change gpu-stage-a-hw-decode-render）**：解码线程 blit 到呈现纹理池，SDL3 外部纹理绑定呈现；设备由图协商注入而非 HWAccelContext。
+
 ### 问题
 
 当前视频帧从 Decoder 到显示经历：AVFrame (CPU YUV) → FrameConverter → SDL_UpdateYUVTexture (CPU→GPU 上传) → SDL_RenderTexture。即使未来启用硬解，若简单做 `av_hwframe_transfer_data`（GPU→CPU 拷贝再上传），4K NV12 帧 ~12MB，GPU→CPU→GPU 往返 2-3ms/帧，60fps 下占 12-18% 帧预算，抵消硬解收益。
@@ -323,3 +331,78 @@ class VideoRenderer {
 - GPU 模式：解码+渲染全程零拷贝，4K 60fps 无压力
 - CPU 模式：维持现状，仅 SDL_UpdateYUVTexture 一次上传（已是最优）
 - 无需引入 OpenGL —— SDL3 D3D11 后端原生覆盖零拷贝需求
+
+---
+
+## 9. 拖动进度条时每次都做精确 seek（硬解后的主要剩余延迟）
+
+> 记录时间：2026-09-30，数据来自 4K 60fps H.264（bbb_sunflower_2160p_60fps）硬解实测
+
+### 问题
+
+`QSlider::sliderMoved` 与 `sliderReleased` 都路由到 `PlayerPage::OnSliderMoved` → `MediaPlayer::Seek`，走的都是精确 seek：demux 回到目标前最近的关键帧（`AVSEEK_FLAG_BACKWARD`），解码器从关键帧一路解到目标 PTS 再显示。硬解吞吐约 240 帧/秒，延迟完全取决于目标离关键帧多远：
+
+| seek 目标 | 请求 → 首帧 |
+|---|---|
+| 399.14s | 0.02s |
+| 194.18s | 0.06s |
+| 343.94s | 0.30s |
+| 111.05s | 0.62s |
+| 316.65s | 0.97s |
+
+### 影响场景
+
+- **拖动进度条**：拖动期间画面停在旧帧，要等最后一次精确 seek 追完才更新，体感「不是秒切」
+- **长 GOP 片源**：关键帧间隔越大，最坏延迟越接近「GOP 长度 / 解码帧率」
+- **连续拖动**：每次中间 seek 都会触发 flush + FFmpeg 重建硬件解码器（见第 10 项），全部被下一次 seek 作废
+
+### 改进建议（参考 MPV OSC：拖动中 keyframe seek，松手 exact seek）
+
+MPV 的 OSC 在拖动时发 `seek <pos> absolute+keyframes`，松手后才发 `absolute+exact`；FFplay 默认只做关键帧 seek。把 seek 精度提升为接口参数，由 UI 按交互阶段选择：
+
+```cpp
+enum class SeekMode { kExact, kKeyframe };
+void MediaPlayer::Seek(double pos, SeekMode mode);
+
+// DecoderNode::OnCommand(kSeek)
+drop_until_pts_ = (cmd.mode == SeekMode::kExact) ? cmd.position : 0.0;  // keyframe: 不追帧
+
+// PlayerPage：拆开两个信号
+sliderMoved    -> player_->Seek(pos, SeekMode::kKeyframe);  // 拖动中：秒切到关键帧
+sliderReleased -> player_->Seek(pos, SeekMode::kExact);     // 松手：精确到目标
+```
+
+注意 keyframe 模式下音频时钟要以 demux 实际落点（首个视频关键帧 PTS）为准重置，而不是以请求位置重置，否则 A/V 会短暂失步。
+
+---
+
+## 10. 每次 seek 都触发 FFmpeg 重建硬件解码器与 surface 池
+
+### 问题
+
+h264 解码器 `avcodec_flush_buffers` 后 `context_initialized=0`，下一个关键帧重走 `get_format`：FFmpeg 拆掉旧 hwaccel（释放 `ID3D11VideoDecoder`），丢弃旧 `hw_frames_ctx`，新建解码器与 20 个 surface 的纹理数组。日志中每次 seek 都有一条 `hw frames context replaced`。旧纹理数组要等最后一个引用它的帧释放才销毁（正是 seek 冻结事故的触发点，见 gpu-stage-a design §5.1）。
+
+### 影响场景
+
+- **每次 seek 多一次 GPU 资源分配**：4K 下 20 张 NV12 surface 约 250MB 的分配与释放，seek 后首个关键帧的 `send_packet` 明显变慢（实测 10ms+）
+- **拖动进度条**：连续 seek 反复分配/释放显存
+
+### 改进建议（参考 FFmpeg `get_format` 文档约定 + MPV `hwdec_extra_frames`）
+
+在 `DecoderNode::GetFormat` 回调里自行提供 `hw_frames_ctx`：首次用 `avcodec_get_hw_frames_parameters()`（必须在 get_format 内调用，open2 之前调用会崩溃）生成参数并缓存；后续 get_format 若尺寸/格式未变则直接 `av_buffer_ref` 复用缓存的帧上下文。额外 surface 数用 `codec_ctx_->extra_hw_frames` 声明（MPV 默认 6），不要手工拼 `AVHWFramesContext`（缺 `D3D11_BIND_DECODER`、高度未按 16 对齐会报 80070057）。
+
+---
+
+## 11. 硬解 seek 追赶未跳过非参考帧
+
+### 问题
+
+`DecoderNode::MaybeFlushOnSerialChange` 只对软解设置 `AVDISCARD_NONREF`，硬解追赶期解码所有帧。原先排除硬解的理由（「丢弃输出导致 surface 泄漏、send_packet 永久阻塞」）已被证伪：冻结的真实根因是 SDL 创建的单线程 D3D11 设备（gpu-stage-a design §5.1）。NONREF 与 D3D11VA 的组合至今未验证。
+
+### 影响场景
+
+- **硬解长 GOP seek**：B 帧占比 50%+ 时，追赶阶段有一半解码是浪费，直接决定第 9 项表格中 0.5s 以上的延迟
+
+### 改进建议（参考 MPV `hr-seek-framedrop`）
+
+对硬解同样在追赶期设置 `AVDISCARD_NONREF`，到达目标后恢复；验证点：连续拖动 20 次以上 surface 占用（日志 surface 索引）不增长、无 FFmpeg 报错、目标帧若为非参考 B 帧时首帧落点可接受（最多晚一个 B 帧）。
