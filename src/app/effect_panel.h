@@ -11,13 +11,15 @@ namespace mvp {
 class MediaPlayer;
 }
 
+class QGroupBox;
 class QTabWidget;
 class QVBoxLayout;
 
 /// Right-side panel. Currently hosts a single "Effects" tab that renders
 /// one group per registered effect (from MediaPlayer::EffectInfos()): a
 /// checkable QGroupBox (enable/disable) containing one control per
-/// parameter, chosen by EffectParam::type.
+/// parameter, chosen by EffectParam::type, and a button that restores the
+/// effect's default parameters.
 ///
 /// The panel only reads/writes effect state through MediaPlayer's public
 /// API — it has no knowledge of the graph, IEffectNode, or EffectManager.
@@ -34,7 +36,9 @@ class EffectPanel : public QWidget {
 
   private:
     void RebuildEffectsTab();
+    QGroupBox* BuildEffectGroup(const mvp::EffectInfo& info);
     QWidget* BuildControlForParam(const std::string& effect_id, const mvp::EffectParam& param);
+    QWidget* BuildSliderControl(const std::string& effect_id, const mvp::EffectParam& param);
 
     mvp::MediaPlayer* player_{nullptr};
     QTabWidget* tab_widget_{nullptr};

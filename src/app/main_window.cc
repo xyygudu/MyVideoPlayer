@@ -10,6 +10,7 @@
 
 #include "home_page.h"
 #include "player_page.h"
+#include "settings_page.h"
 #include "title_bar.h"
 #include "transcoder_page.h"
 #include "app_theme.h"
@@ -54,10 +55,12 @@ QVBoxLayout* MainWindow::BuildContentColumn() {
     connect(home_page_, &HomePage::NavigateRequested, this, &MainWindow::NavigateTo);
     player_page_ = new PlayerPage(stacked_widget_);
     transcoder_page_ = new TranscoderPage(stacked_widget_);
+    settings_page_ = new SettingsPage(player_page_->player(), stacked_widget_);
 
     stacked_widget_->addWidget(home_page_);
     stacked_widget_->addWidget(player_page_);
     stacked_widget_->addWidget(transcoder_page_);
+    stacked_widget_->addWidget(settings_page_);
     column->addWidget(stacked_widget_, 1);
 
     // Prevent child widgets from inheriting MainWindow's edge cursor.
@@ -74,12 +77,21 @@ QVBoxLayout* MainWindow::BuildContentColumn() {
 void MainWindow::NavigateTo(NavigationBar::Page page) {
     QWidget* target = home_page_;
     QString title = QStringLiteral("\u4E3B\u9875");  // 主页
-    if (page == NavigationBar::Page::kPlayer) {
-        target = player_page_;
-        title = QStringLiteral("\u64AD\u653E\u5668");  // 播放器
-    } else if (page == NavigationBar::Page::kTranscoder) {
-        target = transcoder_page_;
-        title = QStringLiteral("\u8F6C\u7801\u5668");  // 转码器
+    switch (page) {
+        case NavigationBar::Page::kHome:
+            break;
+        case NavigationBar::Page::kPlayer:
+            target = player_page_;
+            title = QStringLiteral("\u64AD\u653E\u5668");  // 播放器
+            break;
+        case NavigationBar::Page::kTranscoder:
+            target = transcoder_page_;
+            title = QStringLiteral("\u8F6C\u7801\u5668");  // 转码器
+            break;
+        case NavigationBar::Page::kSettings:
+            target = settings_page_;
+            title = QStringLiteral("\u8BBE\u7F6E");  // 设置
+            break;
     }
 
     stacked_widget_->setCurrentWidget(target);

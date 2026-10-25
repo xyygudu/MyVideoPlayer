@@ -9,6 +9,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPushButton>
 #include <QSlider>
 #include <QTabWidget>
 #include <QVBoxLayout>
@@ -71,22 +72,35 @@ void EffectPanel::RebuildEffectsTab() {
     }
 
     for (const mvp::EffectInfo& info : player_->EffectInfos()) {
-        auto* group = new QGroupBox(QString::fromStdString(info.display_name), effects_tab_);
-        group->setCheckable(true);
-        group->setChecked(info.enabled);
-        std::string effect_id = info.effect_id;
-        connect(group, &QGroupBox::toggled, this, [this, effect_id](bool checked) {
-            if (player_) player_->SetEffectEnabled(effect_id, checked);
-        });
-
-        auto* form = new QFormLayout(group);
-        for (const mvp::EffectParam& param : info.params) {
-            form->addRow(QString::fromStdString(param.display_name),
-                        BuildControlForParam(effect_id, param));
-        }
-        effects_layout_->addWidget(group);
+        effects_layout_->addWidget(BuildEffectGroup(info));
     }
     effects_layout_->addStretch(1);
+}
+
+QGroupBox* EffectPanel::BuildEffectGroup(const mvp::EffectInfo& info) {
+    auto* group = new QGroupBox(QString::fromStdString(info.display_name), effects_tab_);
+    group->setCheckable(true);
+    group->setChecked(info.enabled);
+    const std::string effect_id = info.effect_id;
+    connect(group, &QGroupBox::toggled, this, [this, effect_id](bool checked) {
+        if (player_) player_->SetEffectEnabled(effect_id, checked);
+    });
+
+    auto* form = new QFormLayout(group);
+    for (const mvp::EffectParam& param : info.params) {
+        form->addRow(QString::fromStdString(param.display_name),
+                    BuildControlForParam(effect_id, param));
+    }
+
+    auto* reset_button = new QPushButton(QStringLiteral("\u91CD\u7F6E\u53C2\u6570"), group);  // 重置参数
+    connect(reset_button, &QPushButton::clicked, this, [this, effect_id] {
+        if (!player_) return;
+        player_->ResetEffectParams(effect_id);
+        // The button belongs to the controls being rebuilt: rebuild once this slot has returned.
+        QMetaObject::invokeMethod(this, &EffectPanel::RebuildEffectsTab, Qt::QueuedConnection);
+    });
+    form->addRow(reset_button);
+    return group;
 }
 
 QWidget* EffectPanel::BuildControlForParam(const std::string& effect_id,
@@ -116,38 +130,41 @@ QWidget* EffectPanel::BuildControlForParam(const std::string& effect_id,
         }
         case mvp::EffectParamType::kInt:
         case mvp::EffectParamType::kFloat:
-        default: {
-            auto* container = new QWidget(effects_tab_);
-            auto* row = new QHBoxLayout(container);
-            row->setContentsMargins(0, 0, 0, 0);
-
-            const float min_v = ParamFloat(param.min_value);
-            const float max_v = ParamFloat(param.max_value);
-            const float value = ParamFloat(param.value);
-            const bool is_int = (param.type == mvp::EffectParamType::kInt);
-
-            auto* slider = new QSlider(Qt::Horizontal, container);
-            slider->setRange(0, kSliderSteps);
-            slider->setValue(ToSliderPos(value, min_v, max_v));
-            row->addWidget(slider, 1);
-
-            auto* value_label = new QLabel(QString::number(value, 'f', is_int ? 0 : 2), container);
-            value_label->setFixedWidth(48);
-            row->addWidget(value_label);
-
-            std::string id = param.id;
-            connect(slider, &QSlider::valueChanged, this,
-                    [this, effect_id, id, min_v, max_v, value_label, is_int](int pos) {
-                        float v = FromSliderPos(pos, min_v, max_v);
-                        if (is_int) v = std::round(v);
-                        value_label->setText(QString::number(v, 'f', is_int ? 0 : 2));
-                        if (!player_) return;
-                        mvp::EffectParamValue pv = is_int
-                            ? mvp::EffectParamValue(static_cast<int>(v))
-                            : mvp::EffectParamValue(v);
-                        player_->SetEffectParam(effect_id, id, pv);
-                    });
-            return container;
-        }
+        default:
+            return BuildSliderControl(effect_id, param);
     }
+}
+
+QWidget* EffectPanel::BuildSliderControl(const std::string& effect_id, const mvp::EffectParam& param) {
+    auto* container = new QWidget(effects_tab_);
+    auto* row = new QHBoxLayout(container);
+    row->setContentsMargins(0, 0, 0, 0);
+
+    const float min_v = ParamFloat(param.min_value);
+    const float max_v = ParamFloat(param.max_value);
+    const float value = ParamFloat(param.value);
+    const bool is_int = (param.type == mvp::EffectParamType::kInt);
+
+    auto* slider = new QSlider(Qt::Horizontal, container);
+    slider->setRange(0, kSliderSteps);
+    slider->setValue(ToSliderPos(value, min_v, max_v));
+    row->addWidget(slider, 1);
+
+    auto* value_label = new QLabel(QString::number(value, 'f', is_int ? 0 : 2), container);
+    value_label->setFixedWidth(48);
+    row->addWidget(value_label);
+
+    std::string id = param.id;
+    connect(slider, &QSlider::valueChanged, this,
+            [this, effect_id, id, min_v, max_v, value_label, is_int](int pos) {
+                float v = FromSliderPos(pos, min_v, max_v);
+                if (is_int) v = std::round(v);
+                value_label->setText(QString::number(v, 'f', is_int ? 0 : 2));
+                if (!player_) return;
+                mvp::EffectParamValue pv = is_int
+                    ? mvp::EffectParamValue(static_cast<int>(v))
+                    : mvp::EffectParamValue(v);
+                player_->SetEffectParam(effect_id, id, pv);
+            });
+    return container;
 }

@@ -6,14 +6,15 @@
 class NavItem;
 class IconButton;
 
-/// Left navigation column: logo area, "主页" item, and an expandable
-/// "快速访问" group (default expanded) containing "播放器"/"转码器".
+/// Left navigation column: logo area, "主页" item, an expandable
+/// "快速访问" group (default expanded) containing "播放器"/"转码器", and
+/// "设置" pinned to the bottom.
 /// Emits PageRequested(Page) when the user clicks any item.
 class NavigationBar : public QWidget {
     Q_OBJECT
 
   public:
-    enum class Page { kHome, kPlayer, kTranscoder };
+    enum class Page { kHome, kPlayer, kTranscoder, kSettings };
 
     explicit NavigationBar(QWidget* parent = nullptr);
 
@@ -31,7 +32,8 @@ class NavigationBar : public QWidget {
     void SetupUi();
     QWidget* BuildQuickAccessHeader();
     QWidget* BuildQuickAccessBody();
-    void SelectItem(NavItem* item, Page page);
+    void SelectItem(Page page);
+    void UpdateSelection(Page page);
     void OnQuickAccessToggled();
 
     NavItem* home_item_{nullptr};
@@ -40,6 +42,7 @@ class NavigationBar : public QWidget {
     QWidget* quick_access_body_{nullptr};
     NavItem* player_item_{nullptr};
     NavItem* transcoder_item_{nullptr};
+    NavItem* settings_item_{nullptr};
     Page current_page_{Page::kHome};
 };
 

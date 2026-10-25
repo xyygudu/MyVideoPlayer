@@ -2,8 +2,8 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Svg)
 find_package(spdlog REQUIRED)
 qt_standard_project_setup()
 
-file(GLOB_RECURSE MVP_APP_SOURCES *.cc)
-file(GLOB_RECURSE MVP_APP_HEADERS *.h)
+file(GLOB_RECURSE MVP_APP_SOURCES CONFIGURE_DEPENDS *.cc)
+file(GLOB_RECURSE MVP_APP_HEADERS CONFIGURE_DEPENDS *.h)
 
 qt_add_executable(mvp_app ${MVP_APP_SOURCES} ${MVP_APP_HEADERS})
 # Compile .qrc with rcc (qt_add_resources not available in this Qt version).

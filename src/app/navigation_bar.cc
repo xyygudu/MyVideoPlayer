@@ -90,13 +90,18 @@ void NavigationBar::SetupUi() {
 
     home_item_ = new NavItem(QStringLiteral("\u4E3B\u9875"), this);  // 主页
     home_item_->SetIcon(CreateNavIcon(QStringLiteral(":/icons/home.svg")));
-    connect(home_item_, &NavItem::Clicked, this,
-            [this] { SelectItem(home_item_, Page::kHome); });
+    connect(home_item_, &NavItem::Clicked, this, [this] { SelectItem(Page::kHome); });
     layout->addWidget(home_item_);
 
     layout->addWidget(BuildQuickAccessHeader());
     layout->addWidget(BuildQuickAccessBody());
     layout->addStretch(1);
+
+    settings_item_ = new NavItem(QStringLiteral("\u8BBE\u7F6E"), this);  // 设置
+    settings_item_->SetIcon(CreateNavIcon(QStringLiteral(":/icons/settings.svg")));
+    connect(settings_item_, &NavItem::Clicked, this, [this] { SelectItem(Page::kSettings); });
+    layout->addWidget(settings_item_);
+    layout->addSpacing(12);
 
     home_item_->SetSelected(true);
 }
@@ -136,36 +141,32 @@ QWidget* NavigationBar::BuildQuickAccessBody() {
 
     player_item_ = new NavItem(QStringLiteral("\u64AD\u653E\u5668"), quick_access_body_);  // 播放器
     player_item_->SetIcon(CreateNavIcon(QStringLiteral(":/icons/player.svg")));
-    connect(player_item_, &NavItem::Clicked, this,
-            [this] { SelectItem(player_item_, Page::kPlayer); });
+    connect(player_item_, &NavItem::Clicked, this, [this] { SelectItem(Page::kPlayer); });
     qa_body_layout->addWidget(player_item_);
 
     transcoder_item_ =
         new NavItem(QStringLiteral("\u8F6C\u7801\u5668"), quick_access_body_);  // 转码器
     transcoder_item_->SetIcon(CreateNavIcon(QStringLiteral(":/icons/converter.svg")));
-    connect(transcoder_item_, &NavItem::Clicked, this,
-            [this] { SelectItem(transcoder_item_, Page::kTranscoder); });
+    connect(transcoder_item_, &NavItem::Clicked, this, [this] { SelectItem(Page::kTranscoder); });
     qa_body_layout->addWidget(transcoder_item_);
 
     return quick_access_body_;
 }
 
-void NavigationBar::SelectItem(NavItem* item, Page page) {
-    home_item_->SetSelected(item == home_item_);
-    player_item_->SetSelected(item == player_item_);
-    transcoder_item_->SetSelected(item == transcoder_item_);
-    current_page_ = page;
+void NavigationBar::SelectItem(Page page) {
+    UpdateSelection(page);
     emit PageRequested(page);
 }
 
 void NavigationBar::SetSelectedPage(Page page) {
-    NavItem* item = home_item_;
-    if (page == Page::kPlayer) item = player_item_;
-    if (page == Page::kTranscoder) item = transcoder_item_;
+    UpdateSelection(page);
+}
 
-    home_item_->SetSelected(item == home_item_);
-    player_item_->SetSelected(item == player_item_);
-    transcoder_item_->SetSelected(item == transcoder_item_);
+void NavigationBar::UpdateSelection(Page page) {
+    home_item_->SetSelected(page == Page::kHome);
+    player_item_->SetSelected(page == Page::kPlayer);
+    transcoder_item_->SetSelected(page == Page::kTranscoder);
+    settings_item_->SetSelected(page == Page::kSettings);
     current_page_ = page;
 }
 
