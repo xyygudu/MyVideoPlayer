@@ -119,14 +119,17 @@ class Link {
         if (abort_ && queue_.empty()) {
             return std::nullopt;
         }
+        return TakeFront(lock);
+    }
 
-        MediaBuffer buf = std::move(queue_.front());
-        queue_.pop_front();
-        total_bytes_ -= LinkCapacity::ByteSize(buf);
-        --count_;
-        lock.unlock();
-        cond_push_.notify_one();
-        return buf;
+    /// Pop a buffer if one is queued; never blocks. For consumers that poll
+    /// several inputs or only want the newest buffer (live mixers, overlays).
+    std::optional<MediaBuffer> TryPop() {
+        std::unique_lock lock(mutex_);
+        if (queue_.empty()) {
+            return std::nullopt;
+        }
+        return TakeFront(lock);
     }
 
     /// Clear all queued data and wake both sides.
@@ -169,6 +172,17 @@ class Link {
     }
 
   private:
+    /// Dequeues the front buffer (queue non-empty, lock held) and wakes a producer.
+    MediaBuffer TakeFront(std::unique_lock<std::mutex>& lock) {
+        MediaBuffer buf = std::move(queue_.front());
+        queue_.pop_front();
+        total_bytes_ -= LinkCapacity::ByteSize(buf);
+        --count_;
+        lock.unlock();
+        cond_push_.notify_one();
+        return buf;
+    }
+
     /// Returns true if either dimension has reached its capacity limit.
     bool IsFull() const {
         return count_ >= capacity_.max_count() ||

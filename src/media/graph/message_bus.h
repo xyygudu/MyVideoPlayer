@@ -1,6 +1,7 @@
 #ifndef MVP_GRAPH_MESSAGE_BUS_H_
 #define MVP_GRAPH_MESSAGE_BUS_H_
 
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -52,10 +53,20 @@ class MessageBus {
     std::optional<GraphMessage> Wait() {
         std::unique_lock lock(mutex_);
         cond_.wait(lock, [this] { return shutdown_ || !queue_.empty(); });
-        if (shutdown_) return std::nullopt;
-        GraphMessage msg = std::move(queue_.front());
-        queue_.pop_front();
-        return msg;
+        return TakeLocked();
+    }
+
+    /// Like Wait(), but also returns nullopt after `timeout` without a message
+    /// (tell the two apart with IsShutDown()), so a consumer can run deadlines.
+    std::optional<GraphMessage> WaitFor(std::chrono::milliseconds timeout) {
+        std::unique_lock lock(mutex_);
+        cond_.wait_for(lock, timeout, [this] { return shutdown_ || !queue_.empty(); });
+        return TakeLocked();
+    }
+
+    bool IsShutDown() const {
+        std::lock_guard lock(mutex_);
+        return shutdown_;
     }
 
     /// Wakes the consumer for good and discards pending messages.
@@ -69,7 +80,14 @@ class MessageBus {
     }
 
   private:
-    std::mutex mutex_;
+    std::optional<GraphMessage> TakeLocked() {
+        if (shutdown_ || queue_.empty()) return std::nullopt;
+        GraphMessage msg = std::move(queue_.front());
+        queue_.pop_front();
+        return msg;
+    }
+
+    mutable std::mutex mutex_;
     std::condition_variable cond_;
     std::deque<GraphMessage> queue_;  // Guarded by mutex_.
     bool shutdown_{false};            // Guarded by mutex_.

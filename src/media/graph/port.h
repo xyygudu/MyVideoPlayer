@@ -28,6 +28,10 @@ class InputPort {
     /// Returns nullopt if the link is aborted.
     std::optional<MediaBuffer> Pull();
 
+    /// Like Pull(), but returns nullopt instead of blocking when nothing
+    /// usable is queued.
+    std::optional<MediaBuffer> TryPull();
+
     /// Bind the graph-wide seek generation counter. Called by
     /// MediaGraph::Connect; the port only ever reads it.
     void BindSeekEpoch(const std::atomic<int>* epoch) { seek_epoch_ = epoch; }
@@ -46,6 +50,9 @@ class InputPort {
 
   private:
     friend class OutputPort;
+
+    /// False for stale (older seek epoch) and malformed buffers.
+    bool Usable(const MediaBuffer& buf) const;
 
     int CurrentEpoch() const {
         return seek_epoch_ ? seek_epoch_->load(std::memory_order_acquire) : 0;

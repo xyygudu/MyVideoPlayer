@@ -10,8 +10,9 @@ namespace mvp::graph {
 /// INode::OnCommand. New intents extend the enum without changing the
 /// INode interface (open/closed principle).
 enum class CommandType {
-    kSeek,    // Reposition playback to a target position
-    kResize,  // Output window size changed
+    kSeek,         // Reposition playback to a target position
+    kResize,       // Output window size changed
+    kEndOfStream,  // Live sources finish: stop capturing and send EOS downstream
 };
 
 struct Command {

@@ -11,20 +11,37 @@ std::optional<MediaBuffer> InputPort::Pull() {
         return std::nullopt;
     }
     while (auto buf = link_->Pop()) {
-        const int epoch = CurrentEpoch();
-        if (buf->serial() != epoch) {
-            SPDLOG_DEBUG("InputPort[{}]: drop stale buffer serial={} epoch={}",
-                         owner_->Name(), buf->serial(), epoch);
-            continue;
+        if (Usable(*buf)) {
+            return buf;
         }
-        if (!buf->IsValid()) {
-            SPDLOG_WARN("InputPort[{}]: drop malformed buffer",
-                        owner_->Name());
-            continue;
-        }
-        return buf;
     }
     return std::nullopt;
+}
+
+std::optional<MediaBuffer> InputPort::TryPull() {
+    if (!link_) {
+        return std::nullopt;
+    }
+    while (auto buf = link_->TryPop()) {
+        if (Usable(*buf)) {
+            return buf;
+        }
+    }
+    return std::nullopt;
+}
+
+bool InputPort::Usable(const MediaBuffer& buf) const {
+    const int epoch = CurrentEpoch();
+    if (buf.serial() != epoch) {
+        SPDLOG_DEBUG("InputPort[{}]: drop stale buffer serial={} epoch={}", owner_->Name(),
+                     buf.serial(), epoch);
+        return false;
+    }
+    if (!buf.IsValid()) {
+        SPDLOG_WARN("InputPort[{}]: drop malformed buffer", owner_->Name());
+        return false;
+    }
+    return true;
 }
 
 // --- OutputPort ---
