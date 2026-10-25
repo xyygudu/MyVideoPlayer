@@ -9,7 +9,7 @@ extern "C" {
 }
 #include <spdlog/spdlog.h>
 
-#include "ffmpeg_utils.h"
+#include "base/ffmpeg_utils.h"
 #include "mvp/container_probe.h"
 
 namespace mvp::graph {

@@ -1,4 +1,4 @@
-#include "video_renderer.h"
+#include "video/video_renderer.h"
 
 #include <algorithm>
 
@@ -11,7 +11,7 @@ extern "C" {
 #include <SDL3/SDL.h>
 #include <spdlog/spdlog.h>
 
-#include "ffmpeg_utils.h"
+#include "base/ffmpeg_utils.h"
 #include "gpu/gpu_device.h"
 #include "gpu/pixel_format_map.h"
 

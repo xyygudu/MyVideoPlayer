@@ -10,7 +10,7 @@ extern "C" {
 }
 #include <spdlog/spdlog.h>
 
-#include "pixel_ops.h"
+#include "video/pixel_ops.h"
 
 namespace mvp::graph {
 namespace {

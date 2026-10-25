@@ -46,7 +46,7 @@ enum class SampleFormat {
 
 #### Scenario: media_format.h 引用无额外依赖
 - **WHEN** media_format.h 使用 PixelFormat/SampleFormat
-- **THEN** 仅需 `#include "media_frame.h"`
+- **THEN** 仅需 `#include "base/media_frame.h"`
 
 #### Scenario: 硬件域参与格式协商
 - **WHEN** 端口 caps 的 pixel_formats 包含硬件域枚举值

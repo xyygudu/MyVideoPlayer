@@ -1,5 +1,5 @@
-#ifndef MVP_MEDIA_PLAYER_IMPL_H_
-#define MVP_MEDIA_PLAYER_IMPL_H_
+#ifndef MVP_PLAYER_MEDIA_PLAYER_IMPL_H_
+#define MVP_PLAYER_MEDIA_PLAYER_IMPL_H_
 
 #include <chrono>
 #include <memory>
@@ -9,12 +9,12 @@
 #include <thread>
 #include <vector>
 
-#include "effect_manager.h"
 #include "graph/media_graph.h"
 #include "graph/message_bus.h"
 #include "mvp/media_player.h"
 #include "mvp/source_info.h"
-#include "video_renderer.h"
+#include "player/effect_manager.h"
+#include "video/video_renderer.h"
 
 namespace mvp {
 
@@ -143,4 +143,4 @@ class MediaPlayer::Impl {
 
 }  // namespace mvp
 
-#endif  // MVP_MEDIA_PLAYER_IMPL_H_
+#endif  // MVP_PLAYER_MEDIA_PLAYER_IMPL_H_

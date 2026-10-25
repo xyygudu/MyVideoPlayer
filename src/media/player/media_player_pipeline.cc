@@ -5,14 +5,14 @@
 
 #include <spdlog/spdlog.h>
 
-#include "clock.h"
-#include "media_player_impl.h"
 #include "nodes/audio_sink_node.h"
 #include "nodes/color_effect_node.h"
 #include "nodes/decoder_node.h"
 #include "nodes/demux_node.h"
 #include "nodes/transform_effect_node.h"
 #include "nodes/video_sink_node.h"
+#include "player/media_player_impl.h"
+#include "sync/clock.h"
 
 namespace mvp {
 namespace {

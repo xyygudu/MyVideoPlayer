@@ -20,8 +20,8 @@ extern "C" {
 }
 #include <spdlog/spdlog.h>
 
+#include "base/ffmpeg_utils.h"
 #include "capture/win/audio_endpoints.h"
-#include "ffmpeg_utils.h"
 
 namespace mvp::capture {
 namespace {

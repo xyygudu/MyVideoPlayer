@@ -8,7 +8,7 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 }
 
-#include "audio_resampler.h"
+#include "audio/audio_resampler.h"
 
 namespace mvp {
 namespace {

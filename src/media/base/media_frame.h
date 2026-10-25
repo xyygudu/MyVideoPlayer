@@ -1,7 +1,7 @@
-#ifndef MVP_MEDIA_FRAME_H_
-#define MVP_MEDIA_FRAME_H_
+#ifndef MVP_BASE_MEDIA_FRAME_H_
+#define MVP_BASE_MEDIA_FRAME_H_
 
-#include "ffmpeg_utils.h"
+#include "base/ffmpeg_utils.h"
 
 struct AVFrame;
 struct AVBufferPool;
@@ -134,4 +134,4 @@ class MediaFramePool {
 
 }  // namespace mvp
 
-#endif  // MVP_MEDIA_FRAME_H_
+#endif  // MVP_BASE_MEDIA_FRAME_H_

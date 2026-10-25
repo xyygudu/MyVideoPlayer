@@ -11,11 +11,11 @@ extern "C" {
 #include <SDL3/SDL.h>
 #include <spdlog/spdlog.h>
 
-#include "audio_resampler.h"
-#include "clock.h"
+#include "audio/audio_resampler.h"
+#include "base/media_frame.h"
 #include "graph/graph_command.h"
 #include "graph/media_format.h"
-#include "media_frame.h"
+#include "sync/clock.h"
 
 namespace mvp::graph {
 namespace {

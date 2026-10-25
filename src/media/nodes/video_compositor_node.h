@@ -7,10 +7,10 @@
 #include <thread>
 #include <vector>
 
+#include "base/media_frame.h"
 #include "graph/node.h"
 #include "graph/port.h"
-#include "media_frame.h"
-#include "mvp/recorder.h"
+#include "mvp/record_options.h"
 
 struct SwsContext;
 

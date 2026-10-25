@@ -5,7 +5,7 @@
 #include <memory>
 #include <string>
 
-#include "mvp/recorder.h"
+#include "mvp/record_options.h"
 
 namespace mvp::capture {
 

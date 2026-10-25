@@ -8,11 +8,11 @@ extern "C" {
 }
 #include <spdlog/spdlog.h>
 
-#include "ffmpeg_utils.h"
+#include "base/ffmpeg_utils.h"
+#include "base/media_frame.h"
 #include "gpu/gpu_device.h"
 #include "graph/media_graph.h"
-#include "media_frame.h"
-#include "pixel_ops.h"
+#include "video/pixel_ops.h"
 
 namespace mvp::graph {
 
@@ -122,8 +122,8 @@ TransformEffectNode::Settings TransformEffectNode::LoadSettings() const {
     return settings_;
 }
 
-TransformAffineParams TransformEffectNode::ToAffine(const Settings& settings) {
-    TransformAffineParams p;
+pixel_ops::TransformAffineParams TransformEffectNode::ToAffine(const Settings& settings) {
+    pixel_ops::TransformAffineParams p;
     p.rotate_rad = settings.rotate_deg * kPi / 180.0f;
     p.flip_h = settings.flip_h;
     p.flip_v = settings.flip_v;
@@ -139,7 +139,7 @@ void TransformEffectNode::Process(MediaBuffer input, OutputCallback emit) {
     const Settings settings = LoadSettings();
     if (!settings.enabled || !input.IsFrame()) { emit(std::move(input)); return; }
 
-    const TransformAffineParams params = ToAffine(settings);
+    const pixel_ops::TransformAffineParams params = ToAffine(settings);
     if (params.rotate_rad == 0.0f && !params.flip_h && !params.flip_v &&
         params.scale_x == 1.0f && params.scale_y == 1.0f &&
         params.translate_x == 0.0f && params.translate_y == 0.0f) {
@@ -185,7 +185,7 @@ void TransformEffectNode::Process(MediaBuffer input, OutputCallback emit) {
 }
 
 bool TransformEffectNode::TryProcessOnGpu(MediaBuffer& input, OutputCallback& emit,
-                                          const TransformAffineParams& params) {
+                                          const pixel_ops::TransformAffineParams& params) {
     if (!gpu_pass_) {
         return false;
     }
@@ -209,7 +209,7 @@ bool TransformEffectNode::TryProcessOnGpu(MediaBuffer& input, OutputCallback& em
 }
 
 bool TransformEffectNode::TryApplyPermute(const MediaFrame& src, MediaFrame& dst,
-                                          const TransformAffineParams& params,
+                                          const pixel_ops::TransformAffineParams& params,
                                           MediaBuffer& input, OutputCallback& emit) {
     if (!pixel_ops::TryPermutePlane(src.PlaneData(0), src.PlaneLinesize(0),
                                     dst.PlaneData(0), dst.PlaneLinesize(0),
@@ -240,7 +240,7 @@ bool TransformEffectNode::TryApplyPermute(const MediaFrame& src, MediaFrame& dst
 }
 
 void TransformEffectNode::ApplyBilinear(const MediaFrame& src, MediaFrame& dst,
-                                        const TransformAffineParams& params,
+                                        const pixel_ops::TransformAffineParams& params,
                                         MediaBuffer& input, OutputCallback& emit) {
     pixel_ops::AffineMapping mapping =
         pixel_ops::ComputeAffineMapping(params, src.width(), src.height());

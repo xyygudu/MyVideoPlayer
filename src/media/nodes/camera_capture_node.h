@@ -4,7 +4,7 @@
 #include <memory>
 #include <string>
 
-#include "media_frame.h"
+#include "base/media_frame.h"
 #include "nodes/live_source_node.h"
 
 namespace mvp::capture {

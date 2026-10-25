@@ -13,8 +13,8 @@ extern "C" {
 }
 #include <spdlog/spdlog.h>
 
-#include "audio_resampler.h"
-#include "ffmpeg_utils.h"
+#include "audio/audio_resampler.h"
+#include "base/ffmpeg_utils.h"
 #include "graph/media_graph.h"
 
 namespace mvp::graph {

@@ -6,10 +6,10 @@
 
 #include <spdlog/spdlog.h>
 
-#include "clock.h"
 #include "graph/graph_command.h"
-#include "sync_constants.h"
-#include "video_renderer.h"
+#include "sync/clock.h"
+#include "sync/sync_constants.h"
+#include "video/video_renderer.h"
 
 namespace mvp::graph {
 namespace {

@@ -1,5 +1,5 @@
-#ifndef MVP_SYNC_CONSTANTS_H_
-#define MVP_SYNC_CONSTANTS_H_
+#ifndef MVP_SYNC_SYNC_CONSTANTS_H_
+#define MVP_SYNC_SYNC_CONSTANTS_H_
 
 namespace mvp {
 
@@ -33,4 +33,4 @@ inline constexpr double kMaxFrameDuration = 10.0;
 
 }  // namespace mvp
 
-#endif  // MVP_SYNC_CONSTANTS_H_
+#endif  // MVP_SYNC_SYNC_CONSTANTS_H_

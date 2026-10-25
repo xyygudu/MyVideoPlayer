@@ -204,18 +204,19 @@ cmake --preset vs-local
 
 ```
 src/
-├── media/          # 媒体引擎库 (mvp_media)
-│   ├── graph/      #   MediaGraph 核心：Node, Port, Link, MediaBuffer, MediaFormat
-│   ├── nodes/      #   具体节点实现：DemuxNode, DecoderNode, AudioSinkNode,
-│   │               #     VideoSinkNode, ColorEffectNode, TransformEffectNode,
-│   │               #     EncoderNode, MuxNode
-│   ├── clock.h     #   音视频同步时钟
-│   ├── media_frame.h / .cc    #   媒体帧抽象（不暴露 FFmpeg 类型）
-│   ├── media_player.h / .cc   #   MediaPlayer facade
-│   ├── transcoder.cc          #   Transcoder facade
-│   ├── effect_manager.cc      #   特效管理器
-│   ├── video_renderer.cc      #   SDL3 视频渲染
-│   └── pixel_ops.cc           #   像素格式转换
+├── media/          # 媒体引擎库 (mvp_core)，子目录按依赖分层：下层不依赖上层
+│   ├── base/       #   L0 基础：FFmpeg RAII 封装、MediaFrame、日志
+│   ├── sync/       #   L0 音视频同步：Clock、同步阈值
+│   ├── audio/      #   L1 音频算法：重采样、混音时间线
+│   ├── video/      #   L1 视频算法与输出：pixel_ops、RGBA 转换、SDL3 渲染
+│   ├── gpu/        #   L1 GPU 设备抽象 + D3D11 实现（特效 pass、硬件帧呈现）
+│   ├── capture/    #   L1 采集设备抽象 + 平台实现（屏幕、音频、摄像头）
+│   ├── probe/      #   L1 独立探测：SourceProbe、ContainerProbe
+│   ├── graph/      #   L2 MediaGraph 核心：Node, Port, Link, MediaBuffer, MediaFormat
+│   ├── nodes/      #   L3 具体节点：Demux/Decoder/Encoder/Mux、Sink、特效、采集源、混音、合成
+│   ├── player/     #   L4 MediaPlayer 外观（含 EffectManager）
+│   ├── transcoder/ #   L4 Transcoder 外观
+│   └── recorder/   #   L4 Recorder、CameraPreview 外观
 ├── app/            # Qt GUI 应用 (mvp_app)
 │   ├── main.cc, main_window.cc/h
 │   ├── video_widget.cc/h

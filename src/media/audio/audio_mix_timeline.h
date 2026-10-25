@@ -1,5 +1,5 @@
-#ifndef MVP_AUDIO_MIX_TIMELINE_H_
-#define MVP_AUDIO_MIX_TIMELINE_H_
+#ifndef MVP_AUDIO_AUDIO_MIX_TIMELINE_H_
+#define MVP_AUDIO_AUDIO_MIX_TIMELINE_H_
 
 #include <cstdint>
 #include <vector>
@@ -52,4 +52,4 @@ class AudioMixTimeline {
 
 }  // namespace mvp
 
-#endif  // MVP_AUDIO_MIX_TIMELINE_H_
+#endif  // MVP_AUDIO_AUDIO_MIX_TIMELINE_H_

@@ -5,11 +5,11 @@
 #include <memory>
 #include <vector>
 
-#include "clock.h"
 #include "graph/graph_command.h"
 #include "graph/message_bus.h"
 #include "graph/node.h"
 #include "graph/port.h"
+#include "sync/clock.h"
 
 namespace mvp {
 namespace gpu {

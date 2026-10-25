@@ -7,9 +7,9 @@
 #include <thread>
 #include <vector>
 
-#include "audio_mix_timeline.h"
-#include "audio_resampler.h"
-#include "ffmpeg_utils.h"
+#include "audio/audio_mix_timeline.h"
+#include "audio/audio_resampler.h"
+#include "base/ffmpeg_utils.h"
 #include "graph/node.h"
 #include "graph/port.h"
 

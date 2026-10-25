@@ -1,10 +1,10 @@
-#ifndef MVP_FRAME_CAPTURE_H_
-#define MVP_FRAME_CAPTURE_H_
+#ifndef MVP_VIDEO_FRAME_CAPTURE_H_
+#define MVP_VIDEO_FRAME_CAPTURE_H_
 
 #include <cstdint>
 #include <vector>
 
-#include "media_frame.h"
+#include "base/media_frame.h"
 
 namespace mvp {
 
@@ -15,4 +15,4 @@ bool ConvertToRgba(const MediaFrame& frame, std::vector<uint8_t>* rgba);
 
 }  // namespace mvp
 
-#endif  // MVP_FRAME_CAPTURE_H_
+#endif  // MVP_VIDEO_FRAME_CAPTURE_H_

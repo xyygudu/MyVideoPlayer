@@ -6,8 +6,8 @@
 #include <memory>
 #include <string>
 
-#include "media_frame.h"
-#include "mvp/recorder.h"
+#include "base/media_frame.h"
+#include "mvp/record_options.h"
 #include "nodes/live_source_node.h"
 
 namespace mvp::capture {

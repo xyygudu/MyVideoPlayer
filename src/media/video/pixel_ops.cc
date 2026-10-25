@@ -1,10 +1,8 @@
-#include "pixel_ops.h"
+#include "video/pixel_ops.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-
-#include "nodes/transform_effect_node.h"
 
 namespace mvp::pixel_ops {
 
@@ -111,7 +109,7 @@ void ApplyLut(uint8_t* plane, int linesize, int width, int height, const uint8_t
     }
 }
 
-AffineMapping ComputeAffineMapping(const graph::TransformAffineParams& p, int plane_w, int plane_h) {
+AffineMapping ComputeAffineMapping(const TransformAffineParams& p, int plane_w, int plane_h) {
     AffineMapping m;
     // Pixel centres sit on integer coordinates: the centre of n pixels is
     // (n - 1) / 2, so a mirror maps x to n - 1 - x exactly.
@@ -173,7 +171,7 @@ void RemapInterleavedPlane(const uint8_t* src, int src_linesize,
 
 bool TryPermutePlane(const uint8_t* src, int src_linesize, uint8_t* dst, int dst_linesize,
                      int width, int height, int comp_stride, int comp_offset,
-                     const graph::TransformAffineParams& p) {
+                     const TransformAffineParams& p) {
     if (p.scale_x != 1.0f || p.scale_y != 1.0f) return false;
     if (p.translate_x != 0.0f || p.translate_y != 0.0f) return false;
     const float deg = p.rotate_rad * 180.0f / kPi;

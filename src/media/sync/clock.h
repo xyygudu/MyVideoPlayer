@@ -1,5 +1,5 @@
-#ifndef MVP_CLOCK_H_
-#define MVP_CLOCK_H_
+#ifndef MVP_SYNC_CLOCK_H_
+#define MVP_SYNC_CLOCK_H_
 
 #include <atomic>
 #include <cstdint>
@@ -95,4 +95,4 @@ class Clock : public IClock {
 
 }  // namespace mvp
 
-#endif  // MVP_CLOCK_H_
+#endif  // MVP_SYNC_CLOCK_H_

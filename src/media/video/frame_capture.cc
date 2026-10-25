@@ -1,4 +1,4 @@
-#include "frame_capture.h"
+#include "video/frame_capture.h"
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -7,7 +7,7 @@ extern "C" {
 }
 #include <spdlog/spdlog.h>
 
-#include "ffmpeg_utils.h"
+#include "base/ffmpeg_utils.h"
 
 namespace mvp {
 

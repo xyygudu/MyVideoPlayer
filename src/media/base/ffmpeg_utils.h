@@ -1,5 +1,5 @@
-#ifndef MVP_FFMPEG_UTILS_H_
-#define MVP_FFMPEG_UTILS_H_
+#ifndef MVP_BASE_FFMPEG_UTILS_H_
+#define MVP_BASE_FFMPEG_UTILS_H_
 
 #include <memory>
 #include <string>
@@ -200,4 +200,4 @@ inline AVColorSpace ResolvedColorspace(const AVFrame* f) {
 
 }  // namespace mvp
 
-#endif  // MVP_FFMPEG_UTILS_H_
+#endif  // MVP_BASE_FFMPEG_UTILS_H_

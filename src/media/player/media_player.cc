@@ -4,12 +4,12 @@
 
 #include <spdlog/spdlog.h>
 
-#include "clock.h"
-#include "frame_capture.h"
-#include "media_player_impl.h"
 #include "mvp/source_probe.h"
 #include "nodes/decoder_node.h"
 #include "nodes/video_sink_node.h"
+#include "player/media_player_impl.h"
+#include "sync/clock.h"
+#include "video/frame_capture.h"
 
 namespace mvp {
 

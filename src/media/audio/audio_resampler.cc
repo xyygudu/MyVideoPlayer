@@ -1,4 +1,4 @@
-#include "audio_resampler.h"
+#include "audio/audio_resampler.h"
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -6,7 +6,7 @@ extern "C" {
 }
 #include <spdlog/spdlog.h>
 
-#include "ffmpeg_utils.h"
+#include "base/ffmpeg_utils.h"
 
 namespace mvp {
 

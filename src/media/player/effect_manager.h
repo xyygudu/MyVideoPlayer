@@ -1,5 +1,5 @@
-#ifndef MVP_EFFECT_MANAGER_H_
-#define MVP_EFFECT_MANAGER_H_
+#ifndef MVP_PLAYER_EFFECT_MANAGER_H_
+#define MVP_PLAYER_EFFECT_MANAGER_H_
 
 #include <string>
 #include <utility>
@@ -71,4 +71,4 @@ class EffectManager {
 
 }  // namespace mvp
 
-#endif  // MVP_EFFECT_MANAGER_H_
+#endif  // MVP_PLAYER_EFFECT_MANAGER_H_

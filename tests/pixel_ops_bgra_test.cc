@@ -4,7 +4,7 @@
 
 #include <gtest/gtest.h>
 
-#include "pixel_ops.h"
+#include "video/pixel_ops.h"
 
 namespace mvp {
 namespace {

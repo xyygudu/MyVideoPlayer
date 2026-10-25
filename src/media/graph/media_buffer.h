@@ -5,8 +5,8 @@
 #include <string>
 #include <variant>
 
-#include "ffmpeg_utils.h"
-#include "media_frame.h"
+#include "base/ffmpeg_utils.h"
+#include "base/media_frame.h"
 
 namespace mvp::graph {
 

@@ -7,9 +7,9 @@
 #include <string>
 #include <vector>
 
-#include "clock.h"
 #include "graph/media_buffer.h"
 #include "graph/media_format.h"
+#include "sync/clock.h"
 
 namespace mvp::graph {
 

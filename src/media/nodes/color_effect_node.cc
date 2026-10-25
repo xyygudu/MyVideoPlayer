@@ -8,11 +8,11 @@ extern "C" {
 }
 #include <spdlog/spdlog.h>
 
-#include "ffmpeg_utils.h"
+#include "base/ffmpeg_utils.h"
+#include "base/media_frame.h"
 #include "gpu/gpu_device.h"
 #include "graph/media_graph.h"
-#include "media_frame.h"
-#include "pixel_ops.h"
+#include "video/pixel_ops.h"
 
 namespace mvp::graph {
 

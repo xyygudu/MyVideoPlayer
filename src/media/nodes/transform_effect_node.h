@@ -10,6 +10,7 @@
 #include "graph/media_buffer.h"
 #include "graph/node.h"
 #include "graph/port.h"
+#include "video/pixel_ops.h"
 
 struct AVFrame;
 
@@ -20,21 +21,6 @@ class VideoPass;
 namespace mvp::graph {
 
 class MediaGraph;
-
-/// Snapshot of TransformEffectNode's geometry parameters, read once per
-/// frame (not once per pixel) so the remap loops only touch plain floats.
-/// A free struct (not nested in TransformEffectNode) so the plane-remapping
-/// helper functions in transform_effect_node.cc — which are not members of
-/// the class — can take it as a parameter.
-struct TransformAffineParams {
-    float rotate_rad{0.0f};
-    bool flip_h{false};
-    bool flip_v{false};
-    float scale_x{1.0f};
-    float scale_y{1.0f};
-    float translate_x{0.0f};  // normalized, fraction of plane width
-    float translate_y{0.0f};  // normalized, fraction of plane height
-};
 
 /// Transform node: rotation (any angle), horizontal/vertical flip, scale
 /// and translate, combined into a single per-pixel remap pass.
@@ -103,15 +89,15 @@ class TransformEffectNode : public IEffectNode {
     };
 
     Settings LoadSettings() const;
-    static TransformAffineParams ToAffine(const Settings& settings);
+    static pixel_ops::TransformAffineParams ToAffine(const Settings& settings);
     /// Hardware frames through the GPU pass; false = not handled (no pass or it failed).
     bool TryProcessOnGpu(MediaBuffer& input, OutputCallback& emit,
-                         const TransformAffineParams& params);
+                         const pixel_ops::TransformAffineParams& params);
     bool TryApplyPermute(const MediaFrame& src, MediaFrame& dst,
-                         const TransformAffineParams& params,
+                         const pixel_ops::TransformAffineParams& params,
                          MediaBuffer& input, OutputCallback& emit);
     void ApplyBilinear(const MediaFrame& src, MediaFrame& dst,
-                       const TransformAffineParams& params,
+                       const pixel_ops::TransformAffineParams& params,
                        MediaBuffer& input, OutputCallback& emit);
 
     NodeState state_{NodeState::kIdle};

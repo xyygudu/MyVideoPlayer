@@ -1,12 +1,9 @@
-#ifndef MVP_PIXEL_OPS_H_
-#define MVP_PIXEL_OPS_H_
+#ifndef MVP_VIDEO_PIXEL_OPS_H_
+#define MVP_VIDEO_PIXEL_OPS_H_
 
 #include <cstdint>
 
 namespace mvp {
-namespace graph {
-struct TransformAffineParams;
-}
 namespace pixel_ops {
 
 struct ColorLut {
@@ -17,13 +14,24 @@ struct ColorLut {
 ColorLut BuildColorLut(float brightness, float contrast, float saturation);
 void ApplyLut(uint8_t* plane, int linesize, int width, int height, const uint8_t lut[256]);
 
+/// Geometry as the user sets it; ComputeAffineMapping turns it into the inverse mapping.
+struct TransformAffineParams {
+    float rotate_rad{0.0f};
+    bool flip_h{false};
+    bool flip_v{false};
+    float scale_x{1.0f};
+    float scale_y{1.0f};
+    float translate_x{0.0f};  // normalized, fraction of plane width
+    float translate_y{0.0f};  // normalized, fraction of plane height
+};
+
 struct AffineMapping {
     float inv[4];
     float cx, cy;
     float tx, ty;
 };
 
-AffineMapping ComputeAffineMapping(const graph::TransformAffineParams& p, int plane_w, int plane_h);
+AffineMapping ComputeAffineMapping(const TransformAffineParams& p, int plane_w, int plane_h);
 
 void RemapPlane(const uint8_t* src, int src_linesize, uint8_t* dst, int dst_linesize,
                 int width, int height, int comp_stride, int comp_offset,
@@ -35,7 +43,7 @@ void RemapInterleavedPlane(const uint8_t* src, int src_linesize,
 
 bool TryPermutePlane(const uint8_t* src, int src_linesize, uint8_t* dst, int dst_linesize,
                      int width, int height, int comp_stride, int comp_offset,
-                     const graph::TransformAffineParams& p);
+                     const TransformAffineParams& p);
 
 // --- Packed BGRA images (screen capture, overlays) ---
 
@@ -64,4 +72,4 @@ void BlendDiscBgra(const BgraImage& dst, int cx, int cy, int radius, uint32_t rg
 }  // namespace pixel_ops
 }  // namespace mvp
 
-#endif  // MVP_PIXEL_OPS_H_
+#endif  // MVP_VIDEO_PIXEL_OPS_H_

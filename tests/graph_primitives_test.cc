@@ -6,9 +6,9 @@
 
 #include <gtest/gtest.h>
 
-#include "clock.h"
 #include "graph/link.h"
 #include "graph/message_bus.h"
+#include "sync/clock.h"
 
 namespace mvp {
 namespace {

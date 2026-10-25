@@ -5,7 +5,7 @@ extern "C" {
 #include <libavutil/pixfmt.h>
 }
 
-#include "media_frame.h"
+#include "base/media_frame.h"
 
 namespace mvp::gpu {
 

@@ -4,7 +4,7 @@
 
 #include <gtest/gtest.h>
 
-#include "audio_mix_timeline.h"
+#include "audio/audio_mix_timeline.h"
 
 namespace mvp {
 namespace {

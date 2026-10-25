@@ -9,10 +9,10 @@
 #include <thread>
 #include <vector>
 
-#include "clock.h"
 #include "graph/media_buffer.h"
 #include "graph/node.h"
 #include "graph/port.h"
+#include "sync/clock.h"
 
 namespace mvp::graph {
 

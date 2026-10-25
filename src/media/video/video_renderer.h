@@ -1,11 +1,11 @@
-#ifndef MVP_VIDEO_RENDERER_H_
-#define MVP_VIDEO_RENDERER_H_
+#ifndef MVP_VIDEO_VIDEO_RENDERER_H_
+#define MVP_VIDEO_VIDEO_RENDERER_H_
 
 #include <cstdint>
 #include <memory>
 #include <string>
 
-#include "media_frame.h"
+#include "base/media_frame.h"
 
 struct SDL_Window;
 struct SDL_Renderer;
@@ -136,4 +136,4 @@ class VideoRenderer {
 
 }  // namespace mvp
 
-#endif  // MVP_VIDEO_RENDERER_H_
+#endif  // MVP_VIDEO_VIDEO_RENDERER_H_

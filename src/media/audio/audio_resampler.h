@@ -1,5 +1,5 @@
-#ifndef MVP_AUDIO_RESAMPLER_H_
-#define MVP_AUDIO_RESAMPLER_H_
+#ifndef MVP_AUDIO_AUDIO_RESAMPLER_H_
+#define MVP_AUDIO_AUDIO_RESAMPLER_H_
 
 extern "C" {
 #include <libavutil/channel_layout.h>
@@ -51,4 +51,4 @@ class AudioResampler {
 
 }  // namespace mvp
 
-#endif  // MVP_AUDIO_RESAMPLER_H_
+#endif  // MVP_AUDIO_AUDIO_RESAMPLER_H_
