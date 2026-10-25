@@ -193,4 +193,70 @@ bool TryPermutePlane(const uint8_t* src, int src_linesize, uint8_t* dst, int dst
     return true;
 }
 
+void BlitBgra(const uint8_t* src, int src_stride, int width, int height, const BgraImage& dst, int x,
+              int y, bool mirror) {
+    const int x0 = std::max(x, 0);
+    const int x1 = std::min(x + width, dst.width);
+    const int y0 = std::max(y, 0);
+    const int y1 = std::min(y + height, dst.height);
+    if (x0 >= x1 || y0 >= y1) return;
+    for (int dy = y0; dy < y1; ++dy) {
+        const uint32_t* s = reinterpret_cast<const uint32_t*>(src + static_cast<ptrdiff_t>(dy - y) * src_stride);
+        uint32_t* d = reinterpret_cast<uint32_t*>(dst.data + static_cast<ptrdiff_t>(dy) * dst.stride);
+        if (!mirror) {
+            std::memcpy(d + x0, s + (x0 - x), static_cast<size_t>(x1 - x0) * 4);
+            continue;
+        }
+        for (int dx = x0; dx < x1; ++dx) {
+            d[dx] = s[width - 1 - (dx - x)];
+        }
+    }
+}
+
+namespace {
+
+void FillRectBgra(const BgraImage& dst, int x, int y, int width, int height, uint32_t rgb) {
+    const int x0 = std::max(x, 0);
+    const int x1 = std::min(x + width, dst.width);
+    const int y0 = std::max(y, 0);
+    const int y1 = std::min(y + height, dst.height);
+    const uint32_t pixel = 0xFF000000u | (rgb & 0x00FFFFFFu);  // BGRA bytes == ARGB word
+    for (int dy = y0; dy < y1; ++dy) {
+        uint32_t* d = reinterpret_cast<uint32_t*>(dst.data + static_cast<ptrdiff_t>(dy) * dst.stride);
+        std::fill(d + x0, d + std::max(x0, x1), pixel);
+    }
+}
+
+}  // namespace
+
+void OutlineRectBgra(const BgraImage& dst, int x, int y, int width, int height, int thickness,
+                     uint32_t rgb) {
+    FillRectBgra(dst, x, y, width, thickness, rgb);
+    FillRectBgra(dst, x, y + height - thickness, width, thickness, rgb);
+    FillRectBgra(dst, x, y + thickness, thickness, height - 2 * thickness, rgb);
+    FillRectBgra(dst, x + width - thickness, y + thickness, thickness, height - 2 * thickness, rgb);
+}
+
+void BlendDiscBgra(const BgraImage& dst, int cx, int cy, int radius, uint32_t rgb, float alpha) {
+    const float color[3] = {static_cast<float>(rgb & 0xFF), static_cast<float>((rgb >> 8) & 0xFF),
+                            static_cast<float>((rgb >> 16) & 0xFF)};  // B, G, R
+    const int y0 = std::max(cy - radius - 1, 0);
+    const int y1 = std::min(cy + radius + 1, dst.height - 1);
+    const int x0 = std::max(cx - radius - 1, 0);
+    const int x1 = std::min(cx + radius + 1, dst.width - 1);
+    for (int y = y0; y <= y1; ++y) {
+        uint8_t* row = dst.data + static_cast<ptrdiff_t>(y) * dst.stride;
+        for (int x = x0; x <= x1; ++x) {
+            const float distance = std::hypot(static_cast<float>(x - cx), static_cast<float>(y - cy));
+            const float coverage = std::clamp(static_cast<float>(radius) + 0.5f - distance, 0.0f, 1.0f);
+            const float a = alpha * coverage;
+            if (a <= 0.0f) continue;
+            uint8_t* p = row + x * 4;
+            for (int c = 0; c < 3; ++c) {
+                p[c] = static_cast<uint8_t>(p[c] + (color[c] - p[c]) * a + 0.5f);
+            }
+        }
+    }
+}
+
 }  // namespace mvp::pixel_ops

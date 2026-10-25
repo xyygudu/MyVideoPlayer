@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "mvp/captured_frame.h"
 #include "mvp/effect_types.h"
 #include "mvp/export.h"
 
@@ -36,14 +37,6 @@ struct PipelineInfo {
     bool hardware_decoding{false};  // The video decoder runs on the GPU
     std::string renderer;           // SDL render backend, e.g. "direct3d11"
     int64_t frames_presented{0};    // Video frames shown since Open()
-};
-
-/// A video frame converted to 8-bit RGBA, e.g. for screenshots.
-struct CapturedFrame {
-    int width{0};               // 0 = no frame
-    int height{0};
-    double pts{0.0};            // Presentation time in seconds
-    std::vector<uint8_t> rgba;  // width * height * 4 bytes, rows tightly packed
 };
 
 /// High-level media player built on the graph architecture.

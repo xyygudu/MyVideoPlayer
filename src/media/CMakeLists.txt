@@ -6,6 +6,10 @@ find_package(spdlog REQUIRED)
 
 file(GLOB_RECURSE MVP_CORE_SOURCES CONFIGURE_DEPENDS *.cc)
 file(GLOB_RECURSE MVP_CORE_HEADERS CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/include/mvp/*.h)
+# Native capture backends live in capture/<platform>/; only one is built.
+if(NOT WIN32)
+  list(FILTER MVP_CORE_SOURCES EXCLUDE REGEX "/capture/win/")
+endif()
 
 # Generated headers live in the build tree, never in the sources: each build
 # tree (Ninja, Visual Studio) generates its own copy.
@@ -44,6 +48,15 @@ target_link_libraries(mvp_core
     SDL3::SDL3
     spdlog::spdlog
 )
+
+if(WIN32)
+  # Screen (DXGI duplication, GDI, DWM), audio (WASAPI over COM) and camera
+  # (Media Foundation) capture; winmm raises the timer resolution.
+  set(MVP_CAPTURE_SYSTEM_LIBS d3d11 dxgi dwmapi winmm ole32 mfplat mf mfreadwrite mfuuid)
+  target_link_libraries(mvp_core_objects PUBLIC ${MVP_CAPTURE_SYSTEM_LIBS})
+  target_link_libraries(mvp_core PRIVATE ${MVP_CAPTURE_SYSTEM_LIBS})
+  target_compile_definitions(mvp_core_objects PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 
 # --- GPU video pass shaders: HLSL compiled at build time into bytecode headers ---
 if(WIN32)
