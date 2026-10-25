@@ -7,6 +7,7 @@ extern "C" {
 #include <libavutil/audio_fifo.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/dict.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/samplefmt.h>
 #include <libswscale/swscale.h>
 }
@@ -33,6 +34,31 @@ const T* SupportedConfigs(const AVCodec* codec, AVCodecConfig config) {
 AVPixelFormat ChoosePixelFormat(const AVCodec* codec) {
     const auto* fmts = SupportedConfigs<AVPixelFormat>(codec, AV_CODEC_CONFIG_PIX_FORMAT);
     return (fmts && fmts[0] != AV_PIX_FMT_NONE) ? fmts[0] : AV_PIX_FMT_YUV420P;
+}
+
+bool IsRgbPixelFormat(int av_pix_fmt) {
+    const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(av_pix_fmt));
+    return desc && (desc->flags & AV_PIX_FMT_FLAG_RGB);
+}
+
+// RGB sources (screen capture) become limited-range BT.709 YUV, tagged as
+// such, which is what OBS records by default. swscale would otherwise use
+// BT.601, and untagged streams leave players guessing.
+void TagAsBt709(AVCodecContext* ctx) {
+    ctx->colorspace = AVCOL_SPC_BT709;
+    ctx->color_primaries = AVCOL_PRI_BT709;
+    ctx->color_trc = AVCOL_TRC_BT709;
+    ctx->color_range = AVCOL_RANGE_MPEG;
+}
+
+void ConvertRgbAsBt709(SwsContext* sws) {
+    const int* bt709 = sws_getCoefficients(SWS_CS_ITU709);
+    sws_setColorspaceDetails(sws, bt709, 1, bt709, 0, 0, 1 << 16, 1 << 16);
+}
+
+bool EndsWith(const std::string& text, const char* suffix) {
+    const std::string tail(suffix);
+    return text.size() >= tail.size() && text.compare(text.size() - tail.size(), tail.size(), tail) == 0;
 }
 
 AVSampleFormat ChooseSampleFormat(const AVCodec* codec) {
@@ -237,6 +263,10 @@ void EncoderNode::ConfigureVideoContext(const VideoFormat& fmt) {
     codec_ctx_->width = fmt.width;
     codec_ctx_->height = fmt.height;
     codec_ctx_->pix_fmt = ChoosePixelFormat(codec_);
+    rgb_to_yuv_ = fmt.pixel_format == PixelFormat::kRGB32 && !IsRgbPixelFormat(codec_ctx_->pix_fmt);
+    if (rgb_to_yuv_) {
+        TagAsBt709(codec_ctx_);
+    }
 }
 
 void EncoderNode::ConfigureAudioContext(const AudioFormat& fmt) {
@@ -251,7 +281,7 @@ void EncoderNode::ApplyRateControl(AVDictionary** opts) {
         return;
     }
     if (params_.rate_control == mvp::RateControlMode::kCrf) {
-        av_dict_set_int(opts, "crf", params_.crf, 0);
+        ApplyConstantQuality(opts);
     } else {
         codec_ctx_->bit_rate = params_.bitrate_bps;
     }
@@ -260,6 +290,26 @@ void EncoderNode::ApplyRateControl(AVDictionary** opts) {
     }
     codec_ctx_->gop_size = params_.gop_size;
     codec_ctx_->max_b_frames = params_.max_b_frames;
+}
+
+// "crf" is the libx264/libx265 knob; the hardware wrappers spell constant
+// quality their own way (see ffmpeg's documentation of each encoder).
+void EncoderNode::ApplyConstantQuality(AVDictionary** opts) {
+    const std::string& name = params_.codec_name;
+    if (EndsWith(name, "_nvenc")) {
+        av_dict_set(opts, "rc", "vbr", 0);
+        av_dict_set_int(opts, "cq", params_.crf, 0);
+        codec_ctx_->bit_rate = 0;  // The 200 kb/s default would cap the quality
+    } else if (EndsWith(name, "_qsv")) {
+        codec_ctx_->global_quality = params_.crf;  // ICQ
+    } else if (EndsWith(name, "_amf")) {
+        av_dict_set(opts, "rc", "cqp", 0);
+        for (const char* qp : {"qp_i", "qp_p", "qp_b"}) {
+            av_dict_set_int(opts, qp, params_.crf, 0);
+        }
+    } else {
+        av_dict_set_int(opts, "crf", params_.crf, 0);
+    }
 }
 
 void EncoderNode::PublishNegotiatedOutputFormat() {
@@ -318,6 +368,7 @@ void EncoderNode::CloseCodec() {
         sws_freeContext(sws_ctx_);
         sws_ctx_ = nullptr;
     }
+    sws_source_ = {};
     resampler_.reset();
     if (audio_fifo_) {
         av_audio_fifo_free(audio_fifo_);
@@ -343,6 +394,8 @@ MediaFrame EncoderNode::ConvertVideoFrame(const MediaFrame& src) {
         logged_rescale_ = true;
     }
     // Rebuilt only when the source size/format changes mid-stream.
+    const bool source_changed = src.width() != sws_source_.width || src.height() != sws_source_.height ||
+                                src.format() != sws_source_.format;
     sws_ctx_ = sws_getCachedContext(sws_ctx_, src.width(), src.height(),
                                     static_cast<AVPixelFormat>(src.format()), dst_w, dst_h,
                                     codec_ctx_->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr);
@@ -350,6 +403,12 @@ MediaFrame EncoderNode::ConvertVideoFrame(const MediaFrame& src) {
         SPDLOG_ERROR("{}: no SwsContext for format {} -> {}", name_, src.format(),
                      static_cast<int>(codec_ctx_->pix_fmt));
         return MediaFrame();
+    }
+    if (source_changed) {
+        sws_source_ = {src.width(), src.height(), src.format()};
+        if (rgb_to_yuv_ && IsRgbPixelFormat(src.format())) {
+            ConvertRgbAsBt709(sws_ctx_);  // A rebuilt context starts from the defaults
+        }
     }
 
     MediaFrame dst = video_scratch_pool_.Acquire(dst_w, dst_h, codec_ctx_->pix_fmt);

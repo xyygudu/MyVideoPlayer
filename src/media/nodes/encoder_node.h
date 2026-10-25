@@ -87,6 +87,7 @@ class EncoderNode : public INode {
     void ConfigureVideoContext(const VideoFormat& fmt);
     void ConfigureAudioContext(const AudioFormat& fmt);
     void ApplyRateControl(struct AVDictionary** opts);
+    void ApplyConstantQuality(struct AVDictionary** opts);
     void PublishNegotiatedOutputFormat();
 
     // EncodeLoop helpers
@@ -118,6 +119,13 @@ class EncoderNode : public INode {
 
     AVCodecContext* codec_ctx_{nullptr};
     SwsContext* sws_ctx_{nullptr};  // video scale/convert, cached per source format
+    // Source sws_ctx_ was built for: a change rebuilds it with default colorimetry.
+    struct SwsSource {
+        int width{0};
+        int height{0};
+        int format{-1};
+    } sws_source_;
+    bool rgb_to_yuv_{false};  // RGB input, YUV encoder: converted and tagged as BT.709
     std::unique_ptr<AudioResampler> resampler_;  // audio, created with the codec
     AVFramePtr resampled_;                       // resampler output, reused
     AVAudioFifo* audio_fifo_{nullptr};  // audio frame-size buffer, lazy
