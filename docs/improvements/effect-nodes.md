@@ -8,7 +8,7 @@
 
 ## 1. ColorEffectNode 对 NV12 交错色度平面只处理左半行
 
-> **已解决（2026-09-30，change gpu-stage-a-hw-decode-render）**：`ChromaPlaneLayout` 增加 `row_bytes`，`ColorEffectNode` 改用它做逐字节 LUT。项目暂无 C++ 单元测试框架，下文建议的单元测试未落地，靠实机验证。下文保留作为问题记录。
+> **已解决（2026-09-30，change gpu-stage-a-hw-decode-render）**：`ChromaPlaneLayout` 增加 `row_bytes`，`ColorEffectNode` 改用它做逐字节 LUT。当时项目没有单元测试框架，靠实机验证；现在 `mvp_tests` 的 `Paths/EffectPathTest.*/CpuOnDownloadedFrames` 覆盖了 NV12 的 CPU 特效路径（2026-10-25，change player-robustness-and-debug-settings）。下文保留作为问题记录。
 
 ### 问题
 
@@ -91,4 +91,45 @@ GStreamer 把 SRV/RTV 缓存在内存对象上、随内存对象释放。本项�
 ### 改进建议（参考 GStreamer caps feature `memory:D3D11Memory` + `d3d11upload/d3d11download`）
 
 节点如实声明各端口接受/产出的帧域，协商时在域不匹配的连接上自动插入 upload/download 转换节点，特效节点内部不再隐式下载。
+
+---
+
+## 4. 变换特效的像素几何在 CPU/GPU 三条路径上不一致
+
+> **已解决（2026-10-25，change player-robustness-and-debug-settings）**：中心改为 (n−1)/2（CPU 与着色器同时改）；置换只处理精确的四分之一圈并支持分量偏移；NV12 双线性改用色度平面自己的映射。`EffectPathTest.PausedFlipRedrawsAnExactMirror/*` 与 `TransformLooksTheSameOnEveryPath` 逐路径比对。下文保留作为问题记录。
+
+### 问题
+
+给设置页加上「GPU 特效」开关、并用截图逐路径比对后发现四处缺陷：
+
+1. **中心偏半像素**：`ComputeAffineMapping` 与 `affine_remap_ps.hlsl` 都以整数坐标表示像素中心，却把中心取成 `n / 2`。镜像变成 `x → n − x`：GPU 路径第 0 列采样越界成黑线，整幅画面错位 1 像素（色度 2 像素）
+2. **任意角度被量化**：`TryPermutePlane` 把所有角度量化到 0/90/180/270 后走置换，只设置了旋转的帧在 CPU 上「旋转 20° = 不动」
+3. **NV12 置换只拷 U**：`comp_offset != 0` 直接返回 false，V 分量保留帧池里的旧内容
+4. **NV12 双线性用了亮度映射**：交错色度平面按亮度尺寸的中心与平移量重采样，色度与亮度错位
+
+### 影响场景
+
+- **硬解 + GPU 特效**：翻转/旋转后画面边缘出现黑线，整体偏移
+- **硬解 + CPU 特效**（关闭 GPU 特效、或 GPU pass 失败回退）：翻转后颜色错误（V 是垃圾数据），小角度旋转无效
+- **开关 GPU 特效对照调试**：同一参数两条路径结果不同，无法用对照定位问题
+
+### 改进建议（参考 FFmpeg `vf_transpose`/`vf_hflip` 与 OpenGL/D3D 的像素中心约定）
+
+FFmpeg 的 `hflip` 直接写 `dst[x] = src[w - 1 - x]`，只对精确的四分之一圈用 `transpose` 置换，任意角度交给 `rotate` 滤镜重采样。D3D/GL 的纹理坐标里像素中心在 `(i + 0.5) / n`，换算到整数中心坐标系时平面中心是 `(n − 1) / 2`。两条路径共享一个约定，并用自动化测试逐路径比对输出。
+
+---
+
+## 5. 4:2:2 方形画面旋转 90° 时色度未被处理
+
+### 问题
+
+`TryApplyPermute` 只用亮度平面的返回值决定是否走置换。yuv422p 的方形画面亮度是方的、色度（w/2 × h）不是，色度的 `TryPermutePlane` 返回 false 被忽略，输出帧的色度平面没有被写入。
+
+### 影响场景
+
+- **4:2:2 且宽高相等的素材旋转 90°/270°**（极少见，如专业采集的方形画幅）：颜色为帧池里的旧内容
+
+### 改进建议（参考 FFmpeg `vf_transpose` 的逐平面决策）
+
+置换必须对所有平面都成立才走置换：先对全部平面做可行性判断，任一平面不行就整帧走双线性；或按 FFmpeg `transpose` 的做法，90° 旋转输出宽高互换的帧而不是裁成原尺寸。
 

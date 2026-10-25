@@ -236,8 +236,9 @@ include/mvp/        # 公开头文件（库使用者可见）
 ├── transcode_options.h
 ├── source_info.h / source_probe.h
 ├── effect_types.h
-├── logging.h
-└── export.h
+└── logging.h               # export.h 由 CMake 生成到 <build>/generated/include/mvp/
+
+tests/              # GoogleTest 单元/集成测试 (mvp_tests)，测试素材由 ffmpeg 在构建时生成
 
 cmake/              # 自定义 CMake 模块 (FindFFmpeg.cmake)
 docs/               # 设计文档

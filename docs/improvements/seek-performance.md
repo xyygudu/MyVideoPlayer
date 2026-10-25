@@ -123,6 +123,8 @@ frame_queue_->Push(SerialFrame{std::move(frame), pkt_serial, false});
 
 ## 4. Seek 后第一帧未跳过 A/V sync delay
 
+> **已解决（2026-10-24）**：VideoSinkNode 的渲染线程按 seek epoch 维护时间线（`Timeline`），新 epoch 的第一帧立即呈现并以它为基准重置 `frame_timer_`（ffplay 在 serial 变化时同样重置 frame_timer）；控制线程不再跨线程改写 `frame_timer_`。下文保留作为问题记录。
+
 ### 问题
 
 seek 完成后 video render loop 拿到第一帧仍执行 `ComputeDisplayDelay()` 计算 A/V 同步延迟。此时 audio clock 可能尚未更新到正确位置，导致计算出一个正的 delay，白白等待一段时间才显示。

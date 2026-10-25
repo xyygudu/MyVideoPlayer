@@ -5,9 +5,7 @@ selection, real-time interaction, and reset behavior on open/close. Reads
 and writes effect state exclusively through `MediaPlayer`'s public API
 (`EffectInfos`/`SetEffectParam`/`SetEffectEnabled`) — it has no knowledge of
 the graph, `IEffectNode`, or `EffectManager`.
-
 ## Requirements
-
 ### Requirement: Effects tab 按特效分组展示参数，控件类型跟随参数类型
 右侧 `EffectPanel` 的 "Effects" tab SHALL 为每个已注册的特效（当前为 Transform 与 Color 两个，来自 `MediaPlayer::EffectInfos()` 返回的 `EffectInfo`）渲染一个独立分组，分组标题使用 `EffectInfo::display_name`，分组标题旁 SHALL 附带一个启用勾选框绑定 `EffectInfo::enabled`。分组内按 `EffectInfo::params` 的顺序为每个 `EffectParam` 生成对应控件：`kFloat` 用 `QSlider`（连续）+ `QLabel` 数值显示，`kInt` 用步进式 `QSlider`（`singleStep=1`）或 `QSpinBox`，`kBool` 用 `QCheckBox`，`kEnum` 用 `QComboBox`（选项文案取自 `enum_labels`）。
 
@@ -47,3 +45,11 @@ the graph, `IEffectNode`, or `EffectManager`.
 #### Scenario: 面板仅展示一个 tab
 - **WHEN** 主窗口启动
 - **THEN** 右侧面板的 QTabWidget 只包含一个 "Effects" tab 页
+
+### Requirement: 每个特效组提供「重置参数」按钮
+每个特效分组 SHALL 在参数控件下方提供「重置参数」按钮，点击后 SHALL 调用 `MediaPlayer::ResetEffectParams(effect_id)`，并在当前槽函数返回后（排队调用）按 `EffectInfos()` 重建全部控件，使滑块/复选框/下拉框回到默认值。分组被禁用（未勾选）时按钮随分组一起禁用。
+
+#### Scenario: 重置后控件回到默认值
+- **WHEN** 拖动亮度、对比度滑块后点击颜色分组的「重置参数」
+- **THEN** 两个滑块回到默认位置，暂停中的画面同步恢复
+

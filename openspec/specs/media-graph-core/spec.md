@@ -3,9 +3,7 @@
 Defines the core MediaGraph infrastructure — the unified data carrier
 (MediaBuffer), port format negotiation (MediaFormat), bounded async links
 between nodes, and the graph orchestrator that manages topology and lifecycle.
-
 ## Requirements
-
 ### Requirement: MediaBuffer unifies pipeline data carrier
 系统 SHALL 定义 `MediaBuffer` 类型，作为图中所有节点间传输的统一数据载体。payload SHALL 为 `std::variant<AVPacketPtr, MediaFrame>`，禁止使用 void* 或 type-erasure。
 
@@ -111,12 +109,11 @@ MediaGraph SHALL 提供：
 - `Flush()`：递增 seek 世代并广播到所有节点和 Link
 - `MasterClock()`：返回仲裁出的主时钟（非拥有指针，无提供者时为 nullptr）
 - `SeekEpoch()`：返回当前 seek 世代，供生产者锁存与消费端校验
-- `SetEventCallback(GraphEventCallback)`：事件分发
+- `Bus()`：节点向应用层上报的消息总线（见「MessageBus 承载节点上报」）
 
 MediaGraph SHALL 使用 Kahn 算法进行拓扑排序，检测环路。
 
-GraphEvent 类型 SHALL 包含：kEos, kError, kStateChanged, kFormatChanged。
-GraphState 类型 SHALL 包含：kIdle, kReady, kPlaying, kPaused, kFinished, kError。
+MediaGraph SHALL NOT 持有播放状态，也 SHALL NOT 在节点线程上回调应用层：播放/转码状态归各 facade 所有，由 facade 的事件线程根据总线消息推进。
 
 #### Scenario: Graph builds topology from connections
 - **WHEN** 添加 Source→Transform→Sink 并 Connect
@@ -125,6 +122,10 @@ GraphState 类型 SHALL 包含：kIdle, kReady, kPlaying, kPaused, kFinished, kE
 #### Scenario: 连接必须声明缓冲量
 - **WHEN** 调用 Connect 时未提供容量
 - **THEN** 编译失败，不存在"忘记传参即无限缓冲"的路径
+
+#### Scenario: 节点上报不回调应用层
+- **WHEN** 解码节点在自身线程遇到不可恢复错误
+- **THEN** 它投递 kError 到 `Bus()` 后返回，应用层状态由 facade 的事件线程更新
 
 ### Requirement: MediaGraph arbitrates the master clock during negotiation
 `MediaGraph::Negotiate()` SHALL 在 caps 校验之后、节点 `Negotiate()` 之前收集所有节点的 `ProvideClock()` 结果，选出优先级最高者作为主时钟。该顺序 SHALL 保证节点在自身 `Negotiate()` 中即可读到 `MasterClock()`。
@@ -185,9 +186,9 @@ GraphState 类型 SHALL 包含：kIdle, kReady, kPlaying, kPaused, kFinished, kE
 - **WHEN** 连接形成 A→B→C→A 环路
 - **THEN** TopologicalSort 失败，MediaGraph 报告错误
 
-#### Scenario: EOS from all sinks triggers Finished
-- **WHEN** 所有 SinkNode 均发出 kEos 事件
-- **THEN** GraphState 转为 kFinished，EventCallback 被调用
+#### Scenario: EOS from all sinks reaches the facade
+- **WHEN** 所有 SinkNode 均在当前世代投递 kEos
+- **THEN** facade 的事件线程收齐后将自身状态转为结束（播放为 kFinished，转码为 kSucceeded），图本身不持有该状态
 
 #### Scenario: Open precedes negotiation
 - **WHEN** facade 依次调用 graph->Open() → graph->Negotiate() → graph->Prepare()
@@ -203,7 +204,7 @@ GraphState 类型 SHALL 包含：kIdle, kReady, kPlaying, kPaused, kFinished, kE
 
 #### Scenario: AddNode injects graph reference automatically
 - **WHEN** 通过 AddNode 注册一个需要上报事件的节点
-- **THEN** 该节点无需外部调用 SetGraph 即可通过 graph 上报 EOS/错误
+- **THEN** 该节点无需外部调用 SetGraph 即可通过 graph 的消息总线上报 EOS/错误
 
 ### Requirement: INode interface removes Configure(NodeConfig)
 INode 接口 SHALL 移除 `virtual bool Configure(const NodeConfig& config)` 方法。NodeConfig 结构体 SHALL 被删除。各节点的配置 SHALL 改为构造参数注入或节点专属 setter 方法。
@@ -213,19 +214,63 @@ INode 接口 SHALL 移除 `virtual bool Configure(const NodeConfig& config)` 方
 - **THEN** 仅调用 Negotiate/Prepare/Start/Stop/Flush，不调用 Configure
 
 ### Requirement: MediaFormat extends with codec_params field
-MediaFormat SHALL 新增 `std::shared_ptr<AVCodecParameters> codec_params_` 成员和 `codec_params()` 访问器。FromStream 工厂 SHALL 深拷贝构造。
+编码格式 SHALL 携带 `std::shared_ptr<AVCodecParameters> codec_params`（位于 `EncodedFormat` 分支）。`MediaFormat::FromStream` 工厂 SHALL 深拷贝流的 codecpar，由 shared_ptr 的删除器释放。
+
+#### Scenario: 解码器从端口格式取得 codecpar
+- **WHEN** DecoderNode 在 Negotiate 中读取输入端口格式
+- **THEN** `AsEncoded().codec_params` 非空，且独立于 demuxer 的 AVStream 生命周期
 
 ### Requirement: NodeState kConfigured semantics adjustment
-Prepare() SHALL 同时接受 kIdle 和 kConfigured 两种入口状态。
+节点的 Prepare() SHALL 同时接受 kIdle 和 kConfigured 两种入口状态；已处于 kPrepared/kRunning 时 SHALL 直接返回成功。
+
+#### Scenario: 未经配置也可准备
+- **WHEN** 节点处于 kIdle 时调用 Prepare()
+- **THEN** 正常分配资源并进入 kPrepared
 
 ### Requirement: MediaFormat 用 variant 拆分音视频
 MediaFormat SHALL 用 `std::variant<std::monostate, EncodedFormat, VideoFormat, AudioFormat>` 承载类型专属字段。公共字段 media_type 和 time_base 留在外层。codec_params SHALL 只在 EncodedFormat 分支。访问通过 IsVideo/IsAudio/IsEncoded + AsVideo/AsAudio/AsEncoded。
 
+#### Scenario: 先判断再访问
+- **WHEN** 视频 sink 协商时读取输入格式
+- **THEN** 先以 `IsVideo()` 确认分支，再用 `AsVideo()` 读取宽高与帧率
+
 ### Requirement: FormatCaps Intersect 泛型化
-FormatCaps::Intersect SHALL 用泛型辅助 IntersectVectors<T> 消除重复 find-push 逻辑，函数体收缩到 50 行以内。
+FormatCaps::Intersect SHALL 用泛型辅助 IntersectVectors<T> 求各维度交集（空列表表示不限制），消除重复的 find-push 逻辑，函数体收缩到 50 行以内。
+
+#### Scenario: 像素格式求交
+- **WHEN** 上游支持 {NV12, YUV420P}，下游支持 {YUV420P, D3D11}
+- **THEN** 交集为 {YUV420P}
 
 ### Requirement: INode 接口控制方法
-INode SHALL 新增 `virtual void OnCommand(const Command& cmd) {}` 和 `virtual void SetPaused(bool)` 默认空实现。MediaGraph SHALL 新增 Seek/SetPaused/SendCommand 高层操作。
+INode SHALL 提供 `virtual void OnCommand(const Command& cmd)` 和 `virtual void SetPaused(bool)` 的默认空实现。MediaGraph SHALL 提供 Seek/SetPaused/SendCommand 高层操作，按图的规则把命令分发到各节点。
+
+#### Scenario: 不关心命令的节点无需实现
+- **WHEN** MediaGraph 广播 kSeek 命令
+- **THEN** 未覆写 OnCommand 的节点忽略该命令，关心的节点各自重置状态
 
 ### Requirement: MediaGraph 缓存源时长元数据
-MediaPlayer SHALL 缓存源 duration（来自 Probe），Duration() 查询读缓存值，不再运行时访问 DemuxNode。
+MediaPlayer SHALL 缓存源 duration（来自 SourceProbe），Duration() 查询读缓存值，不在运行期访问 DemuxNode。
+
+#### Scenario: 播放中查询时长
+- **WHEN** 播放过程中调用 Duration()
+- **THEN** 直接返回 Open 时探测到的时长，不与 demux 线程交互
+
+### Requirement: MessageBus 承载节点上报
+`MediaGraph` SHALL 拥有一个 `MessageBus`，通过 `Bus()` 暴露。节点 SHALL 只经 `Bus().Post(GraphMessage)` 向应用层上报，`Post` SHALL NOT 阻塞在消费者上，总线关闭后投递被静默丢弃。
+
+`GraphMessage` SHALL 包含：`type`（`kEos`、`kError`、`kDeviceLost`、`kFirstFrame`）、`source`（投递节点）、`serial`（触发该消息的数据所属 seek 世代）、`detail`（错误描述）、`pts`（`kFirstFrame` 时为该帧显示时间）。
+
+facade SHALL 以单一事件线程 `Wait()` 消费总线，并以 `serial` 与当前世代比较丢弃过期消息；`Shutdown()` SHALL 唤醒消费者并使其退出。
+
+#### Scenario: 投递不受消费者阻塞
+- **WHEN** facade 正持锁停止图，而某节点线程在退出前投递 kEos
+- **THEN** `Post` 立即返回，节点线程得以结束，`Stop()` 不会死锁
+
+#### Scenario: 过期世代的消息被丢弃
+- **WHEN** 视频 sink 投递 serial=3 的 kEos 之后用户发起 seek（世代变为 4）
+- **THEN** 事件线程比较 serial 后忽略该 EOS，播放不会被判定结束
+
+#### Scenario: 关闭唤醒消费者
+- **WHEN** 事件线程阻塞在 `Wait()` 时调用 `Shutdown()`
+- **THEN** `Wait()` 返回空，事件线程退出
+

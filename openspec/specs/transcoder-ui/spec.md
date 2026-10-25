@@ -5,9 +5,7 @@ to `mvp::TranscodeOptions`, and progress/completion reporting from
 `mvp::Transcoder`, scoped to only the capabilities `Transcoder` currently
 implements (no trim, passthrough, two-pass, or hardware encode entry
 points).
-
 ## Requirements
-
 ### Requirement: Source and output file selection
 `TranscoderPage` SHALL provide a source file row (path display + "浏览"
 button opening `QFileDialog::getOpenFileName`) and an output file row (path
@@ -84,16 +82,18 @@ status label. While running, the start button SHALL be replaced by a
 - **WHEN** `Transcoder`'s progress callback reports 42.0
 - **THEN** the progress bar shows 42% (see cross-thread requirement below)
 
-#### Scenario: Completion shows success or failure status
-- **WHEN** the completion callback reports `true`
+#### Scenario: Completion shows success, cancellation or failure status
+- **WHEN** the completion callback reports `TranscodeResult::kSucceeded`
 - **THEN** the status label shows a success message and the button reverts
-  to "开始转码"; a `false` report shows a failure message instead
+  to "开始转码"; `kCancelled` shows a cancelled message and `kFailed` a
+  failure message instead
 
 ### Requirement: Transcoder callbacks are marshaled to the GUI thread
-`Transcoder::SetProgressCallback`/`SetCompletionCallback` fire on the
-graph's internal worker threads, not the Qt GUI thread. `TranscoderPage`
-SHALL NOT touch any `QWidget` directly inside those callback lambdas;
-each callback SHALL immediately hop to the GUI thread via
+`TranscoderPage` SHALL NOT touch any `QWidget` directly inside the
+`Transcoder` callback lambdas: progress fires on the muxer thread, and
+completion fires on the transcoder's event thread when a run ends by itself
+(on the calling thread for `Cancel()` and failed `Start()`). Each callback
+SHALL immediately hop to the GUI thread via
 `QMetaObject::invokeMethod(this, [...]{ ... }, Qt::QueuedConnection)`
 before updating any widget.
 
@@ -102,3 +102,4 @@ before updating any widget.
   transcode is running
 - **THEN** the resulting widget update executes on the GUI thread via the
   queued invocation, with no direct cross-thread widget access
+
