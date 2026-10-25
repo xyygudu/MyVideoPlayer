@@ -53,3 +53,10 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 add_subdirectory(src/media)
 add_subdirectory(src/app)
 add_subdirectory(src/tools)
+
+# Unit and integration tests; GoogleTest is downloaded at configure time.
+option(MVP_BUILD_TESTS "Build the mvp_tests suite" ON)
+if(MVP_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()
