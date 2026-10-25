@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -13,8 +14,11 @@
 #include "graph/node.h"
 #include "graph/port.h"
 
-struct SwrContext;
 struct SDL_AudioStream;
+
+namespace mvp {
+class AudioResampler;
+}  // namespace mvp
 
 namespace mvp::graph {
 
@@ -24,17 +28,21 @@ namespace mvp::graph {
 /// - ThreadingMode: kActive (owns audio consumption thread)
 ///
 /// This node replaces AudioRenderer by directly pulling MediaBuffers
-/// containing audio MediaFrames from its input Link, resampling to
-/// SDL format (S16), and feeding the SDL audio stream.
+/// containing audio MediaFrames from its input Link, resampling to the
+/// fixed SDL stream format (S16, negotiated rate/channels; input changes
+/// mid-stream are absorbed by the resampler), and feeding the SDL stream.
 ///
 /// Lifecycle:
 /// - AVStream* is needed for Prepare() to configure SDL audio device.
 /// - Owns the audio time base and offers it for master-clock arbitration.
-/// - Graph reference for EOS reporting.
+/// - Posts kEos to the graph bus once the device played everything out.
 ///
 /// Thread safety:
-/// - Worker thread owns SDL audio device and SwrContext.
-/// - paused_ is atomically toggled from main thread.
+/// - Worker thread owns the resampler and feeds SDL; the control thread
+///   clears SDL on seek. Both hold feed_mutex_, and the worker re-checks the
+///   seek epoch under it, so pre-seek audio can never be queued after the
+///   clear nor move the clock.
+/// - paused_ is atomically toggled from the control thread.
 class AudioSinkNode : public INode {
   public:
     AudioSinkNode();
@@ -62,15 +70,15 @@ class AudioSinkNode : public INode {
 
     // --- AudioSinkNode-specific ---
 
-    /// Set graph reference for EOS reporting.
+    /// Set graph reference for epoch checks and EOS reporting.
     void Attach(MediaGraph* graph) override { graph_ = graph; }
-
-    /// Clear SDL audio buffer (used on seek).
-    void FlushSdlBuffer();
 
   private:
     void AudioLoop();
     void CloseDevice();
+
+    /// Clear the SDL queue (seek). Takes feed_mutex_.
+    void FlushSdlBuffer();
 
     // Prepare helpers
     bool ReadAudioParams();
@@ -79,8 +87,9 @@ class AudioSinkNode : public INode {
     // AudioLoop helpers
     bool ShouldThrottle() const;
     double QueuedSeconds() const;
-    void ConvertAndFeed(struct AVFrame* frame);
-    void DrainAndReportEos();
+    bool IsCurrentEpoch(int serial) const;
+    void FeedFrame(const MediaBuffer& buf);
+    void DrainAndReportEos(int serial);
 
     NodeState state_{NodeState::kIdle};
 
@@ -98,8 +107,12 @@ class AudioSinkNode : public INode {
     int sample_rate_{0};
     int channels_{0};
 
-    // Resampler (lazily created in AudioLoop, owned by audio thread)
-    SwrContext* swr_ctx_{nullptr};
+    // Created in Prepare, then used by the audio thread only.
+    std::unique_ptr<AudioResampler> resampler_;
+    AVFramePtr converted_;
+
+    // Serializes feeding SDL (audio thread) with clearing it (control thread).
+    std::mutex feed_mutex_;
 
     // Worker thread
     std::thread audio_thread_;

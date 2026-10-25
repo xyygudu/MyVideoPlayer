@@ -2,7 +2,9 @@
 #define MVP_NODES_DECODER_NODE_H_
 
 #include <atomic>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -21,6 +23,7 @@ struct AVCodecContext;
 struct AVCodec;
 struct AVCodecParameters;
 struct AVFrame;
+struct AVPacket;
 
 namespace mvp {
 namespace gpu {
@@ -41,17 +44,20 @@ class MediaGraph;  // Forward declaration to avoid circular include
 ///              format (VideoFormat/AudioFormat) without opening codec
 /// - Prepare: creates AVCodecContext from upstream codec_id;
 ///            queries HW device from graph if available
-/// - Flush: flushes codec internal buffers (avcodec_flush_buffers)
-/// - Flush: flushes codec internal buffers (avcodec_flush_buffers)
+/// - Flush: no codec access from the control thread; the decode thread
+///          flushes the codec itself when it sees a new seek epoch
 ///
 /// Lifecycle notes:
 /// - codec_ctx_ allocated in Prepare(), freed in Stop()
 /// - Worker thread pulls from input Link, sends to output port
-/// - Supports SetDropUntilPts() for seek optimization (skip non-ref frames)
+/// - Seek catch-up: frames before the seek target are dropped (software
+///   decode also skips non-reference frames meanwhile)
 /// - EOF handling: null packet → drain → push EOS downstream
 class DecoderNode : public INode {
   public:
-    DecoderNode();
+    /// `allow_hardware` false forces CPU decoding even when the graph has a
+    /// GPU device that supports the codec (debug/compatibility switch).
+    explicit DecoderNode(bool allow_hardware = true);
     ~DecoderNode() override;
 
     // --- INode interface ---
@@ -76,12 +82,17 @@ class DecoderNode : public INode {
 
     // --- DecoderNode-specific ---
 
-    /// Skip decoded frames until PTS >= target. Thread-safe.
-    /// Used for seek optimization.
+    /// Skip decoded frames of the current seek epoch until PTS >= target.
+    /// Thread-safe; call after the graph bumped the epoch (OnCommand(kSeek)).
     void SetDropUntilPts(double pts);
 
     /// Set graph reference for shared resource access (HW device).
     void Attach(MediaGraph* graph) override { graph_ = graph; }
+
+    /// Diagnostics, valid after Prepare(): the opened codec and whether it
+    /// decodes on the GPU.
+    const std::string& CodecName() const { return codec_name_; }
+    bool IsHardwareDecoding() const { return hardware_active_; }
 
   private:
     void DecodeLoop();
@@ -112,11 +123,19 @@ class DecoderNode : public INode {
 
     // DecodeLoop helpers (per-packet processing)
     void MaybeFlushOnSerialChange(int serial);
+    /// The drop target recorded for seek epoch `serial`, if any.
+    double DropTargetFor(int serial);
+    /// avcodec_send_packet honouring the EAGAIN contract (drain, resend).
+    int SendPacket(const AVPacket* pkt);
     void ProcessPacket(MediaBuffer& buf);
     void HandleEos();
 
     NodeState state_{NodeState::kIdle};
     std::string name_{"DecoderNode"};
+    const bool allow_hardware_;
+    // Written by Prepare() before the decode thread starts; read-only after.
+    std::string codec_name_;
+    bool hardware_active_{false};
 
     // Negotiated parameters (from input port format)
     const AVCodecParameters* negotiated_codecpar_{nullptr};
@@ -140,7 +159,19 @@ class DecoderNode : public INode {
     // Worker thread
     std::thread decode_thread_;
     std::atomic<bool> running_{false};
-    std::atomic<double> drop_until_pts_{0.0};
+
+    // Seek catch-up target. The control thread records it together with the
+    // epoch it belongs to; the decode thread latches it when that epoch's
+    // first packet arrives, so a target can never leak into another epoch.
+    static constexpr double kNoDropTarget = -std::numeric_limits<double>::infinity();
+    struct DropTarget {
+        int epoch{-1};
+        double pts{kNoDropTarget};
+    };
+    std::mutex drop_target_mutex_;
+    DropTarget drop_target_;  // Guarded by drop_target_mutex_.
+    double seek_target_{kNoDropTarget};  // Decode thread only: latched target.
+
     int last_serial_{0};     // Tracks seek epoch for flush-on-seek detection
     int current_serial_{0};  // Epoch of the packet being decoded; stamps output
 };

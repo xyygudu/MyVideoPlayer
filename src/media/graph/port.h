@@ -78,7 +78,9 @@ class OutputPort {
     /// - If downstream is Passive: calls Process() synchronously
     ///   and routes the emitted buffers further downstream.
     /// - If downstream is Active: enqueues into the Link.
-    void Push(MediaBuffer buf);
+    /// Returns false once a downstream Link has been aborted (the graph is
+    /// stopping), so producers can stop working early.
+    bool Push(MediaBuffer buf);
 
     /// Set the format capabilities this port can produce.
     void SetCaps(FormatCaps caps) { caps_ = std::move(caps); }

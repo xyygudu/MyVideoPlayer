@@ -14,7 +14,7 @@ struct VideoStream {
     int height{0};
     int frame_rate_num{0};               ///< Frame rate numerator
     int frame_rate_den{1};               ///< Frame rate denominator
-    int pix_fmt{-1};                     ///< AVPixelFormat value, -1 = unknown
+    std::string pixel_format;            ///< Pixel format name (e.g. "yuv420p"), empty = unknown
     int64_t bit_rate{0};
 };
 
@@ -24,8 +24,8 @@ struct AudioStream {
     std::string codec_name;              ///< Codec name string (e.g. "aac", "mp3")
     int sample_rate{0};
     int channels{0};
-    uint64_t channel_layout{0};
-    int sample_fmt{-1};                  ///< AVSampleFormat value, -1 = unknown
+    std::string channel_layout;          ///< Layout name (e.g. "stereo", "5.1(side)")
+    std::string sample_format;           ///< Sample format name (e.g. "fltp"), empty = unknown
     int64_t bit_rate{0};
 };
 

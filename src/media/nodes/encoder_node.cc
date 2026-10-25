@@ -8,14 +8,88 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/dict.h>
 #include <libavutil/samplefmt.h>
-#include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
 #include <spdlog/spdlog.h>
 
+#include "audio_resampler.h"
 #include "ffmpeg_utils.h"
+#include "graph/media_graph.h"
 
 namespace mvp::graph {
+
+namespace {
+
+// The encoder's list of supported values for `config`; null = anything goes.
+template <typename T>
+const T* SupportedConfigs(const AVCodec* codec, AVCodecConfig config) {
+    const void* configs = nullptr;
+    if (avcodec_get_supported_config(nullptr, codec, config, 0, &configs, nullptr) < 0) {
+        return nullptr;
+    }
+    return static_cast<const T*>(configs);
+}
+
+AVPixelFormat ChoosePixelFormat(const AVCodec* codec) {
+    const auto* fmts = SupportedConfigs<AVPixelFormat>(codec, AV_CODEC_CONFIG_PIX_FORMAT);
+    return (fmts && fmts[0] != AV_PIX_FMT_NONE) ? fmts[0] : AV_PIX_FMT_YUV420P;
+}
+
+AVSampleFormat ChooseSampleFormat(const AVCodec* codec) {
+    const auto* fmts = SupportedConfigs<AVSampleFormat>(codec, AV_CODEC_CONFIG_SAMPLE_FORMAT);
+    return (fmts && fmts[0] != AV_SAMPLE_FMT_NONE) ? fmts[0] : AV_SAMPLE_FMT_FLTP;
+}
+
+// The source rate when the encoder takes it; otherwise the nearest higher
+// supported rate (no band-limiting), else the highest one. Opus, for one,
+// only accepts 48 kHz-family rates, so 44.1 kHz input becomes 48 kHz.
+int ChooseSampleRate(const AVCodec* codec, int source_rate) {
+    const int wanted = source_rate > 0 ? source_rate : 48000;
+    const int* rates = SupportedConfigs<int>(codec, AV_CODEC_CONFIG_SAMPLE_RATE);
+    if (!rates) {
+        return wanted;
+    }
+    int above = 0;
+    int below = 0;
+    for (const int* r = rates; *r != 0; ++r) {
+        if (*r == wanted) {
+            return wanted;
+        }
+        if (*r > wanted && (above == 0 || *r < above)) {
+            above = *r;
+        }
+        if (*r < wanted && *r > below) {
+            below = *r;
+        }
+    }
+    return above ? above : (below ? below : wanted);
+}
+
+// The default layout for the source channel count when supported; otherwise
+// the supported layout with the most channels not above it, else the first.
+void ChooseChannelLayout(const AVCodec* codec, int channels, AVChannelLayout* out) {
+    AVChannelLayout wanted{};
+    av_channel_layout_default(&wanted, channels > 0 ? channels : 2);
+    const auto* layouts =
+        SupportedConfigs<AVChannelLayout>(codec, AV_CODEC_CONFIG_CHANNEL_LAYOUT);
+    const AVChannelLayout* pick = nullptr;
+    for (const AVChannelLayout* l = layouts; l && l->nb_channels != 0; ++l) {
+        if (av_channel_layout_compare(l, &wanted) == 0) {
+            pick = l;
+            break;
+        }
+        if (l->nb_channels <= wanted.nb_channels && (!pick || l->nb_channels > pick->nb_channels)) {
+            pick = l;
+        }
+    }
+    if (layouts && !pick) {
+        pick = &layouts[0];
+    }
+    av_channel_layout_copy(out, pick ? pick : &wanted);
+    av_channel_layout_uninit(&wanted);
+}
+
+}  // namespace
 
 EncoderNode::EncoderNode(mvp::EncodeParams params) : params_(std::move(params)) {
     input_port_ = std::make_unique<InputPort>(this);
@@ -47,8 +121,14 @@ bool EncoderNode::Negotiate() {
         Rational fr = fmt.AsVideo().frame_rate;
         time_base_ = (fr.num > 0) ? AVRational{fr.den, fr.num} : AVRational{1, 25};
     } else {
-        int sr = fmt.AsAudio().sample_rate;
-        time_base_ = AVRational{1, sr > 0 ? sr : 44100};
+        // Audio pts count samples, so the time base follows the encoder rate.
+        const int source_rate = fmt.AsAudio().sample_rate;
+        sample_rate_ = ChooseSampleRate(codec_, source_rate);
+        if (sample_rate_ != source_rate) {
+            SPDLOG_INFO("{}: resampling audio {} Hz -> {} Hz (encoder constraint)", name_,
+                        source_rate, sample_rate_);
+        }
+        time_base_ = AVRational{1, sample_rate_};
     }
 
     // Container decides where parameter sets go; read the downstream muxer's
@@ -141,10 +221,14 @@ bool EncoderNode::OpenCodec() {
     int ret = avcodec_open2(codec_ctx_, codec_, &opts);
     av_dict_free(&opts);
     if (ret < 0) {
-        SPDLOG_ERROR("EncoderNode: failed to open encoder '{}' (err {})",
-                     params_.codec_name, ret);
+        SPDLOG_ERROR("EncoderNode: failed to open encoder '{}': {}", params_.codec_name,
+                     AvErrorString(ret));
         avcodec_free_context(&codec_ctx_);
         return false;
+    }
+    if (media_type_ == MediaType::kAudio) {
+        resampler_ = std::make_unique<AudioResampler>(
+            codec_ctx_->sample_fmt, codec_ctx_->sample_rate, codec_ctx_->ch_layout);
     }
     return true;
 }
@@ -152,15 +236,13 @@ bool EncoderNode::OpenCodec() {
 void EncoderNode::ConfigureVideoContext(const VideoFormat& fmt) {
     codec_ctx_->width = fmt.width;
     codec_ctx_->height = fmt.height;
-    codec_ctx_->pix_fmt =
-        codec_->pix_fmts ? codec_->pix_fmts[0] : AV_PIX_FMT_YUV420P;
+    codec_ctx_->pix_fmt = ChoosePixelFormat(codec_);
 }
 
 void EncoderNode::ConfigureAudioContext(const AudioFormat& fmt) {
-    codec_ctx_->sample_rate = fmt.sample_rate;
-    codec_ctx_->sample_fmt =
-        codec_->sample_fmts ? codec_->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
-    av_channel_layout_default(&codec_ctx_->ch_layout, fmt.channels);
+    codec_ctx_->sample_rate = sample_rate_;
+    codec_ctx_->sample_fmt = ChooseSampleFormat(codec_);
+    ChooseChannelLayout(codec_, fmt.channels, &codec_ctx_->ch_layout);
 }
 
 void EncoderNode::ApplyRateControl(AVDictionary** opts) {
@@ -197,6 +279,7 @@ bool EncoderNode::Start() {
     }
 
     running_ = true;
+    failed_ = false;
     encode_thread_ = std::thread(&EncoderNode::EncodeLoop, this);
     state_ = NodeState::kRunning;
     return true;
@@ -235,13 +318,16 @@ void EncoderNode::CloseCodec() {
         sws_freeContext(sws_ctx_);
         sws_ctx_ = nullptr;
     }
-    if (swr_ctx_) {
-        swr_free(&swr_ctx_);
-    }
+    resampler_.reset();
     if (audio_fifo_) {
         av_audio_fifo_free(audio_fifo_);
         audio_fifo_ = nullptr;
         audio_pts_valid_ = false;
+    }
+    last_video_pts_ = AV_NOPTS_VALUE;
+    if (dropped_video_frames_ > 0) {
+        SPDLOG_INFO("{}: {} frame(s) with non-increasing pts were dropped", name_, dropped_video_frames_);
+        dropped_video_frames_ = 0;
     }
     if (codec_ctx_) {
         avcodec_free_context(&codec_ctx_);
@@ -249,55 +335,32 @@ void EncoderNode::CloseCodec() {
 }
 
 MediaFrame EncoderNode::ConvertVideoFrame(const MediaFrame& src) {
-    int width = src.width();
-    int height = src.height();
-    int target_fmt = static_cast<int>(codec_ctx_->pix_fmt);
-
-    if (!sws_ctx_) {
-        sws_ctx_ = sws_getContext(width, height, static_cast<AVPixelFormat>(src.format()),
-                                  width, height, static_cast<AVPixelFormat>(target_fmt),
-                                  SWS_BILINEAR, nullptr, nullptr, nullptr);
+    const int dst_w = codec_ctx_->width;
+    const int dst_h = codec_ctx_->height;
+    if (!logged_rescale_ && (src.width() != dst_w || src.height() != dst_h)) {
+        SPDLOG_WARN("{}: source frame is {}x{}, scaling to the encoder's {}x{}", name_,
+                    src.width(), src.height(), dst_w, dst_h);
+        logged_rescale_ = true;
     }
+    // Rebuilt only when the source size/format changes mid-stream.
+    sws_ctx_ = sws_getCachedContext(sws_ctx_, src.width(), src.height(),
+                                    static_cast<AVPixelFormat>(src.format()), dst_w, dst_h,
+                                    codec_ctx_->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr);
     if (!sws_ctx_) {
-        SPDLOG_ERROR("EncoderNode: failed to create SwsContext for pixel conversion");
+        SPDLOG_ERROR("{}: no SwsContext for format {} -> {}", name_, src.format(),
+                     static_cast<int>(codec_ctx_->pix_fmt));
         return MediaFrame();
     }
 
-    MediaFrame dst = video_scratch_pool_.Acquire(width, height, target_fmt);
-    AVFrame* src_frame = src.RawFrame();
+    MediaFrame dst = video_scratch_pool_.Acquire(dst_w, dst_h, codec_ctx_->pix_fmt);
+    if (!dst.IsValid()) {
+        SPDLOG_ERROR("{}: failed to allocate a conversion frame", name_);
+        return MediaFrame();
+    }
+    const AVFrame* src_frame = src.RawFrame();
     AVFrame* dst_frame = dst.RawFrame();
-    sws_scale(sws_ctx_, src_frame->data, src_frame->linesize, 0, height,
-             dst_frame->data, dst_frame->linesize);
-    return dst;
-}
-
-AVFramePtr EncoderNode::ConvertAudioFrame(const MediaFrame& src) {
-    AVFrame* src_frame = src.RawFrame();
-    if (!swr_ctx_) {
-        AVChannelLayout out_layout{};
-        av_channel_layout_copy(&out_layout, &codec_ctx_->ch_layout);
-        int ret = swr_alloc_set_opts2(
-            &swr_ctx_, &out_layout, codec_ctx_->sample_fmt, codec_ctx_->sample_rate,
-            &src_frame->ch_layout, static_cast<AVSampleFormat>(src_frame->format),
-            src_frame->sample_rate, 0, nullptr);
-        av_channel_layout_uninit(&out_layout);
-        if (ret < 0 || !swr_ctx_ || swr_init(swr_ctx_) < 0) {
-            SPDLOG_ERROR("EncoderNode: failed to init audio resampler");
-            return AVFramePtr();
-        }
-    }
-
-    AVFramePtr dst;
-    dst->format = codec_ctx_->sample_fmt;
-    dst->sample_rate = codec_ctx_->sample_rate;
-    av_channel_layout_copy(&dst->ch_layout, &codec_ctx_->ch_layout);
-    dst->nb_samples = src_frame->nb_samples;
-    if (av_frame_get_buffer(dst.get(), 0) < 0) {
-        SPDLOG_ERROR("EncoderNode: failed to allocate converted audio frame buffer");
-        return AVFramePtr();
-    }
-    swr_convert(swr_ctx_, dst->data, dst->nb_samples,
-               const_cast<const uint8_t**>(src_frame->data), src_frame->nb_samples);
+    sws_scale(sws_ctx_, src_frame->data, src_frame->linesize, 0, src.height(),
+              dst_frame->data, dst_frame->linesize);
     return dst;
 }
 
@@ -316,13 +379,6 @@ bool EncoderNode::EnsureAudioFifo() {
 }
 
 void EncoderNode::ProcessAudioFrame(MediaFrame& mf, int64_t pts_ticks) {
-    AVFramePtr converted = ConvertAudioFrame(mf);
-    if (!converted->data[0]) {
-        return;
-    }
-    if (!EnsureAudioFifo()) {
-        return;
-    }
     // The first buffered sample carries the timestamp of the frame it came
     // from; each full frame read out later advances by frame_size in time_base
     // units (audio time_base is 1/sample_rate, so PTS == sample index).
@@ -330,14 +386,28 @@ void EncoderNode::ProcessAudioFrame(MediaFrame& mf, int64_t pts_ticks) {
         audio_next_pts_ = pts_ticks;
         audio_pts_valid_ = true;
     }
-    int written = av_audio_fifo_write(
-        audio_fifo_, reinterpret_cast<void**>(converted->data),
-        converted->nb_samples);
-    if (written < converted->nb_samples) {
-        SPDLOG_WARN("EncoderNode: audio fifo write short ({}/{})", written,
-                    converted->nb_samples);
+    if (ResampleIntoFifo(mf.RawFrame())) {
+        SendCompleteAudioFrames();
     }
-    SendCompleteAudioFrames();
+}
+
+bool EncoderNode::ResampleIntoFifo(const AVFrame* in) {
+    if (!resampler_->Convert(in, resampled_.get())) {
+        return false;  // Logged by the resampler; the frame is skipped.
+    }
+    const int samples = resampled_->nb_samples;
+    if (samples == 0) {
+        return true;  // Still buffered inside the resampler.
+    }
+    if (!EnsureAudioFifo()) {
+        return false;
+    }
+    const int written = av_audio_fifo_write(
+        audio_fifo_, reinterpret_cast<void**>(resampled_->extended_data), samples);
+    if (written < samples) {
+        SPDLOG_WARN("{}: audio fifo write short ({}/{})", name_, written, samples);
+    }
+    return true;
 }
 
 void EncoderNode::SendCompleteAudioFrames() {
@@ -367,7 +437,9 @@ void EncoderNode::SendCompleteAudioFrames() {
         }
         frame->pts = audio_next_pts_;
         audio_next_pts_ += frame_size;
-        SendFrameAndDrain(frame.get());
+        if (!SendFrameAndDrain(frame.get())) {
+            return;
+        }
     }
 }
 
@@ -397,13 +469,20 @@ void EncoderNode::FlushAudioFifo() {
     SendCompleteAudioFrames();
 }
 
-void EncoderNode::SendFrameAndDrain(AVFrame* frame) {
+bool EncoderNode::SendFrameAndDrain(AVFrame* frame) {
     int ret = avcodec_send_frame(codec_ctx_, frame);
-    if (ret < 0 && ret != AVERROR(EAGAIN)) {
-        SPDLOG_WARN("EncoderNode: send_frame error {}", ret);
-        return;
+    if (ret == AVERROR(EAGAIN)) {
+        // The encoder takes no input until its pending packets are drained.
+        if (!DrainPackets()) {
+            return false;
+        }
+        ret = avcodec_send_frame(codec_ctx_, frame);
     }
-    DrainPackets();
+    if (ret < 0 && ret != AVERROR_EOF) {
+        Fail("avcodec_send_frame failed: " + AvErrorString(ret));
+        return false;
+    }
+    return DrainPackets();
 }
 
 void EncoderNode::ProcessFrame(MediaBuffer& buf) {
@@ -418,40 +497,66 @@ void EncoderNode::ProcessFrame(MediaBuffer& buf) {
         static_cast<int64_t>(buf.timestamp().pts / av_q2d(time_base_) + 0.5);
 
     if (media_type_ == MediaType::kVideo) {
-        bool needs_convert = mf.format() != static_cast<int>(codec_ctx_->pix_fmt);
-        if (!needs_convert) {
-            mf.RawFrame()->pts = pts_ticks;
-            SendFrameAndDrain(mf.RawFrame());
-            return;
-        }
-        MediaFrame converted = ConvertVideoFrame(mf);
-        if (!converted.IsValid()) return;
-        converted.RawFrame()->pts = pts_ticks;
-        SendFrameAndDrain(converted.RawFrame());
+        EncodeVideoFrame(mf, pts_ticks);
     } else if (media_type_ == MediaType::kAudio) {
         ProcessAudioFrame(mf, pts_ticks);
     }
 }
 
+void EncoderNode::EncodeVideoFrame(MediaFrame& mf, int64_t pts_ticks) {
+    // Splices and timestamp glitches can repeat or reorder pts; like the
+    // ffmpeg CLI's vfr frame sync, drop such frames instead of feeding the
+    // encoder timestamps that turn into invalid DTS at the muxer.
+    if (last_video_pts_ != AV_NOPTS_VALUE && pts_ticks <= last_video_pts_) {
+        if (dropped_video_frames_++ == 0) {
+            SPDLOG_WARN("{}: dropping frames whose pts does not increase (first at {})", name_,
+                        pts_ticks);
+        }
+        return;
+    }
+    last_video_pts_ = pts_ticks;
+    const bool needs_convert = mf.format() != static_cast<int>(codec_ctx_->pix_fmt) ||
+                               mf.width() != codec_ctx_->width ||
+                               mf.height() != codec_ctx_->height;
+    MediaFrame converted;
+    AVFrame* frame = mf.RawFrame();
+    if (needs_convert) {
+        converted = ConvertVideoFrame(mf);
+        if (!converted.IsValid()) {
+            return;
+        }
+        frame = converted.RawFrame();
+    }
+    frame->pts = pts_ticks;
+    // Decoded frames still carry the source's picture types; encoders such as
+    // libx264 would obey them and override gop_size/max_b_frames (ffmpeg's
+    // encoder stage resets them too).
+    frame->pict_type = AV_PICTURE_TYPE_NONE;
+    frame->flags &= ~AV_FRAME_FLAG_KEY;
+    SendFrameAndDrain(frame);
+}
+
 void EncoderNode::HandleEos() {
     if (media_type_ == MediaType::kAudio) {
+        ResampleIntoFifo(nullptr);  // Samples still held for rate conversion.
         FlushAudioFifo();
     }
-    avcodec_send_frame(codec_ctx_, nullptr);
-    DrainPackets();
+    if (failed_ || !SendFrameAndDrain(nullptr)) {
+        return;  // A failed or stopping encoder must not report completion.
+    }
     output_port_->Push(MediaBuffer::MakeEos(current_serial_));
 }
 
-void EncoderNode::DrainPackets() {
+bool EncoderNode::DrainPackets() {
     while (running_.load(std::memory_order_relaxed)) {
         AVPacketPtr pkt;
         int ret = avcodec_receive_packet(codec_ctx_, pkt.get());
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-            break;
+            return true;
         }
         if (ret < 0) {
-            SPDLOG_WARN("EncoderNode: receive_packet error {}", ret);
-            break;
+            Fail("avcodec_receive_packet failed: " + AvErrorString(ret));
+            return false;
         }
 
         Timestamp ts;
@@ -464,12 +569,25 @@ void EncoderNode::DrainPackets() {
         }
         MediaBuffer buf(std::move(pkt), ts, flags);
         buf.set_serial(current_serial_);
-        output_port_->Push(std::move(buf));
+        if (!output_port_->Push(std::move(buf))) {
+            return false;  // Link aborted: the graph is stopping.
+        }
+    }
+    return false;
+}
+
+void EncoderNode::Fail(const std::string& detail) {
+    SPDLOG_ERROR("{}: {}", name_, detail);
+    failed_ = true;
+    if (graph_) {
+        graph_->Bus().Post({GraphMessageType::kError, this, current_serial_, name_ + ": " + detail});
     }
 }
 
 void EncoderNode::EncodeLoop() {
-    while (running_.load(std::memory_order_relaxed)) {
+    // A fatal encoder error ends the loop; the facade stops the graph when it
+    // receives the posted kError.
+    while (running_.load(std::memory_order_relaxed) && !failed_) {
         auto opt_buf = input_port_->Pull();
         if (!opt_buf) {
             break;  // Link aborted

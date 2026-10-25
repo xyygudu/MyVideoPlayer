@@ -2,12 +2,12 @@
 #define MVP_GRAPH_MEDIA_GRAPH_H_
 
 #include <atomic>
-#include <functional>
 #include <memory>
 #include <vector>
 
 #include "clock.h"
 #include "graph/graph_command.h"
+#include "graph/message_bus.h"
 #include "graph/node.h"
 #include "graph/port.h"
 
@@ -19,22 +19,15 @@ class GpuDevice;
 
 namespace mvp::graph {
 
-/// Events reported by the graph to the application.
-enum class GraphEvent {
-    kEos,            // All sinks reached end-of-stream
-    kError,          // A node reported an error
-    kStateChanged,   // GraphState changed
-    kFormatChanged,  // A port's format changed during processing
-};
-
-/// Global state of the graph.
+/// Lifecycle state of the graph. End-of-stream is not a graph state: it is
+/// reported per sink on the message bus, and the facade decides what
+/// "finished" means for its pipeline.
 enum class GraphState {
-    kIdle,      // No nodes configured
-    kReady,     // All nodes Prepared, ready to Start
-    kPlaying,   // All Active nodes running
-    kPaused,    // Clock frozen, nodes waiting
-    kFinished,  // All sinks reported EOS
-    kError,     // A node is in error state
+    kIdle,     // No nodes configured
+    kReady,    // All nodes Prepared, ready to Start
+    kPlaying,  // All Active nodes running
+    kPaused,   // Clock frozen, nodes waiting
+    kError,    // A lifecycle step failed
 };
 
 /// The media processing graph: manages node topology and lifecycle.
@@ -46,10 +39,12 @@ enum class GraphState {
 ///   4. Stop() when done
 ///
 /// All lifecycle operations cascade to nodes in topological order.
+///
+/// Threading: lifecycle and control methods (Open … Stop, Flush, Seek,
+/// SetPaused, SendCommand) must not run concurrently; the owning facade
+/// serializes them. SeekEpoch() and Bus() are safe from any thread.
 class MediaGraph {
   public:
-    using EventCallback = std::function<void(GraphEvent)>;
-
     MediaGraph();
     ~MediaGraph();
 
@@ -77,7 +72,7 @@ class MediaGraph {
     /// Allocate resources on all nodes.
     bool Prepare();
 
-    /// Start all Active nodes' worker threads.
+    /// Start all Active nodes' worker threads. Only valid from kReady.
     bool Start();
 
     /// Stop all nodes, wait for threads to exit.
@@ -90,13 +85,16 @@ class MediaGraph {
     // --- Control (high-level operations, decoupled from topology) ---
 
     /// Seek to a position: flush all links, broadcast a seek command so each
-    /// node resets its own internal state, then reposition every clock.
+    /// node resets its own internal state, then reposition every clock in
+    /// the new epoch.
     void Seek(double position);
 
     /// Pause or resume playback (cascades to all nodes, then all clocks).
     void SetPaused(bool paused);
 
-    /// Dispatch a command to all nodes in topological order. Nodes that do
+    /// Dispatch a command to all nodes, sinks first (reverse topological
+    /// order, like GStreamer's upstream seek event): consumers are ready for
+    /// the new position before the source starts producing it. Nodes that do
     /// not handle the command type ignore it (default no-op).
     void SendCommand(const Command& cmd);
 
@@ -120,10 +118,9 @@ class MediaGraph {
     /// stale in-flight data and get dropped at the port boundary.
     int SeekEpoch() const { return seek_epoch_.load(std::memory_order_acquire); }
 
-    void SetEventCallback(EventCallback cb) { event_cb_ = std::move(cb); }
-
-    /// Report an event (called by nodes, thread-safe).
-    void ReportEvent(GraphEvent event);
+    /// Node → application messages (EOS, runtime errors). Nodes post from
+    /// their worker threads; the owning facade drains it on its own thread.
+    MessageBus& Bus() { return bus_; }
 
     // --- Query ---
 
@@ -147,7 +144,7 @@ class MediaGraph {
     std::vector<std::shared_ptr<IClock>> clocks_;  // Every offered clock
     std::shared_ptr<IClock> master_clock_;
     std::shared_ptr<gpu::GpuDevice> gpu_device_;   // Shared GPU device
-    EventCallback event_cb_;
+    MessageBus bus_;
 };
 
 }  // namespace mvp::graph

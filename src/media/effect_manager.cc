@@ -51,6 +51,16 @@ bool EffectManager::SetEnabled(const std::string& effect_id, bool enabled) {
     return true;
 }
 
+bool EffectManager::ResetParams(const std::string& effect_id) {
+    graph::IEffectNode* node = Find(effect_id);
+    if (!node) {
+        SPDLOG_WARN("EffectManager: ResetParams on unknown effect_id '{}'", effect_id);
+        return false;
+    }
+    node->ResetParams();
+    return true;
+}
+
 graph::IEffectNode* EffectManager::Find(const std::string& effect_id) const {
     auto it = std::find_if(effects_.begin(), effects_.end(),
                            [&](const auto& kv) { return kv.first == effect_id; });

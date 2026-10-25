@@ -4,14 +4,14 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/frame.h>
-#include <libswresample/swresample.h>
+#include <libavutil/samplefmt.h>
 }
 #include <SDL3/SDL.h>
 #include <spdlog/spdlog.h>
 
+#include "audio_resampler.h"
 #include "clock.h"
 #include "graph/graph_command.h"
 #include "graph/media_format.h"
@@ -62,6 +62,11 @@ bool AudioSinkNode::Prepare() {
         state_ = NodeState::kError;
         return false;
     }
+    // The SDL stream format is fixed here; every frame is converted to it.
+    AVChannelLayout layout{};
+    av_channel_layout_default(&layout, channels_);
+    resampler_ = std::make_unique<AudioResampler>(AV_SAMPLE_FMT_S16, sample_rate_, layout);
+    av_channel_layout_uninit(&layout);
 
     SPDLOG_INFO("AudioSinkNode: opened (rate={}, channels={})", sample_rate_,
                 channels_);
@@ -134,6 +139,8 @@ void AudioSinkNode::Stop() {
 }
 
 void AudioSinkNode::Flush() {
+    // The graph bumped the epoch first, so after this clear the audio thread
+    // rejects whatever pre-seek frame it still holds (see FeedFrame).
     FlushSdlBuffer();
 }
 
@@ -149,15 +156,15 @@ void AudioSinkNode::SetPaused(bool paused) {
 }
 
 void AudioSinkNode::FlushSdlBuffer() {
+    std::lock_guard lock(feed_mutex_);
     if (sdl_stream_) {
         SDL_ClearAudioStream(sdl_stream_);
     }
 }
 
-void AudioSinkNode::OnCommand(const Command& cmd) {
-    if (cmd.type == CommandType::kSeek) {
-        FlushSdlBuffer();
-    }
+void AudioSinkNode::OnCommand(const Command& /*cmd*/) {
+    // Seek: the SDL queue was already cleared by Flush(), which the graph
+    // always runs first; nothing else to reset here.
 }
 
 std::vector<InputPort*> AudioSinkNode::Inputs() {
@@ -188,65 +195,41 @@ double AudioSinkNode::QueuedSeconds() const {
     return SDL_GetAudioStreamQueued(sdl_stream_) / bytes_per_sec;
 }
 
-void AudioSinkNode::ConvertAndFeed(AVFrame* frame) {
-    int out_samples = frame->nb_samples;
-    int out_buffer_size = out_samples * channels_ * 2;  // S16 = 2 bytes/sample
-
-    if (frame->format == AV_SAMPLE_FMT_S16) {
-        SDL_PutAudioStreamData(sdl_stream_, frame->data[0], out_buffer_size);
-        return;
-    }
-
-    // Lazy-init resampler (owned by this audio thread)
-    if (!swr_ctx_) {
-        AVChannelLayout out_layout{}, in_layout{};
-        av_channel_layout_default(&out_layout, channels_);
-
-        // 检查输入布局有效性，无效则降级
-        if (av_channel_layout_check(&frame->ch_layout)) {
-            av_channel_layout_copy(&in_layout, &frame->ch_layout);
-        } else {
-            av_channel_layout_default(&in_layout, frame->ch_layout.nb_channels);
-        }
-
-        int ret = swr_alloc_set_opts2(&swr_ctx_,
-                                    &out_layout, AV_SAMPLE_FMT_S16, sample_rate_,
-                                    &in_layout,
-                                    static_cast<AVSampleFormat>(frame->format),
-                                    frame->sample_rate, 0, nullptr);
-        av_channel_layout_uninit(&in_layout);
-        av_channel_layout_uninit(&out_layout);
-
-        if (ret < 0 || !swr_ctx_) {
-            SPDLOG_ERROR("AudioSinkNode: ConvertAndFeed failed, swr_ctx_ is nullptr");
-            swr_ctx_ = nullptr; // 确保不会野指针
-            return;
-        }
-        
-        ret = swr_init(swr_ctx_);
-        if (ret < 0) {
-            SPDLOG_ERROR("AudioSinkNode: ConvertAndFeed failed, swr_init returned error");
-            swr_free(&swr_ctx_);
-            return;
-        }
-    }
-
-    uint8_t* out_buf = static_cast<uint8_t*>(av_malloc(out_buffer_size));
-    uint8_t* out_planes[] = {out_buf};
-    swr_convert(swr_ctx_, out_planes, out_samples,
-                const_cast<const uint8_t**>(frame->data), frame->nb_samples);
-    SDL_PutAudioStreamData(sdl_stream_, out_buf, out_buffer_size);
-    av_free(out_buf);
+bool AudioSinkNode::IsCurrentEpoch(int serial) const {
+    return !graph_ || serial == graph_->SeekEpoch();
 }
 
-void AudioSinkNode::DrainAndReportEos() {
-    // Wait until SDL finishes playing buffered audio, then report EOS.
-    while (running_.load(std::memory_order_relaxed) &&
+void AudioSinkNode::FeedFrame(const MediaBuffer& buf) {
+    if (!resampler_->Convert(buf.AsFrame().RawFrame(), converted_.get()) ||
+        converted_->nb_samples == 0) {
+        return;  // Failures are logged by the resampler; 0 = still buffering.
+    }
+    const int bytes = av_samples_get_buffer_size(nullptr, channels_, converted_->nb_samples,
+                                                 AV_SAMPLE_FMT_S16, 1);
+    if (bytes <= 0) {
+        return;
+    }
+    std::lock_guard lock(feed_mutex_);
+    if (!IsCurrentEpoch(buf.serial())) {
+        return;  // A seek happened while this frame was being converted.
+    }
+    // Measured before feeding: the queue then spans exactly [heard, pts),
+    // so the difference is the position the user is hearing right now.
+    clock_->Set(buf.timestamp().pts - QueuedSeconds(), buf.serial());
+    if (!SDL_PutAudioStreamData(sdl_stream_, converted_->data[0], bytes)) {
+        SPDLOG_WARN("AudioSinkNode: SDL_PutAudioStreamData failed: {}", SDL_GetError());
+    }
+}
+
+void AudioSinkNode::DrainAndReportEos(int serial) {
+    // Report only once SDL played everything out. A seek meanwhile clears the
+    // queue and makes this EOS stale, so it is dropped instead.
+    while (running_.load(std::memory_order_relaxed) && IsCurrentEpoch(serial) &&
            SDL_GetAudioStreamQueued(sdl_stream_) > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    if (graph_) {
-        graph_->ReportEvent(GraphEvent::kEos);
+    if (graph_ && running_.load(std::memory_order_relaxed) && IsCurrentEpoch(serial)) {
+        graph_->Bus().Post({GraphMessageType::kEos, this, serial, {}});
     }
 }
 
@@ -261,29 +244,15 @@ void AudioSinkNode::AudioLoop() {
         if (!opt_buf) {
             break;  // Link aborted
         }
-        MediaBuffer& buf = *opt_buf;
+        const MediaBuffer& buf = *opt_buf;
 
         if (HasFlag(buf.flags(), BufferFlags::kEos)) {
-            DrainAndReportEos();
+            DrainAndReportEos(buf.serial());
             continue;
         }
-        if (!buf.IsFrame()) {
-            continue;
+        if (buf.IsFrame() && buf.AsFrame().IsValid()) {
+            FeedFrame(buf);
         }
-        MediaFrame& mf = buf.AsFrame();
-        if (!mf.IsValid()) {
-            continue;
-        }
-
-        // Measured before feeding: the queue then spans exactly [heard, pts),
-        // so the difference is the position the user is hearing right now.
-        clock_->Set(buf.timestamp().pts - QueuedSeconds());
-        ConvertAndFeed(mf.RawFrame());
-    }
-
-    if (swr_ctx_) {
-        swr_free(&swr_ctx_);
-        swr_ctx_ = nullptr;
     }
 }
 

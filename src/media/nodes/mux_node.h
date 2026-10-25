@@ -23,7 +23,13 @@ namespace mvp::graph {
 /// Fan-in thread pulls from all input links and calls the FFmpeg muxer API
 /// single-threaded. Container inferred from output path extension; the
 /// negotiated global-header requirement is published onto input ports.
-/// On all-input EOS: av_write_trailer + GraphEvent::kEos.
+///
+/// Outcomes, all decided and finished on the mux thread:
+/// - All inputs at EOS: trailer + file close, then kEos on the graph bus
+///   (kError instead if finalizing failed), so "complete" means on disk.
+/// - Output IO error: stop writing, close the file, post kError.
+/// - Links aborted (cancel/stop): write what is pending plus a best-effort
+///   trailer so the partial file stays playable; nothing is posted.
 class MuxNode : public INode {
   public:
     explicit MuxNode(std::string output_path, bool has_video, bool has_audio);
@@ -67,9 +73,12 @@ class MuxNode : public INode {
         bool primary{false};  // video if present, else audio
     };
     using PendingSlots = std::vector<std::optional<MediaBuffer>>;
+    enum class MuxOutcome { kEos, kAborted, kFailed };
 
     void MuxLoop();
     void CloseOutput();
+    /// Closes the file and frees the muxer; returns the avio_closep result.
+    int CloseOutputFile();
 
     // Prepare helpers
     bool OpenOutput();
@@ -78,11 +87,15 @@ class MuxNode : public INode {
     // Container probe (av_guess_format, no allocation).
     void ResolveOutputRequirements();
     // MuxLoop helpers
-    void FillPendingSlots(PendingSlots& pending);
+    MuxOutcome RunInterleave(PendingSlots& pending);
+    /// False once an input link was aborted (the graph is stopping).
+    bool FillPendingSlots(PendingSlots& pending);
     int PickNextSlot(const PendingSlots& pending) const;
-    void WriteSlotPacket(StreamSlot& slot, MediaBuffer& buf);
+    /// False when the output became unwritable; a packet the muxer merely
+    /// rejects (e.g. bad timestamps) is logged and dropped.
+    bool WriteSlotPacket(StreamSlot& slot, MediaBuffer& buf);
     void DrainPending(PendingSlots& pending);
-    void FinalizeOutput();
+    void FinishOutput(MuxOutcome outcome, PendingSlots& pending);
     bool AllSlotsAtEos() const;
 
     NodeState state_{NodeState::kIdle};
@@ -92,6 +105,7 @@ class MuxNode : public INode {
     AVFormatContext* format_ctx_{nullptr};
     std::vector<StreamSlot> slots_;
     bool header_written_{false};
+    std::string write_error_;  // Mux thread only: why the output failed
 
     MediaGraph* graph_{nullptr};
     std::function<void(double)> progress_hook_;

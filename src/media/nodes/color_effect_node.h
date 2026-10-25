@@ -1,8 +1,8 @@
 #ifndef MVP_NODES_COLOR_EFFECT_NODE_H_
 #define MVP_NODES_COLOR_EFFECT_NODE_H_
 
-#include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -35,7 +35,9 @@ class MediaGraph;
 /// decoded pixel format once frames actually arrive.
 class ColorEffectNode : public IEffectNode {
   public:
-    ColorEffectNode();
+    /// `allow_gpu` false keeps hardware frames off the GPU pass: they are
+    /// downloaded and processed on the CPU (debug switch).
+    explicit ColorEffectNode(bool allow_gpu = true);
     ~ColorEffectNode() override;
 
     // --- INode interface ---
@@ -58,12 +60,23 @@ class ColorEffectNode : public IEffectNode {
     // --- IEffectNode interface ---
     std::vector<EffectParam> Params() const override;
     void SetParam(const std::string& id, EffectParamValue value) override;
-    bool IsEnabled() const override { return enabled_.load(); }
-    void SetEnabled(bool enabled) override { enabled_.store(enabled); }
+    void ResetParams() override;
+    bool IsEnabled() const override;
+    void SetEnabled(bool enabled) override;
 
     void Attach(MediaGraph* graph) override { graph_ = graph; }
 
   private:
+    /// User-facing settings, written by the UI thread and read once per
+    /// frame by the processing thread as one consistent snapshot.
+    struct Settings {
+        float brightness{0.0f};
+        float contrast{1.0f};
+        float saturation{1.0f};
+        bool enabled{true};
+    };
+
+    Settings LoadSettings() const;
     /// Hardware frames through the GPU pass; false = not handled (no pass or it failed).
     bool TryProcessOnGpu(MediaBuffer& input, OutputCallback& emit, float brightness,
                          float contrast, float saturation);
@@ -72,17 +85,15 @@ class ColorEffectNode : public IEffectNode {
                       float contrast, float saturation);
 
     NodeState state_{NodeState::kIdle};
+    const bool allow_gpu_;
 
     std::unique_ptr<InputPort> input_port_;
     std::unique_ptr<OutputPort> output_port_;
 
-    // Parameters. Stored as std::atomic<EffectParamValue> (not floats
-    // encoding bools) so the UI-thread/processing-thread boundary always
-    // deals with the actual declared type — see design.md Decision 1.
-    std::atomic<EffectParamValue> brightness_{0.0f};
-    std::atomic<EffectParamValue> contrast_{1.0f};
-    std::atomic<EffectParamValue> saturation_{1.0f};
-    std::atomic<bool> enabled_{true};
+    // A few values copied once per frame: a plain mutex never yields a torn
+    // mix of old and new parameters, unlike independent per-field atomics.
+    mutable std::mutex params_mutex_;
+    Settings settings_;  // Guarded by params_mutex_.
 
     // Logs the "unsupported pixel format" warning at most once, to avoid
     // flooding spdlog every frame for an unsupported source.

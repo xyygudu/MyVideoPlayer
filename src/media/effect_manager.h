@@ -50,6 +50,10 @@ class EffectManager {
     /// (and logs a warning) if effect_id is unknown.
     bool SetEnabled(const std::string& effect_id, bool enabled);
 
+    /// Restores the named effect's parameters to their defaults. Returns
+    /// false (and logs a warning) if effect_id is unknown.
+    bool ResetParams(const std::string& effect_id);
+
   private:
     struct Entry {
         std::string display_name;

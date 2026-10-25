@@ -1,7 +1,6 @@
 #ifndef MVP_GRAPH_LINK_H_
 #define MVP_GRAPH_LINK_H_
 
-#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -97,11 +96,9 @@ class Link {
     /// Returns false only if aborted.
     bool Push(MediaBuffer buf) {
         std::unique_lock lock(mutex_);
-        cond_push_.wait(lock, [this] {
-            return abort_.load(std::memory_order_relaxed) || !IsFull();
-        });
+        cond_push_.wait(lock, [this] { return abort_ || !IsFull(); });
 
-        if (abort_.load(std::memory_order_relaxed)) {
+        if (abort_) {
             return false;
         }
 
@@ -117,11 +114,9 @@ class Link {
     /// Returns nullopt if aborted.
     std::optional<MediaBuffer> Pop() {
         std::unique_lock lock(mutex_);
-        cond_pop_.wait(lock, [this] {
-            return abort_.load(std::memory_order_relaxed) || !queue_.empty();
-        });
+        cond_pop_.wait(lock, [this] { return abort_ || !queue_.empty(); });
 
-        if (abort_.load(std::memory_order_relaxed) && queue_.empty()) {
+        if (abort_ && queue_.empty()) {
             return std::nullopt;
         }
 
@@ -149,7 +144,12 @@ class Link {
     /// Signal all waiting threads to wake up and exit.
     /// Does NOT clear data.
     void Abort() {
-        abort_.store(true, std::memory_order_release);
+        {
+            // Under the mutex: a waiter between its predicate check and its
+            // block would otherwise miss this notification and hang forever.
+            std::lock_guard lock(mutex_);
+            abort_ = true;
+        }
         cond_push_.notify_all();
         cond_pop_.notify_all();
     }
@@ -160,7 +160,7 @@ class Link {
         queue_.clear();
         total_bytes_ = 0;
         count_ = 0;
-        abort_.store(false, std::memory_order_release);
+        abort_ = false;
     }
 
     int Size() const {
@@ -178,7 +178,7 @@ class Link {
     LinkCapacity capacity_;
     int64_t total_bytes_;
     int count_;
-    std::atomic<bool> abort_;
+    bool abort_;  // Guarded by mutex_.
 
     mutable std::mutex mutex_;
     std::condition_variable cond_push_;

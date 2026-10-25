@@ -2,15 +2,25 @@
 #define MVP_FFMPEG_UTILS_H_
 
 #include <memory>
+#include <string>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/buffer.h>
+#include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
 }
 
 namespace mvp {
+
+// Human-readable text for an FFmpeg error code. av_err2str() relies on a C99
+// compound literal and does not compile as C++.
+inline std::string AvErrorString(int errnum) {
+    char buf[AV_ERROR_MAX_STRING_SIZE] = {};
+    av_strerror(errnum, buf, sizeof(buf));
+    return buf;
+}
 
 // Owns one AVBufferRef reference (e.g. a hardware device or frames context).
 struct AVBufferRefDeleter {
@@ -137,6 +147,54 @@ inline ChromaPlaneLayout ComputeChromaPlaneLayout(int av_pix_fmt, int luma_width
             return {true, half_w, half_h, half_w * 2};
         default:
             return {false, 0, 0, 0};
+    }
+}
+
+// Full-range YUV ("JPEG") pixel formats, which imply AVCOL_RANGE_JPEG.
+inline bool IsFullRangeYuvFormat(int av_pix_fmt) {
+    switch (av_pix_fmt) {
+        case AV_PIX_FMT_YUVJ420P:
+        case AV_PIX_FMT_YUVJ422P:
+        case AV_PIX_FMT_YUVJ444P:
+        case AV_PIX_FMT_YUVJ440P:
+        case AV_PIX_FMT_YUVJ411P:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// The plain YUV twin of a yuvj format (others are returned unchanged).
+// libswscale wants this plus an explicit range: a yuvj source makes
+// sws_getCachedContext rebuild its context on every call.
+inline AVPixelFormat WithoutJpegRange(int av_pix_fmt) {
+    switch (av_pix_fmt) {
+        case AV_PIX_FMT_YUVJ420P: return AV_PIX_FMT_YUV420P;
+        case AV_PIX_FMT_YUVJ422P: return AV_PIX_FMT_YUV422P;
+        case AV_PIX_FMT_YUVJ444P: return AV_PIX_FMT_YUV444P;
+        case AV_PIX_FMT_YUVJ440P: return AV_PIX_FMT_YUV440P;
+        case AV_PIX_FMT_YUVJ411P: return AV_PIX_FMT_YUV411P;
+        default: return static_cast<AVPixelFormat>(av_pix_fmt);
+    }
+}
+
+// Untagged video is interpreted the way mpv guesses it: HD sizes are BT.709,
+// SD sizes BT.601, and only yuvj formats are full range.
+inline bool IsHdFrameSize(const AVFrame* f) { return f->width >= 1280 || f->height > 576; }
+
+inline bool IsFullRangeFrame(const AVFrame* f) {
+    return f->color_range == AVCOL_RANGE_JPEG ||
+           (f->color_range == AVCOL_RANGE_UNSPECIFIED && IsFullRangeYuvFormat(f->format));
+}
+
+inline AVColorSpace ResolvedColorspace(const AVFrame* f) {
+    switch (f->colorspace) {
+        case AVCOL_SPC_RGB:
+        case AVCOL_SPC_UNSPECIFIED:
+        case AVCOL_SPC_RESERVED:
+            return IsHdFrameSize(f) ? AVCOL_SPC_BT709 : AVCOL_SPC_SMPTE170M;
+        default:
+            return f->colorspace;
     }
 }
 

@@ -8,9 +8,10 @@ cbuffer AffineRemap : register(b1) {
 };
 
 // Backward mapping in the plane's own pixel space, as on the CPU path
-// (pixel_ops::ComputeAffineMapping): pixel centers sit on integer coordinates.
+// (pixel_ops::ComputeAffineMapping): pixel centers sit on integer coordinates,
+// so the plane's centre is (size - 1) / 2 and a mirror maps x to size - 1 - x.
 float2 SourcePixel(float2 destination) {
-    float2 center = plane_size * 0.5;
+    float2 center = (plane_size - 1.0) * 0.5;
     float2 offset = destination - center - translate * plane_size;
     return float2(dot(inverse.xy, offset), dot(inverse.zw, offset)) + center;
 }

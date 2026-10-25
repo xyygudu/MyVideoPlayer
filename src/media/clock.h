@@ -14,11 +14,16 @@ namespace mvp {
 class IClock {
   public:
     virtual ~IClock() = default;
-    virtual void Set(double pts) = 0;
+    /// `serial` is the seek epoch of the data the pts comes from; updates
+    /// older than the epoch of the last Reset are ignored (ffplay's
+    /// Clock::serial), so a frame in flight across a seek cannot drag the
+    /// clock back to the old position.
+    virtual void Set(double pts, int serial) = 0;
     virtual double Get() const = 0;
     virtual void SetPaused(bool paused) = 0;
     virtual void SetSpeed(double speed) = 0;
-    virtual void Reset(double pts) = 0;
+    /// Reposition the clock and enter seek epoch `serial`.
+    virtual void Reset(double pts, int serial) = 0;
 };
 
 /// A wall-time-aware clock that linearly extrapolates between Set() calls.
@@ -41,8 +46,9 @@ class Clock : public IClock {
     Clock();
 
     /// Set the clock to a specific PTS value. Records current system time
-    /// so that Get() can extrapolate forward from this point.
-    void Set(double pts) override;
+    /// so that Get() can extrapolate forward from this point. Ignored when
+    /// `serial` predates the current epoch.
+    void Set(double pts, int serial) override;
 
     /// Get the current clock value. If not paused, returns:
     ///   pts + (now - last_updated) * speed
@@ -58,8 +64,8 @@ class Clock : public IClock {
     /// Set playback speed multiplier (default 1.0).
     void SetSpeed(double speed) override;
 
-    /// Reset clock to a given PTS (default 0).
-    void Reset(double pts = 0.0) override;
+    /// Reset clock to a given PTS and enter epoch `serial`.
+    void Reset(double pts, int serial) override;
 
     /// Returns the current system time in seconds (steady_clock based).
     static double Now();
@@ -73,6 +79,9 @@ class Clock : public IClock {
 
     // Serializes writers; readers never touch it.
     std::mutex write_mutex_;
+
+    // Current seek epoch. Writers only (under write_mutex_); Get() ignores it.
+    int serial_{0};
 
     // Sequence counter for SeqLock. Even = idle, odd = write in progress.
     mutable std::atomic<uint32_t> seq_{0};

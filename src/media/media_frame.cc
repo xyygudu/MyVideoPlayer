@@ -45,6 +45,8 @@ MediaFrame TransferToSoftware(const MediaFrame& hw_frame) {
     if (!hw || !hw->hw_frames_ctx) return MediaFrame();
     AVFramePtr sw;
     if (av_hwframe_transfer_data(sw.get(), hw, 0) < 0) return MediaFrame();
+    // The transfer copies pixels only; keep colorimetry etc. for presentation.
+    av_frame_copy_props(sw.get(), hw);
     return MediaFrame(sw.get());
 }
 

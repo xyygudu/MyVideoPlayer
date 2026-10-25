@@ -25,6 +25,9 @@ class PlayerPage : public QWidget {
     explicit PlayerPage(QWidget* parent = nullptr);
     ~PlayerPage() override;
 
+    /// The page's player; lives as long as the page.
+    mvp::MediaPlayer* player() const { return player_.get(); }
+
   protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
 
@@ -38,6 +41,8 @@ class PlayerPage : public QWidget {
     void SetupUi();
     QWidget* BuildControlBar();
     QString FormatTime(double seconds) const;
+    /// Updates controls when the player changed state on its own (EOS, error).
+    void OnStateChanged(mvp::PlaybackState state);
 
     VideoWidget* video_widget_{nullptr};
     EffectPanel* effect_panel_{nullptr};
@@ -49,6 +54,7 @@ class PlayerPage : public QWidget {
 
     std::unique_ptr<mvp::MediaPlayer> player_;
     bool slider_pressed_{false};
+    mvp::PlaybackState last_state_{mvp::PlaybackState::kIdle};
 };
 
 #endif  // MVP_APP_PLAYER_PAGE_H_

@@ -10,6 +10,13 @@
 
 namespace mvp {
 
+/// How a transcode run ended.
+enum class TranscodeResult {
+    kSucceeded,  // Output fully written, finalized and closed
+    kCancelled,  // Cancel() was called; the partial output is finalized
+    kFailed,     // Setup failed or a runtime error occurred (see the log)
+};
+
 /// Offline transcode facade built on the graph architecture.
 ///
 /// Independent of MediaPlayer — owns its own MediaGraph instance and runs
@@ -22,16 +29,20 @@ namespace mvp {
 /// AVFilter/effect chain, no trim, no stream passthrough, no two-pass
 /// encoding, software encode only.
 ///
+/// Threading: call the setters, Start(), Cancel() and the destructor from
+/// one owner thread; set the callbacks before Start().
+///
 /// Usage:
 ///   Transcoder t;
 ///   t.SetInput("in.mp4");
 ///   t.SetOutput("out.mp4", options);
 ///   t.SetProgressCallback([](double pct) { ... });
-///   t.SetCompletionCallback([](bool ok) { ... });
+///   t.SetCompletionCallback([](TranscodeResult result) { ... });
 ///   t.Start();
 class MVP_CORE_EXPORT Transcoder {
   public:
     Transcoder();
+    /// Stops a running transcode without invoking the completion callback.
     ~Transcoder();
 
     Transcoder(const Transcoder&) = delete;
@@ -41,19 +52,24 @@ class MVP_CORE_EXPORT Transcoder {
     void SetOutput(const std::string& path, const TranscodeOptions& options);
 
     /// Builds the graph and starts full-speed processing. Returns false if
-    /// the graph fails to build/negotiate/prepare (see logs for details);
-    /// the completion callback is also invoked with false in that case.
+    /// a run is already active (nothing reported) or if the graph fails to
+    /// build/negotiate/prepare/start (see logs); in the latter case the
+    /// completion callback is invoked with kFailed before Start() returns.
     bool Start();
 
-    /// Stops the graph early and reports completion with ok=false.
+    /// Stops the active run early and reports kCancelled on the calling
+    /// thread. No-op when no run is active.
     void Cancel();
 
     using ProgressCallback = std::function<void(double percent)>;
-    using CompletionCallback = std::function<void(bool ok)>;
+    using CompletionCallback = std::function<void(TranscodeResult result)>;
 
-    /// Invoked periodically (main-stream packets muxed) with 0..100.
+    /// Invoked with 0..100 after each muxed packet of the main stream, on the
+    /// internal muxer thread: keep it short and never block in it.
     void SetProgressCallback(ProgressCallback cb);
-    /// Invoked exactly once when the transcode finishes or fails.
+    /// Invoked exactly once per started run. When the run ends by itself it
+    /// runs on an internal event thread; it may then destroy the Transcoder
+    /// or Start() a new run, but must not block waiting for the owner thread.
     void SetCompletionCallback(CompletionCallback cb);
 
   private:

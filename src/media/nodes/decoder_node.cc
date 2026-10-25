@@ -49,7 +49,7 @@ bool InitHwFramesContext(AVCodecContext* ctx, gpu::GpuDevice* device,
 
 }  // namespace
 
-DecoderNode::DecoderNode() {
+DecoderNode::DecoderNode(bool allow_hardware) : allow_hardware_(allow_hardware) {
     input_port_ = std::make_unique<InputPort>(this);
     output_port_ = std::make_unique<OutputPort>(this);
 }
@@ -107,7 +107,7 @@ PixelFormat DecoderNode::PickOutputPixelFormat(const AVCodec* codec) const {
         return PixelFormat::kYUV420P;
     }
     gpu::GpuDevice* device = graph_ ? graph_->GpuDevice() : nullptr;
-    if (!device || !codec || !device->SupportsDecoder(codec)) {
+    if (!allow_hardware_ || !device || !codec || !device->SupportsDecoder(codec)) {
         return PixelFormat::kYUV420P;
     }
     const FormatCaps& peer = output_port_->Peer()->Caps();
@@ -157,7 +157,9 @@ bool DecoderNode::FindAndOpenCodec(const AVCodecParameters* codecpar) {
     bool want_hw = gpu_device_ && media_type_ == MediaType::kVideo &&
                    out.IsVideo() &&
                    out.AsVideo().pixel_format == gpu_device_->Domain();
-    if (want_hw && TryOpenCodec(codec, codecpar, /*use_hw=*/true)) {
+    codec_name_ = codec->name;
+    hardware_active_ = want_hw && TryOpenCodec(codec, codecpar, /*use_hw=*/true);
+    if (hardware_active_) {
         SPDLOG_INFO("DecoderNode: hardware decode enabled ({})", codec->name);
         return true;
     }
@@ -166,6 +168,7 @@ bool DecoderNode::FindAndOpenCodec(const AVCodecParameters* codecpar) {
                     "retrying software",
                     codec->name);
     }
+    SPDLOG_INFO("{}: software decode ({})", name_, codec->name);
     return TryOpenCodec(codec, codecpar, /*use_hw=*/false);
 }
 
@@ -246,17 +249,17 @@ void DecoderNode::Stop() {
 void DecoderNode::Flush() {
     // Do NOT call avcodec_flush_buffers here — codec_ctx_ is owned by the
     // decode thread. Cross-thread access causes use-after-free crashes.
-    // Instead, the decode thread detects serial change via Link serial stamp
-    // and flushes the codec on its own thread (see DecodeLoop).
-    //
-    // drop_until_pts_ is preserved — it was set by SetDropUntilPts() before
-    // this Flush() call (that's the correct ordering in MediaPlayer::Seek).
+    // Instead, the decode thread notices the new seek epoch on the next
+    // packet it pulls and flushes the codec on its own thread
+    // (MaybeFlushOnSerialChange). The drop target arrives afterwards through
+    // OnCommand(kSeek).
 }
 
 void DecoderNode::SetDropUntilPts(double pts) {
-    // codec_ctx_ is decode-thread-owned; skip_frame is set there instead,
-    // in MaybeFlushOnSerialChange.
-    drop_until_pts_.store(pts, std::memory_order_release);
+    // codec_ctx_ is decode-thread-owned; the decode thread applies the target
+    // (and skip_frame) itself in MaybeFlushOnSerialChange.
+    std::lock_guard lock(drop_target_mutex_);
+    drop_target_ = {graph_ ? graph_->SeekEpoch() : 0, pts};
 }
 
 void DecoderNode::OnCommand(const Command& cmd) {
@@ -291,7 +294,7 @@ void DecoderNode::DrainFrames() {
             break;
         }
         if (ret < 0) {
-            SPDLOG_WARN("{}: receive_frame error {}", name_, ret);
+            SPDLOG_WARN("{}: receive_frame failed: {}", name_, AvErrorString(ret));
             break;
         }
 
@@ -313,15 +316,14 @@ void DecoderNode::DrainFrames() {
 }
 
 bool DecoderNode::DropForSeek(double frame_pts) {
-    const double target = drop_until_pts_.load(std::memory_order_acquire);
-    if (target <= 0.0) {
+    if (seek_target_ == kNoDropTarget) {
         return false;
     }
-    if (frame_pts < target) {
+    if (frame_pts < seek_target_) {
         return true;
     }
     codec_ctx_->skip_frame = AVDISCARD_DEFAULT;
-    drop_until_pts_.store(0.0, std::memory_order_release);
+    seek_target_ = kNoDropTarget;
     SPDLOG_DEBUG("{}: drop cleared at pts={:.3f}", name_, frame_pts);
     return false;
 }
@@ -370,18 +372,37 @@ void DecoderNode::MaybeFlushOnSerialChange(int serial) {
     }
     avcodec_flush_buffers(codec_ctx_);
     last_serial_ = serial;
+    seek_target_ = DropTargetFor(serial);
     // AVDISCARD_NONREF accelerates software catch-up by skipping non-ref
     // frames. Hardware decode keeps AVDISCARD_DEFAULT: NONREF is not yet
     // validated with D3D11VA (see docs/improvements/seek-performance.md).
-    if (codec_ctx_->hw_device_ctx == nullptr &&
-        drop_until_pts_.load(std::memory_order_acquire) > 0.0) {
-        codec_ctx_->skip_frame = AVDISCARD_NONREF;
+    // Assigned on every epoch: a catch-up that never reached its target
+    // (seek past the last frame) must not keep discarding frames afterwards.
+    const bool catch_up = seek_target_ != kNoDropTarget && codec_ctx_->hw_device_ctx == nullptr;
+    codec_ctx_->skip_frame = catch_up ? AVDISCARD_NONREF : AVDISCARD_DEFAULT;
+}
+
+double DecoderNode::DropTargetFor(int serial) {
+    std::lock_guard lock(drop_target_mutex_);
+    return drop_target_.epoch == serial ? drop_target_.pts : kNoDropTarget;
+}
+
+int DecoderNode::SendPacket(const AVPacket* pkt) {
+    int ret = avcodec_send_packet(codec_ctx_, pkt);
+    if (ret == AVERROR(EAGAIN)) {
+        // The decoder takes no input until its pending output is drained.
+        DrainFrames();
+        ret = avcodec_send_packet(codec_ctx_, pkt);
     }
+    return ret;
 }
 
 void DecoderNode::HandleEos() {
     // Drain remaining frames, then propagate EOS downstream.
-    avcodec_send_packet(codec_ctx_, nullptr);
+    const int ret = SendPacket(nullptr);
+    if (ret < 0 && ret != AVERROR_EOF) {
+        SPDLOG_WARN("{}: entering drain mode failed: {}", name_, AvErrorString(ret));
+    }
     DrainFrames();
     output_port_->Push(MediaBuffer::MakeEos(current_serial_));
 }
@@ -393,10 +414,10 @@ void DecoderNode::ProcessPacket(MediaBuffer& buf) {
     AVPacketPtr& pkt = buf.AsPacket();
     // A null/empty packet is a drain request.
     AVPacket* to_send = (pkt.get() && pkt->data) ? pkt.get() : nullptr;
-    int ret = avcodec_send_packet(codec_ctx_, to_send);
-    if (to_send && ret < 0 && ret != AVERROR(EAGAIN)) {
-        SPDLOG_WARN("{}: send_packet error {}", name_, ret);
-        return;
+    const int ret = SendPacket(to_send);
+    if (to_send && ret < 0) {
+        // Corrupt input: skip the packet and keep decoding (ffplay/mpv do too).
+        SPDLOG_WARN("{}: send_packet failed, packet dropped: {}", name_, AvErrorString(ret));
     }
     DrainFrames();
 }

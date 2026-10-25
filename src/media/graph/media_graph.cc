@@ -199,7 +199,9 @@ bool MediaGraph::Prepare() {
 }
 
 bool MediaGraph::Start() {
-    if (state_ != GraphState::kReady && state_ != GraphState::kPaused) {
+    // Only from kReady: starting a paused graph again would spawn a second
+    // set of worker threads on the same nodes.
+    if (state_ != GraphState::kReady) {
         SPDLOG_WARN("MediaGraph::Start: invalid state transition from {}",
                     static_cast<int>(state_));
         return false;
@@ -217,9 +219,6 @@ bool MediaGraph::Start() {
     }
 
     state_ = GraphState::kPlaying;
-    if (event_cb_) {
-        event_cb_(GraphEvent::kStateChanged);
-    }
     return true;
 }
 
@@ -241,9 +240,6 @@ void MediaGraph::Stop() {
     }
 
     state_ = GraphState::kIdle;
-    if (event_cb_) {
-        event_cb_(GraphEvent::kStateChanged);
-    }
 }
 
 void MediaGraph::Flush() {
@@ -266,19 +262,23 @@ void MediaGraph::Flush() {
 }
 
 void MediaGraph::SendCommand(const Command& cmd) {
-    // Dispatch in topological order; nodes filter by command type.
+    // Sinks first: e.g. decoders must hold the seek's drop target before the
+    // demuxer, woken last, produces the first packet of the new epoch.
     const auto& order = topo_order_.empty() ? node_ptrs_ : topo_order_;
-    for (auto* node : order) {
-        node->OnCommand(cmd);
+    for (auto it = order.rbegin(); it != order.rend(); ++it) {
+        (*it)->OnCommand(cmd);
     }
 }
 
 void MediaGraph::Seek(double position) {
     Flush();
-    SendCommand({CommandType::kSeek, position});
+    // Clocks enter the new epoch before any node can produce in it, so only
+    // stale (older-epoch) updates are ever rejected.
+    const int epoch = SeekEpoch();
     for (auto& clock : clocks_) {
-        clock->Reset(position);
+        clock->Reset(position, epoch);
     }
+    SendCommand({CommandType::kSeek, position});
 }
 
 void MediaGraph::SetPaused(bool paused) {
@@ -288,17 +288,8 @@ void MediaGraph::SetPaused(bool paused) {
     for (auto& clock : clocks_) {
         clock->SetPaused(paused);
     }
-}
-
-void MediaGraph::ReportEvent(GraphEvent event) {
-    if (event == GraphEvent::kEos) {
-        state_ = GraphState::kFinished;
-    } else if (event == GraphEvent::kError) {
-        state_ = GraphState::kError;
-    }
-
-    if (event_cb_) {
-        event_cb_(event);
+    if (state_ == GraphState::kPlaying || state_ == GraphState::kPaused) {
+        state_ = paused ? GraphState::kPaused : GraphState::kPlaying;
     }
 }
 

@@ -56,7 +56,7 @@ class TranscoderPage : public QWidget {
     void RefreshEncoderOptions();
     void SetRunningState(bool running);
     void HandleProgress(double percent);
-    void HandleCompletion(bool ok);
+    void HandleCompletion(mvp::TranscodeResult result);
 
     QLineEdit* source_path_edit_{nullptr};
     QLineEdit* output_path_edit_{nullptr};

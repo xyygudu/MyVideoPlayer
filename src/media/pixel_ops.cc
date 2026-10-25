@@ -64,8 +64,13 @@ int QuantizeRotation(float deg) {
     return 270;
 }
 
-void PermuteCopy(const uint8_t* src, int src_ls, uint8_t* dst, int dst_ls,
-                 int w, int h, int comp_stride, int rot, bool flip_h, bool flip_v) {
+// Only exact quarter turns are pure permutations; any other angle resamples.
+bool IsQuarterTurn(float deg) {
+    return std::abs(deg - std::round(deg / 90.0f) * 90.0f) < 1e-3f;
+}
+
+void PermuteCopy(const uint8_t* src, int src_ls, uint8_t* dst, int dst_ls, int w, int h,
+                 int comp_stride, int comp_offset, int rot, bool flip_h, bool flip_v) {
     for (int y = 0; y < h; ++y) {
         uint8_t* d = dst + y * dst_ls;
         for (int x = 0; x < w; ++x) {
@@ -77,7 +82,7 @@ void PermuteCopy(const uint8_t* src, int src_ls, uint8_t* dst, int dst_ls,
             }
             if (flip_h) sx = w - 1 - sx;
             if (flip_v) sy = h - 1 - sy;
-            d[x * comp_stride] = src[sy * src_ls + sx * comp_stride];
+            d[x * comp_stride + comp_offset] = src[sy * src_ls + sx * comp_stride + comp_offset];
         }
     }
 }
@@ -108,8 +113,10 @@ void ApplyLut(uint8_t* plane, int linesize, int width, int height, const uint8_t
 
 AffineMapping ComputeAffineMapping(const graph::TransformAffineParams& p, int plane_w, int plane_h) {
     AffineMapping m;
-    m.cx = plane_w * 0.5f;
-    m.cy = plane_h * 0.5f;
+    // Pixel centres sit on integer coordinates: the centre of n pixels is
+    // (n - 1) / 2, so a mirror maps x to n - 1 - x exactly.
+    m.cx = (plane_w - 1) * 0.5f;
+    m.cy = (plane_h - 1) * 0.5f;
     m.tx = p.translate_x * plane_w;
     m.ty = p.translate_y * plane_h;
 
@@ -169,19 +176,19 @@ bool TryPermutePlane(const uint8_t* src, int src_linesize, uint8_t* dst, int dst
                      const graph::TransformAffineParams& p) {
     if (p.scale_x != 1.0f || p.scale_y != 1.0f) return false;
     if (p.translate_x != 0.0f || p.translate_y != 0.0f) return false;
-    int rot = QuantizeRotation(p.rotate_rad * 180.0f / kPi);
+    const float deg = p.rotate_rad * 180.0f / kPi;
+    if (!IsQuarterTurn(deg)) return false;
+    int rot = QuantizeRotation(deg);
 
-    if (rot == 0 && !p.flip_h && !p.flip_v && comp_offset == 0) {
-        int row_bytes = width * comp_stride;
+    if (rot == 0 && !p.flip_h && !p.flip_v && comp_stride == 1) {
         for (int y = 0; y < height; ++y)
-            std::memcpy(dst + y * dst_linesize, src + y * src_linesize, row_bytes);
+            std::memcpy(dst + y * dst_linesize, src + y * src_linesize, width);
         return true;
     }
 
-    if (comp_offset != 0) return false;
     if ((rot == 90 || rot == 270) && width != height) return false;  // 90°/270° requires square plane
 
-    PermuteCopy(src, src_linesize, dst, dst_linesize, width, height, comp_stride,
+    PermuteCopy(src, src_linesize, dst, dst_linesize, width, height, comp_stride, comp_offset,
                 rot, p.flip_h, p.flip_v);
     return true;
 }

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdarg>
 #include <memory>
+#include <mutex>
 #include <string>
 
 extern "C" {
@@ -50,10 +51,34 @@ void FfmpegLogCallback(void* avcl, int level, const char* fmt, va_list vl) {
     pending.clear();
 }
 
+spdlog::level::level_enum ToSpdlogLevel(Level level) {
+    switch (level) {
+        case Level::kTrace: return spdlog::level::trace;
+        case Level::kDebug: return spdlog::level::debug;
+        case Level::kInfo: return spdlog::level::info;
+        case Level::kWarn: return spdlog::level::warn;
+        default: return spdlog::level::err;
+    }
+}
+
+int ToFfmpegLevel(Level level) {
+    switch (level) {
+        case Level::kTrace: return AV_LOG_DEBUG;
+        case Level::kDebug: return AV_LOG_VERBOSE;
+        case Level::kInfo: return AV_LOG_INFO;
+        case Level::kWarn: return AV_LOG_WARNING;
+        default: return AV_LOG_ERROR;
+    }
+}
+
 }  // namespace
 
 static std::atomic<bool> g_initialized{false};
 static std::shared_ptr<spdlog::sinks::sink> g_console_sink;
+// Settings-page state; the sinks themselves are spdlog's (thread-safe).
+static std::mutex g_state_mutex;
+static std::string g_file_path;       // Guarded by g_state_mutex.
+static bool g_console_enabled = true;  // Guarded by g_state_mutex.
 
 void Init() {
     if (g_initialized.exchange(true)) {
@@ -75,6 +100,36 @@ void SetConsoleLoggingEnabled(bool enabled) {
     if (g_console_sink) {
         g_console_sink->set_level(enabled ? spdlog::level::trace : spdlog::level::off);
     }
+    std::lock_guard lock(g_state_mutex);
+    g_console_enabled = enabled;
+}
+
+bool IsConsoleLoggingEnabled() {
+    std::lock_guard lock(g_state_mutex);
+    return g_console_enabled;
+}
+
+std::string FileLogPath() {
+    std::lock_guard lock(g_state_mutex);
+    return g_file_path;
+}
+
+void SetLevel(Level level) {
+    if (auto logger = spdlog::default_logger()) {
+        logger->set_level(ToSpdlogLevel(level));
+    }
+    av_log_set_level(ToFfmpegLevel(level));
+}
+
+Level GetLevel() {
+    auto logger = spdlog::default_logger();
+    switch (logger ? logger->level() : spdlog::level::info) {
+        case spdlog::level::trace: return Level::kTrace;
+        case spdlog::level::debug: return Level::kDebug;
+        case spdlog::level::info: return Level::kInfo;
+        case spdlog::level::warn: return Level::kWarn;
+        default: return Level::kError;
+    }
 }
 
 bool EnableFileLogging(const std::string& path) {
@@ -90,6 +145,8 @@ bool EnableFileLogging(const std::string& path) {
         // Flush every message so the file is readable even while the app is
         // hung/frozen (otherwise buffered logs are lost on exit).
         logger->flush_on(spdlog::level::trace);
+        std::lock_guard lock(g_state_mutex);
+        g_file_path = path;
         return true;
     } catch (const spdlog::spdlog_ex& ex) {
         SPDLOG_ERROR("Failed to enable file logging at '{}': {}", path, ex.what());

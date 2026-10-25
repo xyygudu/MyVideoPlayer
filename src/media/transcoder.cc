@@ -1,11 +1,14 @@
 #include "mvp/transcoder.h"
 
 #include <algorithm>
+#include <mutex>
+#include <thread>
 #include <utility>
 
 #include <spdlog/spdlog.h>
 
 #include "graph/media_graph.h"
+#include "graph/message_bus.h"
 #include "mvp/source_info.h"
 #include "mvp/source_probe.h"
 #include "nodes/decoder_node.h"
@@ -21,10 +24,27 @@ namespace {
 // I-frame decode spikes. Going deeper buys nothing — libx264 already holds
 // rc_lookahead (40 by default) frames of its own.
 constexpr int kTranscodeFrameDepth = 4;
+
+const char* ResultName(TranscodeResult result) {
+    switch (result) {
+        case TranscodeResult::kSucceeded:
+            return "succeeded";
+        case TranscodeResult::kCancelled:
+            return "cancelled";
+        default:
+            return "failed";
+    }
+}
 }  // namespace
 
+/// Threading: the owner thread runs Start/Cancel/destruction; an event thread
+/// per run drains the graph bus. Whoever claims the completion first (the
+/// event thread on EOS/error, or Cancel) stops the graph and reports, so the
+/// graph is stopped and the callback invoked exactly once per run.
 class Transcoder::Impl {
   public:
+    ~Impl();
+
     void SetInput(const std::string& url) { input_url_ = url; }
     void SetOutput(const std::string& path, const TranscodeOptions& options) {
         output_path_ = path;
@@ -32,7 +52,7 @@ class Transcoder::Impl {
     }
 
     bool Start();
-    void Cancel();
+    void Cancel() { Complete(TranscodeResult::kCancelled); }
     void SetProgressCallback(ProgressCallback cb) { progress_cb_ = std::move(cb); }
     void SetCompletionCallback(CompletionCallback cb) { completion_cb_ = std::move(cb); }
 
@@ -40,9 +60,11 @@ class Transcoder::Impl {
     bool BuildGraph();
     void WireBranch(graph::OutputPort* demux_output, const EncodeParams& params,
                     graph::MuxNode* mux, int mux_port_index);
-    void OnGraphEvent(graph::GraphEvent event);
     void OnProgress(double pts_seconds);
-    void ReportCompletionOnce(bool ok);
+    void StartEventThread();
+    void StopEventThread();
+    /// Ends the run once: the first caller stops the graph and reports.
+    void Complete(TranscodeResult result);
 
     std::string input_url_;
     std::string output_path_;
@@ -50,31 +72,103 @@ class Transcoder::Impl {
     SourceInfo info_;
 
     std::unique_ptr<graph::MediaGraph> graph_;
-    bool completed_{false};
+    const graph::INode* mux_{nullptr};  // Its EOS means the output is complete
+    std::thread event_thread_;          // Drains graph_->Bus() during a run
+
+    std::mutex mutex_;
+    bool completed_{true};  // Guarded by mutex_; true while no run is active
 
     ProgressCallback progress_cb_;
     CompletionCallback completion_cb_;
 };
 
+Transcoder::Impl::~Impl() {
+    {
+        std::lock_guard lock(mutex_);
+        completed_ = true;  // Destruction reports nothing (unless already in flight).
+    }
+    StopEventThread();
+    if (graph_) {
+        graph_->Stop();  // Before the callbacks the node threads may still call.
+    }
+}
+
 bool Transcoder::Impl::Start() {
-    completed_ = false;
-    if (!BuildGraph()) {
-        ReportCompletionOnce(false);
+    {
+        std::lock_guard lock(mutex_);
+        if (!completed_) {
+            SPDLOG_ERROR("Transcoder: Start() while a transcode is running, ignored");
+            return false;
+        }
+    }
+    StopEventThread();  // The previous run's thread, already done.
+    graph_.reset();
+    {
+        std::lock_guard lock(mutex_);
+        completed_ = false;
+    }
+    if (!BuildGraph() || !graph_->Start()) {
+        SPDLOG_ERROR("Transcoder: failed to start '{}' -> '{}'", input_url_, output_path_);
+        Complete(TranscodeResult::kFailed);
         return false;
     }
-    if (!graph_->Start()) {
-        SPDLOG_ERROR("Transcoder: graph Start failed");
-        ReportCompletionOnce(false);
-        return false;
-    }
+    StartEventThread();
     return true;
 }
 
-void Transcoder::Impl::Cancel() {
+void Transcoder::Impl::StartEventThread() {
+    graph::MessageBus* bus = &graph_->Bus();
+    event_thread_ = std::thread([this, bus] {
+        while (auto msg = bus->Wait()) {
+            if (msg->type == graph::GraphMessageType::kError) {
+                SPDLOG_ERROR("Transcoder: {} reported: {}",
+                             msg->source ? msg->source->Name() : std::string("graph"), msg->detail);
+                Complete(TranscodeResult::kFailed);
+                return;  // *this may be gone: the callback can destroy it.
+            }
+            if (msg->source == mux_) {
+                Complete(TranscodeResult::kSucceeded);
+                return;
+            }
+        }
+    });
+}
+
+void Transcoder::Impl::StopEventThread() {
+    if (!event_thread_.joinable()) {
+        return;
+    }
+    if (event_thread_.get_id() == std::this_thread::get_id()) {
+        // From inside the completion callback: the thread returns right after
+        // it without touching *this again, so it can simply be released.
+        event_thread_.detach();
+        return;
+    }
+    if (graph_) {
+        graph_->Bus().Shutdown();
+    }
+    event_thread_.join();
+}
+
+void Transcoder::Impl::Complete(TranscodeResult result) {
+    {
+        std::lock_guard lock(mutex_);
+        if (completed_) {
+            return;
+        }
+        completed_ = true;
+    }
+    // Only the claimer gets here. Stop joins every node thread, including a
+    // muxer thread that may be inside the progress callback.
     if (graph_) {
         graph_->Stop();
     }
-    ReportCompletionOnce(false);
+    SPDLOG_INFO("Transcoder: '{}' -> '{}' {}", input_url_, output_path_, ResultName(result));
+    // A local copy: the callback may destroy *this (and completion_cb_).
+    CompletionCallback notify = completion_cb_;
+    if (notify) {
+        notify(result);
+    }
 }
 
 bool Transcoder::Impl::BuildGraph() {
@@ -90,13 +184,16 @@ bool Transcoder::Impl::BuildGraph() {
     int audio_idx = want_audio ? info_.audio_streams[0].index : -1;
 
     graph_ = std::make_unique<graph::MediaGraph>();
-    graph_->SetEventCallback([this](graph::GraphEvent e) { OnGraphEvent(e); });
 
-    auto* demux = static_cast<graph::DemuxNode*>(graph_->AddNode(
-        std::make_unique<graph::DemuxNode>(input_url_, video_idx, audio_idx)));
+    // Like the ffmpeg CLI: fold timestamp jumps so the muxer sees monotonic DTS.
+    graph::DemuxOptions demux_options;
+    demux_options.correct_ts_discontinuities = true;
+    auto* demux = static_cast<graph::DemuxNode*>(graph_->AddNode(std::make_unique<graph::DemuxNode>(
+        input_url_, video_idx, audio_idx, demux_options)));
     auto* mux = static_cast<graph::MuxNode*>(graph_->AddNode(
         std::make_unique<graph::MuxNode>(output_path_, want_video, want_audio)));
     mux->SetProgressHook([this](double pts) { OnProgress(pts); });
+    mux_ = mux;
 
     if (want_video) {
         WireBranch(demux->Outputs()[0], options_.video, mux, 0);
@@ -138,30 +235,12 @@ void Transcoder::Impl::WireBranch(graph::OutputPort* demux_output,
                     graph::LinkCapacity::ForPackets());
 }
 
-void Transcoder::Impl::OnGraphEvent(graph::GraphEvent event) {
-    if (event == graph::GraphEvent::kEos) {
-        ReportCompletionOnce(true);
-    } else if (event == graph::GraphEvent::kError) {
-        ReportCompletionOnce(false);
-    }
-}
-
 void Transcoder::Impl::OnProgress(double pts_seconds) {
     if (!progress_cb_ || info_.duration <= 0.0) {
         return;
     }
     double pct = std::clamp((pts_seconds / info_.duration) * 100.0, 0.0, 100.0);
     progress_cb_(pct);
-}
-
-void Transcoder::Impl::ReportCompletionOnce(bool ok) {
-    if (completed_) {
-        return;
-    }
-    completed_ = true;
-    if (completion_cb_) {
-        completion_cb_(ok);
-    }
 }
 
 // --- Transcoder public interface (delegates to Impl) ---

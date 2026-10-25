@@ -144,7 +144,7 @@ QWidget* PlayerPage::BuildControlBar() {
 void PlayerPage::OnOpenFile() {
     QString filepath = QFileDialog::getOpenFileName(
         this, QStringLiteral("\u6253\u5F00\u89C6\u9891\u6587\u4EF6"), QString(),
-        "Video Files (*.mp4 *.avi *.mkv *.mov *.flv *.wmv);;All Files (*)");
+        "Video Files (*.mp4 *.avi *.mkv *.mov *.flv *.wmv *.webm *.ts *.m2ts);;All Files (*)");
     if (filepath.isEmpty()) return;
 
     SPDLOG_INFO("UI: open file '{}'", filepath.toStdString());
@@ -189,10 +189,13 @@ void PlayerPage::OnTimerTick() {
     double fps = player_->VideoFps();
     auto state = player_->State();
 
-    if (state == mvp::PlaybackState::kFinished) {
-        play_pause_btn_->SetCustomIcon(
-            LoadButtonIcon(QStringLiteral(":/icons/play.svg"), 20));
-        play_pause_btn_->SetIconKind(IconButton::IconKind::kPlay);
+    if (state != last_state_) {
+        last_state_ = state;
+        OnStateChanged(state);
+    }
+    if (state == mvp::PlaybackState::kError) {
+        time_label_->setText(QStringLiteral("\u64AD\u653E\u51FA\u9519\uFF0C\u8BF7\u67E5\u770B\u65E5\u5FD7"));
+        return;
     }
 
     if (slider_pressed_ && !progress_slider_->isSliderDown() && duration > 0) {
@@ -214,6 +217,14 @@ void PlayerPage::OnTimerTick() {
     } else {
         time_label_->setText(FormatTime(video_pos) + " / " + FormatTime(duration));
     }
+}
+
+void PlayerPage::OnStateChanged(mvp::PlaybackState state) {
+    if (state != mvp::PlaybackState::kFinished && state != mvp::PlaybackState::kError) {
+        return;  // User-driven transitions already updated the controls.
+    }
+    play_pause_btn_->SetCustomIcon(LoadButtonIcon(QStringLiteral(":/icons/play.svg"), 20));
+    play_pause_btn_->SetIconKind(IconButton::IconKind::kPlay);
 }
 
 QString PlayerPage::FormatTime(double seconds) const {

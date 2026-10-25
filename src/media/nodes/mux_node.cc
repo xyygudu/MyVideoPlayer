@@ -203,18 +203,24 @@ std::vector<InputPort*> MuxNode::Inputs() {
 }
 
 void MuxNode::CloseOutput() {
+    CloseOutputFile();
+    for (auto& slot : slots_) {
+        slot.av_stream = nullptr;
+        slot.eos = false;
+    }
+}
+
+int MuxNode::CloseOutputFile() {
+    int ret = 0;
     if (format_ctx_) {
         if (format_ctx_->pb && !(format_ctx_->oformat->flags & AVFMT_NOFILE)) {
-            avio_closep(&format_ctx_->pb);
+            ret = avio_closep(&format_ctx_->pb);
         }
         avformat_free_context(format_ctx_);
         format_ctx_ = nullptr;
     }
     header_written_ = false;
-    for (auto& slot : slots_) {
-        slot.av_stream = nullptr;
-        slot.eos = false;
-    }
+    return ret;
 }
 
 bool MuxNode::AllSlotsAtEos() const {
@@ -226,15 +232,14 @@ bool MuxNode::AllSlotsAtEos() const {
     return true;
 }
 
-void MuxNode::FillPendingSlots(PendingSlots& pending) {
+bool MuxNode::FillPendingSlots(PendingSlots& pending) {
     for (size_t i = 0; i < slots_.size(); ++i) {
         if (pending[i] || slots_[i].eos) {
             continue;
         }
         auto opt = slots_[i].port->Pull();
         if (!opt) {
-            slots_[i].eos = true;  // link aborted
-            continue;
+            return false;  // Link aborted: not an end of stream.
         }
         if (HasFlag(opt->flags(), BufferFlags::kEos)) {
             slots_[i].eos = true;
@@ -242,6 +247,7 @@ void MuxNode::FillPendingSlots(PendingSlots& pending) {
         }
         pending[i] = std::move(opt);
     }
+    return true;
 }
 
 int MuxNode::PickNextSlot(const PendingSlots& pending) const {
@@ -260,9 +266,9 @@ int MuxNode::PickNextSlot(const PendingSlots& pending) const {
     return best;
 }
 
-void MuxNode::WriteSlotPacket(StreamSlot& slot, MediaBuffer& buf) {
+bool MuxNode::WriteSlotPacket(StreamSlot& slot, MediaBuffer& buf) {
     if (!buf.IsPacket() || !slot.av_stream) {
-        return;
+        return true;
     }
     AVPacketPtr& pkt = buf.AsPacket();
     pkt->stream_index = slot.av_stream->index;
@@ -273,14 +279,20 @@ void MuxNode::WriteSlotPacket(StreamSlot& slot, MediaBuffer& buf) {
 
     int ret = av_interleaved_write_frame(format_ctx_, pkt.get());
     if (ret < 0) {
-        SPDLOG_ERROR("MuxNode: av_interleaved_write_frame failed (err {})", ret);
-        state_ = NodeState::kError;
-        return;
+        const bool io_error = format_ctx_->pb && format_ctx_->pb->error < 0;
+        SPDLOG_ERROR("MuxNode: writing a packet failed{}: {}",
+                     io_error ? " (output not writable)" : ", packet dropped", AvErrorString(ret));
+        if (io_error) {
+            write_error_ = AvErrorString(ret);
+            return false;
+        }
+        return true;
     }
 
     if (slot.primary && progress_hook_) {
         progress_hook_(ts.pts);
     }
+    return true;
 }
 
 void MuxNode::DrainPending(PendingSlots& pending) {
@@ -292,33 +304,57 @@ void MuxNode::DrainPending(PendingSlots& pending) {
     }
 }
 
-void MuxNode::FinalizeOutput() {
-    if (header_written_ && format_ctx_) {
-        av_write_trailer(format_ctx_);
+void MuxNode::FinishOutput(MuxOutcome outcome, PendingSlots& pending) {
+    std::string error;
+    if (outcome == MuxOutcome::kFailed) {
+        error = "writing output failed: " + write_error_;  // No trailer on a broken file.
+    } else {
+        if (outcome == MuxOutcome::kAborted) {
+            DrainPending(pending);  // Keep what is already encoded (playable partial file).
+        }
+        const int ret = header_written_ ? av_write_trailer(format_ctx_) : 0;
+        if (ret < 0) {
+            error = "av_write_trailer failed: " + AvErrorString(ret);
+        }
     }
-    if (graph_) {
-        graph_->ReportEvent(GraphEvent::kEos);
+    const int close_ret = CloseOutputFile();
+    if (error.empty() && close_ret < 0) {
+        error = "closing output failed: " + AvErrorString(close_ret);
     }
+    if (!error.empty()) {
+        SPDLOG_ERROR("MuxNode: {}", error);
+    }
+    if (outcome == MuxOutcome::kAborted || !graph_) {
+        return;  // Cancelled or stopping: nobody waits for a verdict.
+    }
+    const auto type = error.empty() ? GraphMessageType::kEos : GraphMessageType::kError;
+    graph_->Bus().Post({type, this, graph_->SeekEpoch(), error});
 }
 
-void MuxNode::MuxLoop() {
-    PendingSlots pending(slots_.size());
-
-    while (running_.load(std::memory_order_relaxed) && !AllSlotsAtEos()) {
-        FillPendingSlots(pending);
+MuxNode::MuxOutcome MuxNode::RunInterleave(PendingSlots& pending) {
+    while (running_.load(std::memory_order_relaxed)) {
+        if (!FillPendingSlots(pending)) {
+            return MuxOutcome::kAborted;
+        }
         if (AllSlotsAtEos()) {
-            break;
+            return MuxOutcome::kEos;  // A slot with a pending packet is never at EOS.
         }
         int best = PickNextSlot(pending);
         if (best < 0) {
             continue;
         }
-        WriteSlotPacket(slots_[best], *pending[best]);
+        if (!WriteSlotPacket(slots_[best], *pending[best])) {
+            return MuxOutcome::kFailed;
+        }
         pending[best].reset();
     }
+    return MuxOutcome::kAborted;
+}
 
-    DrainPending(pending);
-    FinalizeOutput();
+void MuxNode::MuxLoop() {
+    PendingSlots pending(slots_.size());
+    const MuxOutcome outcome = RunInterleave(pending);
+    FinishOutput(outcome, pending);
 }
 
 }  // namespace mvp::graph

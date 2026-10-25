@@ -257,8 +257,10 @@ QWidget* TranscoderPage::BuildAdvancedHeader(QWidget* parent) {
     header_layout->addStretch(1);
 
     advanced_chevron_ = new IconButton(IconButton::IconKind::kChevronRight, header);
-    advanced_chevron_->setFixedSize(18, 18);    advanced_chevron_->SetCustomIcon(
-        LoadButtonIcon(QStringLiteral(":/icons/chevron_right.svg"), 16));    connect(advanced_chevron_, &QAbstractButton::clicked, this,
+    advanced_chevron_->setFixedSize(18, 18);
+    advanced_chevron_->SetCustomIcon(
+        LoadButtonIcon(QStringLiteral(":/icons/chevron_right.svg"), 16));
+    connect(advanced_chevron_, &QAbstractButton::clicked, this,
             &TranscoderPage::OnAdvancedToggled);
     header_layout->addWidget(advanced_chevron_);
     return header;
@@ -456,8 +458,8 @@ void TranscoderPage::OnStartOrCancelClicked() {
         QMetaObject::invokeMethod(this, [this, pct] { HandleProgress(pct); },
                                   Qt::QueuedConnection);
     });
-    transcoder_->SetCompletionCallback([this](bool ok) {
-        QMetaObject::invokeMethod(this, [this, ok] { HandleCompletion(ok); },
+    transcoder_->SetCompletionCallback([this](mvp::TranscodeResult result) {
+        QMetaObject::invokeMethod(this, [this, result] { HandleCompletion(result); },
                                   Qt::QueuedConnection);
     });
 
@@ -477,9 +479,19 @@ void TranscoderPage::HandleProgress(double percent) {
     progress_bar_->setValue(qRound(percent));
 }
 
-void TranscoderPage::HandleCompletion(bool ok) {
-    progress_bar_->setValue(ok ? 100 : progress_bar_->value());
+void TranscoderPage::HandleCompletion(mvp::TranscodeResult result) {
     SetRunningState(false);
-    status_label_->setText(ok ? QStringLiteral("\u8F6C\u7801\u6210\u529F")
-                              : QStringLiteral("\u8F6C\u7801\u5931\u8D25"));
+    switch (result) {
+        case mvp::TranscodeResult::kSucceeded:
+            progress_bar_->setValue(100);
+            status_label_->setText(QStringLiteral("\u8F6C\u7801\u6210\u529F"));
+            break;
+        case mvp::TranscodeResult::kCancelled:
+            status_label_->setText(QStringLiteral("\u5DF2\u53D6\u6D88"));
+            break;
+        case mvp::TranscodeResult::kFailed:
+            status_label_->setText(
+                QStringLiteral("\u8F6C\u7801\u5931\u8D25\uFF0C\u8BF7\u67E5\u770B\u65E5\u5FD7"));
+            break;
+    }
 }

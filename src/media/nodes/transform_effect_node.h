@@ -1,8 +1,8 @@
 #ifndef MVP_NODES_TRANSFORM_EFFECT_NODE_H_
 #define MVP_NODES_TRANSFORM_EFFECT_NODE_H_
 
-#include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -57,7 +57,9 @@ struct TransformAffineParams {
 /// formats are passed through unmodified.
 class TransformEffectNode : public IEffectNode {
   public:
-    TransformEffectNode();
+    /// `allow_gpu` false keeps hardware frames off the GPU pass: they are
+    /// downloaded and processed on the CPU (debug switch).
+    explicit TransformEffectNode(bool allow_gpu = true);
     ~TransformEffectNode() override;
 
     // --- INode interface ---
@@ -80,22 +82,40 @@ class TransformEffectNode : public IEffectNode {
     // --- IEffectNode interface ---
     std::vector<EffectParam> Params() const override;
     void SetParam(const std::string& id, EffectParamValue value) override;
-    bool IsEnabled() const override { return enabled_.load(); }
-    void SetEnabled(bool enabled) override { enabled_.store(enabled); }
+    void ResetParams() override;
+    bool IsEnabled() const override;
+    void SetEnabled(bool enabled) override;
 
     void Attach(MediaGraph* graph) override { graph_ = graph; }
 
   private:
-    TransformAffineParams SnapshotParams() const;
+    /// User-facing settings, written by the UI thread and read once per
+    /// frame by the processing thread as one consistent snapshot.
+    struct Settings {
+        float rotate_deg{0.0f};
+        bool flip_h{false};
+        bool flip_v{false};
+        float scale_x{1.0f};
+        float scale_y{1.0f};
+        float translate_x{0.0f};
+        float translate_y{0.0f};
+        bool enabled{true};
+    };
+
+    Settings LoadSettings() const;
+    static TransformAffineParams ToAffine(const Settings& settings);
     /// Hardware frames through the GPU pass; false = not handled (no pass or it failed).
     bool TryProcessOnGpu(MediaBuffer& input, OutputCallback& emit,
                          const TransformAffineParams& params);
     bool TryApplyPermute(const MediaFrame& src, MediaFrame& dst,
+                         const TransformAffineParams& params,
                          MediaBuffer& input, OutputCallback& emit);
     void ApplyBilinear(const MediaFrame& src, MediaFrame& dst,
+                       const TransformAffineParams& params,
                        MediaBuffer& input, OutputCallback& emit);
 
     NodeState state_{NodeState::kIdle};
+    const bool allow_gpu_;
 
     std::unique_ptr<InputPort> input_port_;
     std::unique_ptr<OutputPort> output_port_;
@@ -105,14 +125,10 @@ class TransformEffectNode : public IEffectNode {
     // format (the common case). See media_frame.h / frame-abstraction spec.
     MediaFramePool output_pool_;
 
-    std::atomic<EffectParamValue> rotate_deg_{0.0f};
-    std::atomic<EffectParamValue> flip_h_{false};
-    std::atomic<EffectParamValue> flip_v_{false};
-    std::atomic<EffectParamValue> scale_x_{1.0f};
-    std::atomic<EffectParamValue> scale_y_{1.0f};
-    std::atomic<EffectParamValue> translate_x_{0.0f};
-    std::atomic<EffectParamValue> translate_y_{0.0f};
-    std::atomic<bool> enabled_{true};
+    // A handful of values copied once per frame: a plain mutex is cheaper to
+    // reason about than per-field atomics and never yields a torn mix.
+    mutable std::mutex params_mutex_;
+    Settings settings_;  // Guarded by params_mutex_.
 
     bool logged_unsupported_format_{false};
 

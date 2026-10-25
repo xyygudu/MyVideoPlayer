@@ -48,31 +48,31 @@ bool OutputPort::Connect(InputPort* peer, LinkCapacity capacity) {
     return true;
 }
 
-void OutputPort::Push(MediaBuffer buf) {
+bool OutputPort::Push(MediaBuffer buf) {
     if (!peer_) {
-        return;
+        return true;
     }
 
     INode* downstream = peer_->Owner();
 
-    if (downstream->Threading() == ThreadingMode::kPassive) {
-        // Synchronous call: Process on current thread.
-        // The emit callback stamps each output with the input's seek epoch
-        // and routes it to the Passive node's own output ports.
-        const int serial = buf.serial();
-        downstream->Process(std::move(buf), [downstream, serial](MediaBuffer out) {
-            out.set_serial(serial);
-            auto outputs = downstream->Outputs();
-            if (!outputs.empty()) {
-                outputs[0]->Push(std::move(out));
-            }
-        });
-    } else {
+    if (downstream->Threading() == ThreadingMode::kActive) {
         // Asynchronous: enqueue into the Link.
-        if (link_) {
-            link_->Push(std::move(buf));
-        }
+        return !link_ || link_->Push(std::move(buf));
     }
+
+    // Synchronous call: Process on current thread.
+    // The emit callback stamps each output with the input's seek epoch
+    // and routes it to the Passive node's own output ports.
+    const int serial = buf.serial();
+    bool delivered = true;
+    downstream->Process(std::move(buf), [downstream, serial, &delivered](MediaBuffer out) {
+        out.set_serial(serial);
+        auto outputs = downstream->Outputs();
+        if (!outputs.empty() && !outputs[0]->Push(std::move(out))) {
+            delivered = false;
+        }
+    });
+    return delivered;
 }
 
 void OutputPort::FlushLink() {

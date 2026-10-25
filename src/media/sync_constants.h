@@ -1,8 +1,6 @@
 #ifndef MVP_SYNC_CONSTANTS_H_
 #define MVP_SYNC_CONSTANTS_H_
 
-#include <cstdint>
-
 namespace mvp {
 
 // A/V sync threshold lower bound (aligned with FFplay AV_SYNC_THRESHOLD_MIN).
@@ -25,20 +23,13 @@ inline constexpr double kFrameDelayMin = 0.001;
 // Maximum valid frame interval (above this, use fallback). All sync modes.
 inline constexpr double kFrameDelayMax = 1.0;
 
-// Default maximum frame count for the video FrameQueue.
-// Aligned with FFplay VIDEO_PICTURE_QUEUE_SIZE.
-inline constexpr int kDefaultVideoQueueSize = 3;
+// Clock differences beyond this are timestamp discontinuities, not drift: the
+// video is not slowed down or sped up to chase them (FFplay max_frame_duration
+// for inputs with timestamp discontinuities).
+inline constexpr double kMaxFrameDuration = 10.0;
 
-// Default maximum frame count for the audio FrameQueue.
-// Aligned with FFplay SAMPLE_QUEUE_SIZE.
-inline constexpr int kDefaultAudioQueueSize = 9;
-
-// Default maximum byte budget for a PacketQueue.
-// Aligned with FFplay MAX_QUEUE_SIZE (15 MB).
-inline constexpr int64_t kDefaultMaxQueueBytes = 15 * 1024 * 1024;
-
-// Seek target sentinel: indicates no seek is in progress.
-inline constexpr double kNoSeekTarget = -1.0;
+// Queue depths and byte budgets live next to their users: graph/link.h
+// (packet links) and the facades that size their frame links.
 
 }  // namespace mvp
 

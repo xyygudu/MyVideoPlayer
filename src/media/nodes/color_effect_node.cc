@@ -33,7 +33,7 @@ void ApplyColorLut(MediaFrame& mf, float brightness, float contrast, float satur
 
 }  // namespace
 
-ColorEffectNode::ColorEffectNode() {
+ColorEffectNode::ColorEffectNode(bool allow_gpu) : allow_gpu_(allow_gpu) {
     input_port_ = std::make_unique<InputPort>(this);
     output_port_ = std::make_unique<OutputPort>(this);
 }
@@ -60,10 +60,11 @@ bool ColorEffectNode::Negotiate() {
 bool ColorEffectNode::Prepare() {
     if (state_ == NodeState::kPrepared || state_ == NodeState::kRunning) return true;
     gpu::GpuDevice* device = graph_ ? graph_->GpuDevice() : nullptr;
-    gpu_pass_ = device ? device->CreateVideoPass(gpu::VideoKernel::kColorAdjust) : nullptr;
+    gpu_pass_ = (device && allow_gpu_) ? device->CreateVideoPass(gpu::VideoKernel::kColorAdjust)
+                                       : nullptr;
     if (device) {
         SPDLOG_INFO("ColorEffectNode: GPU pass {}",
-                    gpu_pass_ ? "ready" : "unavailable, hardware frames use the CPU");
+                    gpu_pass_ ? "ready" : "off, hardware frames use the CPU");
     }
     state_ = NodeState::kPrepared;
     return true;
@@ -82,37 +83,61 @@ void ColorEffectNode::Stop() { state_ = NodeState::kIdle; }
 void ColorEffectNode::Flush() {}
 
 std::vector<EffectParam> ColorEffectNode::Params() const {
+    const Settings s = LoadSettings();
+    const Settings d;  // Defaults
     return {
-        {"brightness", "亮度", EffectParamType::kFloat, brightness_.load(), 0.0f, -1.0f, 1.0f, {}},
-        {"contrast", "对比度", EffectParamType::kFloat, contrast_.load(), 1.0f, 0.0f, 3.0f, {}},
-        {"saturation", "饱和度", EffectParamType::kFloat, saturation_.load(), 1.0f, 0.0f, 3.0f, {}},
+        {"brightness", "亮度", EffectParamType::kFloat, s.brightness, d.brightness, -1.0f, 1.0f, {}},
+        {"contrast", "对比度", EffectParamType::kFloat, s.contrast, d.contrast, 0.0f, 3.0f, {}},
+        {"saturation", "饱和度", EffectParamType::kFloat, s.saturation, d.saturation, 0.0f, 3.0f, {}},
     };
 }
 
 void ColorEffectNode::SetParam(const std::string& id, EffectParamValue value) {
-    if (!std::holds_alternative<float>(value)) {
-        SPDLOG_WARN("ColorEffectNode: param '{}' expects float", id);
-        return;
+    std::lock_guard lock(params_mutex_);
+    const bool known = AssignEffectParam(id, "brightness", value, settings_.brightness) ||
+                       AssignEffectParam(id, "contrast", value, settings_.contrast) ||
+                       AssignEffectParam(id, "saturation", value, settings_.saturation);
+    if (!known) {
+        SPDLOG_WARN("ColorEffectNode: unknown param '{}'", id);
     }
-    if (id == "brightness") brightness_.store(value);
-    else if (id == "contrast") contrast_.store(value);
-    else if (id == "saturation") saturation_.store(value);
-    else SPDLOG_WARN("ColorEffectNode: unknown param '{}'", id);
+}
+
+bool ColorEffectNode::IsEnabled() const {
+    std::lock_guard lock(params_mutex_);
+    return settings_.enabled;
+}
+
+void ColorEffectNode::ResetParams() {
+    std::lock_guard lock(params_mutex_);
+    Settings defaults;
+    defaults.enabled = settings_.enabled;
+    settings_ = defaults;
+}
+
+void ColorEffectNode::SetEnabled(bool enabled) {
+    std::lock_guard lock(params_mutex_);
+    settings_.enabled = enabled;
+}
+
+ColorEffectNode::Settings ColorEffectNode::LoadSettings() const {
+    std::lock_guard lock(params_mutex_);
+    return settings_;
 }
 
 void ColorEffectNode::Process(MediaBuffer input, OutputCallback emit) {
-    if (!enabled_.load() || !input.IsFrame()) { emit(std::move(input)); return; }
+    const Settings s = LoadSettings();  // One consistent snapshot per frame.
+    if (!s.enabled || !input.IsFrame()) { emit(std::move(input)); return; }
 
-    float b = std::get<float>(brightness_.load());
-    float c = std::get<float>(contrast_.load());
-    float s = std::get<float>(saturation_.load());
-    if (b == 0.0f && c == 1.0f && s == 1.0f) { emit(std::move(input)); return; }
+    const float b = s.brightness;
+    const float c = s.contrast;
+    const float sat = s.saturation;
+    if (b == 0.0f && c == 1.0f && sat == 1.0f) { emit(std::move(input)); return; }
 
     // Hardware in, hardware out: toggling the effect never changes the frame domain.
-    if (input.AsFrame().IsHardware() && TryProcessOnGpu(input, emit, b, c, s)) {
+    if (input.AsFrame().IsHardware() && TryProcessOnGpu(input, emit, b, c, sat)) {
         return;
     }
-    ProcessOnCpu(std::move(input), emit, b, c, s);
+    ProcessOnCpu(std::move(input), emit, b, c, sat);
 }
 
 bool ColorEffectNode::TryProcessOnGpu(MediaBuffer& input, OutputCallback& emit,

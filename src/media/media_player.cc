@@ -1,125 +1,39 @@
 #include "mvp/media_player.h"
 
 #include <algorithm>
-#include <limits>
 
 #include <spdlog/spdlog.h>
 
-extern "C" {
-#include <libavutil/hwcontext.h>
-}
-
 #include "clock.h"
-#include "effect_manager.h"
-#include "gpu/gpu_device.h"
-#include "graph/media_graph.h"
-#include "graph/port.h"
-#include "mvp/source_info.h"
+#include "frame_capture.h"
+#include "media_player_impl.h"
 #include "mvp/source_probe.h"
-#include "nodes/demux_node.h"
-#include "nodes/audio_sink_node.h"
-#include "nodes/color_effect_node.h"
 #include "nodes/decoder_node.h"
-#include "nodes/transform_effect_node.h"
 #include "nodes/video_sink_node.h"
-#include "nodes/audio_sink_node.h"
-#include "video_renderer.h"
 
 namespace mvp {
-namespace {
-// Provenance: ffplay VIDEO_PICTURE_QUEUE_SIZE / SAMPLE_QUEUE_SIZE. These depths
-// exist to absorb decode jitter and let the sink look one frame ahead for A/V
-// sync timing.
-constexpr int kVideoFrameDepth = 3;
-constexpr int kAudioFrameDepth = 9;
-}  // namespace
 
-class MediaPlayer::Impl {
-  public:
-    Impl() = default;
-    ~Impl() { Close(); }
-
-    bool Open(const std::string& filepath);
-    void Close();
-    void Play();
-    void Pause();
-    void Seek(double position_seconds);
-    PlaybackState State() const;
-    double Duration() const;
-    double CurrentPosition() const;
-    double VideoFps() const;
-
-    void SetWindowHandle(void* handle) { window_handle_ = handle; }
-    void NotifyWindowResized(int w, int h);
-    void SetFinishedCallback(MediaPlayer::FinishedCallback cb) {
-        finished_cb_ = std::move(cb);
-    }
-
-    std::vector<EffectInfo> EffectInfos() const { return effect_manager_.Describe(); }
-    void SetEffectParam(const std::string& effect_id, const std::string& param_id,
-                        EffectParamValue value) {
-        effect_manager_.SetParam(effect_id, param_id, value);
-    }
-    void SetEffectEnabled(const std::string& effect_id, bool enabled) {
-        effect_manager_.SetEnabled(effect_id, enabled);
-    }
-
-  private:
-    bool BuildGraph();
-    void OnGraphEvent(graph::GraphEvent event);
-
-    /// Creates TransformEffectNode -> ColorEffectNode, wires
-    /// Decoder -> Transform -> Color, and registers both with
-    /// effect_manager_. Returns the output port BuildGraph should connect
-    /// to the video sink. Split out so BuildGraph itself stays ≤ 40 lines.
-    graph::OutputPort* WireVideoEffects(graph::DecoderNode* vdec);
-
-    /// Decoder -> effects -> video sink, fed from the given demux output.
-    void WireVideoBranch(graph::OutputPort* demux_output);
-    /// Decoder -> audio sink, fed from the given demux output.
-    void WireAudioBranch(graph::OutputPort* demux_output);
-
-    // Source meta (populated by SourceProbe in Open, consumed by BuildGraph)
-    SourceInfo info_;
-
-    // Selected stream indices (default: first of each type, -1 = none)
-    int video_stream_index_{-1};
-    int audio_stream_index_{-1};
-    int sink_count_{0};      // number of active sinks (for EOS counting)
-    int eos_count_{0};
-
-    // Graph (owns all nodes)
-    std::unique_ptr<graph::MediaGraph> graph_;
-
-    // Indexes the effect nodes WireVideoEffects wires into the graph, for
-    // EffectInfos()/SetEffectParam()/SetEffectEnabled(). Non-owning — must
-    // be cleared before graph_ is reset (see Close()).
-    EffectManager effect_manager_;
-
-    // Video rendering
-    VideoRenderer video_renderer_;
-    void* window_handle_{nullptr};
-
-    int window_width_{640};
-    int window_height_{480};
-
-    // State
-    PlaybackState state_{PlaybackState::kIdle};
-
-    // Callbacks
-    MediaPlayer::FinishedCallback finished_cb_;
-};
-
-// --- Impl methods ---
+// --- Impl: lifecycle ---
 
 bool MediaPlayer::Impl::Open(const std::string& filepath) {
-    Close();
+    if (!CloseInternal()) {
+        return false;
+    }
+    std::lock_guard lock(mutex_);
+    if (!OpenLocked(filepath)) {
+        state_ = PlaybackState::kError;
+        return false;
+    }
+    StartEventThread();
+    state_ = PlaybackState::kReady;
+    return true;
+}
 
+bool MediaPlayer::Impl::OpenLocked(const std::string& filepath) {
     // 1. Probe source independently of Graph construction.
     info_ = SourceProbe::Probe(filepath);
     if (info_.video_streams.empty() && info_.audio_streams.empty()) {
         SPDLOG_ERROR("MediaPlayer: source probe found no streams");
-        state_ = PlaybackState::kError;
         return false;
     }
 
@@ -133,60 +47,64 @@ bool MediaPlayer::Impl::Open(const std::string& filepath) {
     video_renderer_.Open(window_handle_, window_width_, window_height_);
 
     // 4. Build the playback graph.
-    if (!BuildGraph()) {
-        state_ = PlaybackState::kError;
-        return false;
-    }
-
-    state_ = PlaybackState::kReady;
-    return true;
+    return BuildGraph();
 }
 
 void MediaPlayer::Impl::Close() {
-    effect_manager_.Clear();
-    if (graph_) {
-        SPDLOG_DEBUG("MediaPlayer: stopping graph");
-        graph_->Stop();
-        SPDLOG_DEBUG("MediaPlayer: destroying graph");
-        // Nodes and their frames go before the SDL renderer they present on.
-        graph_.reset();
+    CloseInternal();
+}
+
+bool MediaPlayer::Impl::CloseInternal() {
+    if (!StopEventThread()) {
+        return false;
     }
+    std::lock_guard lock(mutex_);
+    TeardownGraphLocked();
     SPDLOG_DEBUG("MediaPlayer: closing renderer");
     video_renderer_.Close();
 
     info_ = SourceInfo{};
     video_stream_index_ = -1;
     audio_stream_index_ = -1;
-    eos_count_ = 0;
     sink_count_ = 0;
 
     state_ = PlaybackState::kIdle;
+    return true;
 }
 
 void MediaPlayer::Impl::Play() {
-    if (state_ == PlaybackState::kReady || state_ == PlaybackState::kPaused) {
-        if (state_ == PlaybackState::kPaused) {
+    std::lock_guard lock(mutex_);
+    PlayLocked();
+}
+
+void MediaPlayer::Impl::PlayLocked() {
+    switch (state_) {
+        case PlaybackState::kReady:
+            if (!graph_->Start()) {
+                SPDLOG_ERROR("MediaPlayer: graph Start failed");
+                state_ = PlaybackState::kError;
+                return;
+            }
+            started_ = true;
+            state_ = PlaybackState::kPlaying;
+            return;
+        case PlaybackState::kPaused:
             SPDLOG_INFO("MediaPlayer: resume");
             graph_->SetPaused(false);
             state_ = PlaybackState::kPlaying;
             return;
-        }
-
-        // First play from Ready
-        if (!graph_->Start()) {
-            state_ = PlaybackState::kError;
-            SPDLOG_ERROR("MediaPlayer: graph Start failed");
+        case PlaybackState::kFinished:
+            // Replay from the beginning: the seek leaves the player paused.
+            SeekLocked(0.0);
+            PlayLocked();
             return;
-        }
-        state_ = PlaybackState::kPlaying;
-    } else if (state_ == PlaybackState::kFinished) {
-        // Replay from beginning
-        Seek(0.0);
-        Play();
+        default:
+            return;
     }
 }
 
 void MediaPlayer::Impl::Pause() {
+    std::lock_guard lock(mutex_);
     if (state_ != PlaybackState::kPlaying) return;
 
     SPDLOG_INFO("MediaPlayer: pause");
@@ -195,41 +113,94 @@ void MediaPlayer::Impl::Pause() {
 }
 
 void MediaPlayer::Impl::Seek(double position_seconds) {
-    if (!graph_ || state_ == PlaybackState::kIdle) return;
+    std::lock_guard lock(mutex_);
+    SeekLocked(position_seconds);
+}
 
+void MediaPlayer::Impl::SeekLocked(double position_seconds) {
+    if (!graph_ || state_ == PlaybackState::kIdle || state_ == PlaybackState::kError) return;
+
+    position_seconds = std::max(0.0, position_seconds);
     SPDLOG_INFO("MediaPlayer: seek to {:.3f}s (state={})", position_seconds,
                 static_cast<int>(state_));
-    // Graph coordinates the seek: flush all links, broadcast a seek command
-    // so each node resets its own state (demux repositions, decoder drops to
-    // target, audio sink clears its buffer), then reposition every clock.
+    // Graph coordinates the seek: flush all links, reposition every clock in
+    // a new epoch, then broadcast a seek command so each node resets its own
+    // state (decoders drop to target, demux repositions). EOS reports of the
+    // old epoch become stale.
     graph_->Seek(position_seconds);
-
-    eos_count_ = 0;
+    eos_sinks_.clear();
+    refresh_again_ = false;  // The seek decodes through the current effect settings.
     if (state_ == PlaybackState::kFinished) {
-        state_ = PlaybackState::kPaused;
+        state_ = PlaybackState::kPaused;  // EOS paused the graph; stay paused.
     }
 }
 
+// --- Impl: queries ---
+
 PlaybackState MediaPlayer::Impl::State() const {
+    std::lock_guard lock(mutex_);
     return state_;
 }
 
 double MediaPlayer::Impl::Duration() const {
+    std::lock_guard lock(mutex_);
     return info_.duration;
 }
 
 double MediaPlayer::Impl::CurrentPosition() const {
+    std::lock_guard lock(mutex_);
     IClock* clock = graph_ ? graph_->MasterClock() : nullptr;
     return clock ? clock->Get() : 0.0;
 }
 
 double MediaPlayer::Impl::VideoFps() const {
+    std::lock_guard lock(mutex_);
     if (info_.video_streams.empty()) return 30.0;
     const auto& vs = info_.video_streams[0];
     return (vs.frame_rate_den > 0) ? static_cast<double>(vs.frame_rate_num) / vs.frame_rate_den : 30.0;
 }
 
+PipelineInfo MediaPlayer::Impl::GetPipelineInfo() const {
+    std::lock_guard lock(mutex_);
+    PipelineInfo info;
+    info.renderer = video_renderer_.BackendName();
+    if (video_decoder_) {
+        info.video_codec = video_decoder_->CodecName();
+        info.hardware_decoding = video_decoder_->IsHardwareDecoding();
+    }
+    if (video_sink_) {
+        info.frames_presented = video_sink_->FramesPresented();
+    }
+    return info;
+}
+
+CapturedFrame MediaPlayer::Impl::CaptureFrame() const {
+    CapturedFrame captured;
+    MediaFrame frame;
+    {
+        std::lock_guard lock(mutex_);
+        if (video_sink_) {
+            frame = video_sink_->DisplayedFrame(&captured.pts);
+        }
+    }
+    // Our reference keeps the frame alive, so the slow conversion runs unlocked.
+    if (!frame.IsValid() || !ConvertToRgba(frame, &captured.rgba)) {
+        return CapturedFrame{};
+    }
+    captured.width = frame.width();
+    captured.height = frame.height();
+    return captured;
+}
+
+// --- Impl: window, options, callbacks ---
+
+void MediaPlayer::Impl::SetWindowHandle(void* handle) {
+    std::lock_guard lock(mutex_);
+    window_handle_ = handle;
+}
+
 void MediaPlayer::Impl::NotifyWindowResized(int w, int h) {
+    std::lock_guard lock(mutex_);
     // Recorded for the renderer's initial Open; the live update goes through
     // the graph so only the render thread touches the renderer.
     window_width_ = w;
@@ -239,96 +210,57 @@ void MediaPlayer::Impl::NotifyWindowResized(int w, int h) {
     }
 }
 
-bool MediaPlayer::Impl::BuildGraph() {
-    // Precondition: info_ populated by Open(), stream indices selected.
-
-    // Create graph and nodes.
-    graph_ = std::make_unique<graph::MediaGraph>();
-    graph_->SetEventCallback([this](graph::GraphEvent e) { OnGraphEvent(e); });
-
-    // Decode and effects use the renderer's GPU device so frames stay on the
-    // GPU until presented. A null device keeps the pipeline software.
-    graph_->SetGpuDevice(video_renderer_.SharedGpuDevice());
-
-    auto* demux = static_cast<graph::DemuxNode*>(
-        graph_->AddNode(std::make_unique<graph::DemuxNode>(
-            info_.filepath, video_stream_index_, audio_stream_index_)));
-    if (video_stream_index_ >= 0) {
-        WireVideoBranch(demux->Outputs()[0]);
+void MediaPlayer::Impl::SetOptions(const PlayerOptions& options) {
+    if (!StopEventThread()) {
+        return;
     }
-    if (audio_stream_index_ >= 0) {
-        int audio_port = (video_stream_index_ >= 0) ? 1 : 0;
-        WireAudioBranch(demux->Outputs()[audio_port]);
+    std::lock_guard lock(mutex_);
+    options_ = options;
+    if (!graph_) {
+        return;  // Applied by the next Open().
     }
-
-    // Finalize.
-    if (!graph_->Open()) {
-        SPDLOG_ERROR("MediaPlayer: graph Open failed");
-        return false;
-    }
-    if (!graph_->Negotiate()) {
-        SPDLOG_ERROR("MediaPlayer: graph Negotiate failed");
-        return false;
-    }
-    if (!graph_->Prepare()) {
-        SPDLOG_ERROR("MediaPlayer: graph Prepare failed");
-        return false;
-    }
-
-    return true;
+    SPDLOG_INFO("MediaPlayer: options changed (hw decode {}, gpu effects {}, zero-copy {})",
+                options.hardware_decode, options.gpu_effects, options.zero_copy);
+    RebuildLocked(/*recover_device=*/false);
+    StartEventThread();
 }
 
-void MediaPlayer::Impl::WireVideoBranch(graph::OutputPort* demux_output) {
-    auto* vdec = static_cast<graph::DecoderNode*>(
-        graph_->AddNode(std::make_unique<graph::DecoderNode>()));
-    auto* vsink = static_cast<graph::VideoSinkNode*>(
-        graph_->AddNode(std::make_unique<graph::VideoSinkNode>()));
-    vsink->SetRenderer(&video_renderer_);
-
-    graph_->Connect(demux_output, vdec->Inputs()[0], graph::LinkCapacity::ForPackets());
-    graph::OutputPort* effect_out = WireVideoEffects(vdec);
-    graph_->Connect(effect_out, vsink->Inputs()[0],
-                    graph::LinkCapacity::ForFrames(kVideoFrameDepth));
+PlayerOptions MediaPlayer::Impl::Options() const {
+    std::lock_guard lock(mutex_);
+    return options_;
 }
 
-void MediaPlayer::Impl::WireAudioBranch(graph::OutputPort* demux_output) {
-    auto* adec = static_cast<graph::DecoderNode*>(
-        graph_->AddNode(std::make_unique<graph::DecoderNode>()));
-    auto* asink = static_cast<graph::AudioSinkNode*>(
-        graph_->AddNode(std::make_unique<graph::AudioSinkNode>()));
-
-    graph_->Connect(demux_output, adec->Inputs()[0], graph::LinkCapacity::ForPackets());
-    graph_->Connect(adec->Outputs()[0], asink->Inputs()[0],
-                    graph::LinkCapacity::ForFrames(kAudioFrameDepth));
+void MediaPlayer::Impl::SetFinishedCallback(MediaPlayer::FinishedCallback cb) {
+    std::lock_guard lock(mutex_);
+    finished_cb_ = std::move(cb);
 }
 
-graph::OutputPort* MediaPlayer::Impl::WireVideoEffects(graph::DecoderNode* vdec) {
-    auto* transform = static_cast<graph::TransformEffectNode*>(
-        graph_->AddNode(std::make_unique<graph::TransformEffectNode>()));
-    auto* color = static_cast<graph::ColorEffectNode*>(
-        graph_->AddNode(std::make_unique<graph::ColorEffectNode>()));
+// --- Impl: effects ---
 
-    graph_->Connect(vdec->Outputs()[0], transform->Inputs()[0],
-                    graph::LinkCapacity::ForFrames(kVideoFrameDepth));
-    graph_->Connect(transform->Outputs()[0], color->Inputs()[0],
-                    graph::LinkCapacity::ForFrames(kVideoFrameDepth));
-
-    effect_manager_.Register("transform", "Transform", transform);
-    effect_manager_.Register("color", "Color", color);
-
-    return color->Outputs()[0];
+std::vector<EffectInfo> MediaPlayer::Impl::EffectInfos() const {
+    std::lock_guard lock(mutex_);
+    return effect_manager_.Describe();
 }
 
-void MediaPlayer::Impl::OnGraphEvent(graph::GraphEvent event) {
-    if (event == graph::GraphEvent::kEos) {
-        eos_count_++;
-        if (eos_count_ >= sink_count_) {
-            state_ = PlaybackState::kFinished;
-            graph_->SetPaused(true);
-            if (finished_cb_) finished_cb_();
-        }
-    } else if (event == graph::GraphEvent::kError) {
-        state_ = PlaybackState::kError;
+void MediaPlayer::Impl::SetEffectParam(const std::string& effect_id,
+                                       const std::string& param_id, EffectParamValue value) {
+    std::lock_guard lock(mutex_);
+    if (effect_manager_.SetParam(effect_id, param_id, value)) {
+        RefreshLocked();
+    }
+}
+
+void MediaPlayer::Impl::SetEffectEnabled(const std::string& effect_id, bool enabled) {
+    std::lock_guard lock(mutex_);
+    if (effect_manager_.SetEnabled(effect_id, enabled)) {
+        RefreshLocked();
+    }
+}
+
+void MediaPlayer::Impl::ResetEffectParams(const std::string& effect_id) {
+    std::lock_guard lock(mutex_);
+    if (effect_manager_.ResetParams(effect_id)) {
+        RefreshLocked();
     }
 }
 
@@ -378,5 +310,14 @@ void MediaPlayer::SetEffectParam(const std::string& effect_id, const std::string
 void MediaPlayer::SetEffectEnabled(const std::string& effect_id, bool enabled) {
     impl_->SetEffectEnabled(effect_id, enabled);
 }
+
+void MediaPlayer::ResetEffectParams(const std::string& effect_id) {
+    impl_->ResetEffectParams(effect_id);
+}
+
+void MediaPlayer::SetOptions(const PlayerOptions& options) { impl_->SetOptions(options); }
+PlayerOptions MediaPlayer::Options() const { return impl_->Options(); }
+PipelineInfo MediaPlayer::GetPipelineInfo() const { return impl_->GetPipelineInfo(); }
+CapturedFrame MediaPlayer::CaptureFrame() const { return impl_->CaptureFrame(); }
 
 }  // namespace mvp

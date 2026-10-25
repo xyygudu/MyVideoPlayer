@@ -57,12 +57,16 @@ Clock::Clock() {
 // Set — update the clock to a new PTS value, recording current wall-time.
 // ---------------------------------------------------------------------------
 
-void Clock::Set(double pts) {
+void Clock::Set(double pts, int serial) {
     std::lock_guard<std::mutex> lock(write_mutex_);
+    if (serial < serial_) {
+        return;  // Data from before the last seek.
+    }
     BeginWrite();
     pts_ = pts;
     last_updated_ = Now();
     EndWrite();
+    serial_ = serial;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,13 +158,14 @@ void Clock::SetSpeed(double speed) {
     EndWrite();
 }
 
-void Clock::Reset(double pts) {
+void Clock::Reset(double pts, int serial) {
     std::lock_guard<std::mutex> lock(write_mutex_);
     BeginWrite();
     pts_ = pts;
     last_updated_ = Now();
     speed_ = 1.0;
     EndWrite();
+    serial_ = serial;
 }
 
 }  // namespace mvp

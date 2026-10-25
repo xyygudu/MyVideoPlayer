@@ -5,6 +5,9 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/pixdesc.h>
+#include <libavutil/samplefmt.h>
 }
 #include <spdlog/spdlog.h>
 
@@ -32,7 +35,9 @@ void FillVideoStream(AVStream* st, int index, SourceInfo& info) {
     vs.height = codecpar->height;
     vs.frame_rate_num = st->avg_frame_rate.num;
     vs.frame_rate_den = st->avg_frame_rate.den;
-    vs.pix_fmt = static_cast<int>(codecpar->format);
+    if (const char* name = av_get_pix_fmt_name(static_cast<AVPixelFormat>(codecpar->format))) {
+        vs.pixel_format = name;
+    }
     vs.bit_rate = codecpar->bit_rate;
     info.video_streams.push_back(std::move(vs));
 }
@@ -45,8 +50,13 @@ void FillAudioStream(AVStream* st, int index, SourceInfo& info) {
     if (desc) as_.codec_name = desc->name;
     as_.sample_rate = codecpar->sample_rate;
     as_.channels = codecpar->ch_layout.nb_channels;
-    as_.channel_layout = codecpar->ch_layout.u.mask;
-    as_.sample_fmt = static_cast<int>(codecpar->format);
+    char layout[64] = {};
+    if (av_channel_layout_describe(&codecpar->ch_layout, layout, sizeof(layout)) > 0) {
+        as_.channel_layout = layout;
+    }
+    if (const char* name = av_get_sample_fmt_name(static_cast<AVSampleFormat>(codecpar->format))) {
+        as_.sample_format = name;
+    }
     as_.bit_rate = codecpar->bit_rate;
     info.audio_streams.push_back(std::move(as_));
 }
