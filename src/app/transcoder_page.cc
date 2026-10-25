@@ -1,20 +1,15 @@
 #include "transcoder_page.h"
 
 #include <QComboBox>
-#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFont>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QPainter>
-#include <QPixmap>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSpinBox>
-#include <QSvgRenderer>
 #include <QVBoxLayout>
 
 #include <spdlog/spdlog.h>
@@ -22,34 +17,12 @@
 #include "icon_button.h"
 #include "app_theme.h"
 #include "mvp/container_probe.h"
+#include "shared_ui.h"
 
 namespace {
 
-QIcon LoadButtonIcon(const QString& resource_path, int size) {
-    SPDLOG_DEBUG("LoadButtonIcon: loading {} at {}px", resource_path.toStdString(), size);
-    QFile file(resource_path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        SPDLOG_ERROR("LoadButtonIcon: FAILED to open {}", resource_path.toStdString());
-        return {};
-    }
-    qint64 bytes = file.size();
-    QString svg = QString::fromUtf8(file.readAll());
-    SPDLOG_DEBUG("LoadButtonIcon: read {} bytes from {}", bytes, resource_path.toStdString());
-    svg.replace(QStringLiteral("currentColor"), ui_theme::kTextPrimary.name());
-    QSvgRenderer renderer(svg.toUtf8());
-    if (!renderer.isValid()) {
-        SPDLOG_ERROR("LoadButtonIcon: QSvgRenderer invalid for {}", resource_path.toStdString());
-        return {};
-    }
-    QPixmap pixmap(size, size);
-    pixmap.fill(Qt::transparent);
-    {
-        QPainter p(&pixmap);
-        renderer.render(&p, QRectF(0, 0, size, size));
-    }
-    SPDLOG_DEBUG("LoadButtonIcon: success for {}", resource_path.toStdString());
-    return QIcon(pixmap);
-}
+using shared_ui::LoadSvgIcon;
+using shared_ui::MakeSectionHeader;
 
 struct QualityPreset {
     int crf;
@@ -63,75 +36,6 @@ constexpr QualityPreset kQualityPresets[3] = {
     {28, "fast"},
 };
 
-QString BuildFormStyleSheet() {
-    return QStringLiteral(R"(
-QLineEdit, QComboBox, QSpinBox {
-    border: 1px solid %1;
-    border-radius: 6px;
-    padding: 5px 10px;
-    background: #FFFFFF;
-    min-height: 26px;
-    font-size: 13px;
-}
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid %2; }
-QSpinBox::up-button, QSpinBox::down-button {
-    border: none;
-    background: %4;
-    border-radius: 4px;
-    width: 22px;
-}
-QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: %1; }
-QSpinBox::up-arrow { image: url(:/icons/spin_up.svg); width: 10px; height: 10px; }
-QSpinBox::down-arrow { image: url(:/icons/spin_down.svg); width: 10px; height: 10px; }
-QComboBox::drop-down { border: none; width: 24px; }
-QComboBox::down-arrow { width: 10px; height: 10px; }
-QComboBox QAbstractItemView {
-    border: 1px solid %1;
-    border-radius: 4px;
-    background: #FFFFFF;
-    selection-background-color: %3;
-    outline: none;
-    font-size: 13px;
-    padding: 4px;
-}
-QComboBox QAbstractItemView::item {
-    min-height: 24px;
-    padding: 4px 8px;
-}
-QPushButton#StartCancelButton {
-    background: %2;
-    color: white;
-    border: none;
-    border-radius: 6px;
-    padding: 10px 0px;
-    font-weight: 600;
-    font-size: 14px;
-}
-QPushButton#StartCancelButton:hover { background: #3D68E8; }
-QPushButton#StartCancelButton:disabled { background: #C7D3F5; color: #F5F6F8; }
-QProgressBar {
-    border: 1px solid %1;
-    border-radius: 6px;
-    text-align: center;
-    background: %4;
-    height: 16px;
-}
-QProgressBar::chunk { background: %2; border-radius: 5px; }
-QLabel { font-size: 12px; }
-)")
-        .arg(ui_theme::kBorder.name(), ui_theme::kAccent.name(), ui_theme::kAccentSoft.name(),
-             ui_theme::kBgNav.name());
-}
-
-QLabel* MakeSectionHeader(const QString& text, QWidget* parent) {
-    auto* label = new QLabel(text, parent);
-    QFont font = label->font();
-    font.setBold(true);
-    font.setPointSize(11);
-    label->setFont(font);
-    return label;
-}
-
 }  // namespace
 
 TranscoderPage::TranscoderPage(QWidget* parent) : QWidget(parent) {
@@ -139,7 +43,7 @@ TranscoderPage::TranscoderPage(QWidget* parent) : QWidget(parent) {
     QPalette pal = palette();
     pal.setColor(QPalette::Window, ui_theme::kBgContent);
     setPalette(pal);
-    setStyleSheet(BuildFormStyleSheet());
+    setStyleSheet(shared_ui::FormStyleSheet());
     SetupUi();
 }
 
@@ -174,7 +78,7 @@ QWidget* TranscoderPage::BuildFileSection() {
     source_row->addWidget(source_path_edit_, 1);
     browse_source_btn_ = new IconButton(IconButton::IconKind::kOpenFolder, container);
     browse_source_btn_->setFixedSize(30, 30);
-    browse_source_btn_->SetCustomIcon(LoadButtonIcon(QStringLiteral(":/icons/file_open.svg"), 18));
+    browse_source_btn_->SetCustomIcon(LoadSvgIcon(QStringLiteral(":/icons/file_open.svg"), 18));
     connect(browse_source_btn_, &QAbstractButton::clicked, this, &TranscoderPage::OnBrowseSource);
     source_row->addWidget(browse_source_btn_);
     v->addLayout(source_row);
@@ -189,7 +93,7 @@ QWidget* TranscoderPage::BuildFileSection() {
     output_row->addWidget(output_path_edit_, 1);
     browse_output_btn_ = new IconButton(IconButton::IconKind::kOpenFolder, container);
     browse_output_btn_->setFixedSize(30, 30);
-    browse_output_btn_->SetCustomIcon(LoadButtonIcon(QStringLiteral(":/icons/file_open.svg"), 18));
+    browse_output_btn_->SetCustomIcon(LoadSvgIcon(QStringLiteral(":/icons/file_open.svg"), 18));
     connect(browse_output_btn_, &QAbstractButton::clicked, this, &TranscoderPage::OnBrowseOutput);
     output_row->addWidget(browse_output_btn_);
     v->addLayout(output_row);
@@ -259,7 +163,7 @@ QWidget* TranscoderPage::BuildAdvancedHeader(QWidget* parent) {
     advanced_chevron_ = new IconButton(IconButton::IconKind::kChevronRight, header);
     advanced_chevron_->setFixedSize(18, 18);
     advanced_chevron_->SetCustomIcon(
-        LoadButtonIcon(QStringLiteral(":/icons/chevron_right.svg"), 16));
+        LoadSvgIcon(QStringLiteral(":/icons/chevron_right.svg"), 16));
     connect(advanced_chevron_, &QAbstractButton::clicked, this,
             &TranscoderPage::OnAdvancedToggled);
     header_layout->addWidget(advanced_chevron_);
@@ -318,7 +222,7 @@ QWidget* TranscoderPage::BuildActionSection() {
     v->setSpacing(10);
 
     start_cancel_btn_ = new QPushButton(QStringLiteral("\u5F00\u59CB\u8F6C\u7801"), container);
-    start_cancel_btn_->setObjectName(QStringLiteral("StartCancelButton"));
+    start_cancel_btn_->setObjectName(QStringLiteral("PrimaryButton"));
     start_cancel_btn_->setFixedHeight(38);
     start_cancel_btn_->setEnabled(false);
     connect(start_cancel_btn_, &QPushButton::clicked, this,
@@ -378,9 +282,9 @@ void TranscoderPage::OnAdvancedToggled() {
     bool now_visible = !advanced_body_->isVisible();
     advanced_body_->setVisible(now_visible);
     advanced_chevron_->SetCustomIcon(
-        LoadButtonIcon(now_visible ? QStringLiteral(":/icons/chevron_down.svg")
-                                   : QStringLiteral(":/icons/chevron_right.svg"),
-                       16));
+        LoadSvgIcon(now_visible ? QStringLiteral(":/icons/chevron_down.svg")
+                                : QStringLiteral(":/icons/chevron_right.svg"),
+                    16));
     advanced_chevron_->SetIconKind(now_visible ? IconButton::IconKind::kChevronDown
                                                : IconButton::IconKind::kChevronRight);
 }

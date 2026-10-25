@@ -10,15 +10,16 @@ class QStackedWidget;
 class QVBoxLayout;
 class HomePage;
 class PlayerPage;
+class RecorderPage;
 class SettingsPage;
 class TranscoderPage;
 
 /// Frameless application shell: `NavigationBar` spans the full window
 /// height on the left; to its right, `TitleBar` sits above a
-/// `QStackedWidget` (Home/Player/Transcoder/Settings, all persistent — never
-/// recreated on navigation) so the title bar never extends over the nav
-/// column. See the app-shell-ui spec for full requirements (drag-to-move/
-/// resize, window controls, navigation).
+/// `QStackedWidget` (Home/Player/Transcoder/Recorder/Settings, all
+/// persistent — never recreated on navigation) so the title bar never
+/// extends over the nav column. See the app-shell-ui spec for full
+/// requirements (drag-to-move/resize, window controls, navigation).
 class MainWindow : public QWidget {
     Q_OBJECT
 
@@ -42,6 +43,7 @@ class MainWindow : public QWidget {
     HomePage* home_page_{nullptr};
     PlayerPage* player_page_{nullptr};
     TranscoderPage* transcoder_page_{nullptr};
+    RecorderPage* recorder_page_{nullptr};
     SettingsPage* settings_page_{nullptr};
 };
 

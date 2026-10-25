@@ -2,16 +2,12 @@
 
 #include <cmath>
 
-#include <QFile>
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QMouseEvent>
-#include <QPainter>
-#include <QPixmap>
 #include <QSplitter>
 #include <QStyle>
 #include <QStyleOptionSlider>
-#include <QSvgRenderer>
 #include <QVBoxLayout>
 
 #include <spdlog/spdlog.h>
@@ -19,35 +15,12 @@
 #include "effect_panel.h"
 #include "icon_button.h"
 #include "app_theme.h"
+#include "shared_ui.h"
 #include "video_widget.h"
 
 namespace {
 
-QIcon LoadButtonIcon(const QString& resource_path, int size) {
-    SPDLOG_DEBUG("LoadButtonIcon: loading {} at {}px", resource_path.toStdString(), size);
-    QFile file(resource_path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        SPDLOG_ERROR("LoadButtonIcon: FAILED to open {}", resource_path.toStdString());
-        return {};
-    }
-    qint64 bytes = file.size();
-    QString svg = QString::fromUtf8(file.readAll());
-    SPDLOG_DEBUG("LoadButtonIcon: read {} bytes from {}", bytes, resource_path.toStdString());
-    svg.replace(QStringLiteral("currentColor"), ui_theme::kTextPrimary.name());
-    QSvgRenderer renderer(svg.toUtf8());
-    if (!renderer.isValid()) {
-        SPDLOG_ERROR("LoadButtonIcon: QSvgRenderer invalid for {}", resource_path.toStdString());
-        return {};
-    }
-    QPixmap pixmap(size, size);
-    pixmap.fill(Qt::transparent);
-    {
-        QPainter p(&pixmap);
-        renderer.render(&p, QRectF(0, 0, size, size));
-    }
-    SPDLOG_DEBUG("LoadButtonIcon: success for {}", resource_path.toStdString());
-    return QIcon(pixmap);
-}
+using shared_ui::LoadSvgIcon;
 
 }  // namespace
 
@@ -113,13 +86,13 @@ QWidget* PlayerPage::BuildControlBar() {
 
     open_btn_ = new IconButton(IconButton::IconKind::kOpenFolder, control_widget);
     open_btn_->setFixedSize(32, 32);
-    open_btn_->SetCustomIcon(LoadButtonIcon(QStringLiteral(":/icons/file_open.svg"), 20));
+    open_btn_->SetCustomIcon(LoadSvgIcon(QStringLiteral(":/icons/file_open.svg"), 20));
     connect(open_btn_, &QAbstractButton::clicked, this, &PlayerPage::OnOpenFile);
     control_layout->addWidget(open_btn_);
 
     play_pause_btn_ = new IconButton(IconButton::IconKind::kPlay, control_widget);
     play_pause_btn_->setFixedSize(32, 32);
-    play_pause_btn_->SetCustomIcon(LoadButtonIcon(QStringLiteral(":/icons/play.svg"), 20));
+    play_pause_btn_->SetCustomIcon(LoadSvgIcon(QStringLiteral(":/icons/play.svg"), 20));
     connect(play_pause_btn_, &QAbstractButton::clicked, this, &PlayerPage::OnPlayPause);
     control_layout->addWidget(play_pause_btn_);
 
@@ -146,7 +119,10 @@ void PlayerPage::OnOpenFile() {
         this, QStringLiteral("\u6253\u5F00\u89C6\u9891\u6587\u4EF6"), QString(),
         "Video Files (*.mp4 *.avi *.mkv *.mov *.flv *.wmv *.webm *.ts *.m2ts);;All Files (*)");
     if (filepath.isEmpty()) return;
+    OpenFile(filepath);
+}
 
+void PlayerPage::OpenFile(const QString& filepath) {
     SPDLOG_INFO("UI: open file '{}'", filepath.toStdString());
     player_->Close();
     video_widget_->SetVideoPlaying(false);
@@ -154,7 +130,7 @@ void PlayerPage::OnOpenFile() {
         player_->Play();
         video_widget_->SetVideoPlaying(true);
         play_pause_btn_->SetCustomIcon(
-            LoadButtonIcon(QStringLiteral(":/icons/pause.svg"), 20));
+            LoadSvgIcon(QStringLiteral(":/icons/pause.svg"), 20));
         play_pause_btn_->SetIconKind(IconButton::IconKind::kPause);
     }
     effect_panel_->RefreshFromPlayer(player_.get());
@@ -165,13 +141,13 @@ void PlayerPage::OnPlayPause() {
         SPDLOG_INFO("UI: pause");
         player_->Pause();
         play_pause_btn_->SetCustomIcon(
-            LoadButtonIcon(QStringLiteral(":/icons/play.svg"), 20));
+            LoadSvgIcon(QStringLiteral(":/icons/play.svg"), 20));
         play_pause_btn_->SetIconKind(IconButton::IconKind::kPlay);
     } else {
         SPDLOG_INFO("UI: play");
         player_->Play();
         play_pause_btn_->SetCustomIcon(
-            LoadButtonIcon(QStringLiteral(":/icons/pause.svg"), 20));
+            LoadSvgIcon(QStringLiteral(":/icons/pause.svg"), 20));
         play_pause_btn_->SetIconKind(IconButton::IconKind::kPause);
     }
 }
@@ -223,7 +199,7 @@ void PlayerPage::OnStateChanged(mvp::PlaybackState state) {
     if (state != mvp::PlaybackState::kFinished && state != mvp::PlaybackState::kError) {
         return;  // User-driven transitions already updated the controls.
     }
-    play_pause_btn_->SetCustomIcon(LoadButtonIcon(QStringLiteral(":/icons/play.svg"), 20));
+    play_pause_btn_->SetCustomIcon(LoadSvgIcon(QStringLiteral(":/icons/play.svg"), 20));
     play_pause_btn_->SetIconKind(IconButton::IconKind::kPlay);
 }
 

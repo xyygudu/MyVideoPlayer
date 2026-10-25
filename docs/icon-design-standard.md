@@ -45,9 +45,9 @@
 
 | 用途 | C++ 函数 | 输出 | 颜色转换 |
 |------|---------|------|---------|
-| 导航栏图标 | `CreateNavIcon(path)` | QIcon 18×18 | currentColor → kTextPrimary |
+| 导航栏图标 | `CreateNavIcon(path)`（内部调用 `shared_ui::LoadSvgIcon`） | QIcon 18×18 | currentColor → kTextPrimary |
 | 首页卡片缩略图 | `LoadAccentSvg(path, 48)` | QPixmap 48×48 | currentColor → kAccent |
-| IconButton 自定义 | `LoadButtonIcon(path, size)` | QIcon ~16×16 | currentColor → kTextPrimary |
+| IconButton 自定义 | `shared_ui::LoadSvgIcon(path, size[, color])` | QIcon ~16×16 | currentColor → kTextPrimary（或指定颜色，如录屏工具条用白色） |
 | QSpinBox 样式表 | `image: url(...)` in QSS | 10×10 | `#1F2329` 固化 |
 
 ## 新增图标步骤

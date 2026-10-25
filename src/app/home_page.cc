@@ -20,6 +20,22 @@ void PaintCoverImage(QPainter& painter, const QRectF& target, const QPixmap& pix
     painter.drawPixmap(target, pix, src);
 }
 
+// A monitor with a record dot, drawn in the accent color (no image asset).
+void PaintRecorderThumbnail(QPainter& painter, const QRectF& r) {
+    painter.fillRect(r, ui_theme::kAccentSoft);
+    painter.setRenderHint(QPainter::Antialiasing);
+    const QPointF center = r.center();
+    const QRectF screen(center.x() - 66, center.y() - 46, 132, 80);
+    painter.setPen(QPen(ui_theme::kAccent, 6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    painter.setBrush(Qt::white);
+    painter.drawRoundedRect(screen, 10, 10);
+    painter.drawLine(QPointF(center.x(), screen.bottom() + 3), QPointF(center.x(), screen.bottom() + 15));
+    painter.drawLine(QPointF(center.x() - 24, screen.bottom() + 18), QPointF(center.x() + 24, screen.bottom() + 18));
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0xE5, 0x48, 0x4D));
+    painter.drawEllipse(screen.center(), 15, 15);
+}
+
 }  // namespace
 
 HomePage::HomePage(QWidget* parent) : QWidget(parent) {
@@ -60,4 +76,15 @@ void HomePage::SetupUi() {
     connect(transcoder_card, &DashboardCard::Clicked, this,
             [this] { emit NavigateRequested(NavigationBar::Page::kTranscoder); });
     layout->addWidget(transcoder_card);
+
+    auto* recorder_card = new DashboardCard(
+        QStringLiteral("\u5F55\u5C4F"),  // 录屏
+        // 录制全屏、窗口或选定区域，可同时录制系统声音、麦克风与摄像头画面。
+        QStringLiteral("\u5F55\u5236\u5168\u5C4F\u3001\u7A97\u53E3\u6216\u9009\u5B9A\u533A\u57DF\uFF0C"
+                       "\u53EF\u540C\u65F6\u5F55\u5236\u7CFB\u7EDF\u58F0\u97F3\u3001\u9EA6\u514B\u98CE"
+                       "\u4E0E\u6444\u50CF\u5934\u753B\u9762\u3002"),
+        PaintRecorderThumbnail, this);
+    connect(recorder_card, &DashboardCard::Clicked, this,
+            [this] { emit NavigateRequested(NavigationBar::Page::kRecorder); });
+    layout->addWidget(recorder_card);
 }

@@ -28,6 +28,9 @@ class PlayerPage : public QWidget {
     /// The page's player; lives as long as the page.
     mvp::MediaPlayer* player() const { return player_.get(); }
 
+    /// Opens and plays a file, as if picked with the open button.
+    void OpenFile(const QString& filepath);
+
   protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
 

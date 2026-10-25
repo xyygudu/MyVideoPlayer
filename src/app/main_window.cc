@@ -10,6 +10,7 @@
 
 #include "home_page.h"
 #include "player_page.h"
+#include "recorder_page.h"
 #include "settings_page.h"
 #include "title_bar.h"
 #include "transcoder_page.h"
@@ -55,11 +56,17 @@ QVBoxLayout* MainWindow::BuildContentColumn() {
     connect(home_page_, &HomePage::NavigateRequested, this, &MainWindow::NavigateTo);
     player_page_ = new PlayerPage(stacked_widget_);
     transcoder_page_ = new TranscoderPage(stacked_widget_);
+    recorder_page_ = new RecorderPage(stacked_widget_);
+    connect(recorder_page_, &RecorderPage::PlayRequested, this, [this](const QString& path) {
+        NavigateTo(NavigationBar::Page::kPlayer);
+        player_page_->OpenFile(path);
+    });
     settings_page_ = new SettingsPage(player_page_->player(), stacked_widget_);
 
     stacked_widget_->addWidget(home_page_);
     stacked_widget_->addWidget(player_page_);
     stacked_widget_->addWidget(transcoder_page_);
+    stacked_widget_->addWidget(recorder_page_);
     stacked_widget_->addWidget(settings_page_);
     column->addWidget(stacked_widget_, 1);
 
@@ -87,6 +94,10 @@ void MainWindow::NavigateTo(NavigationBar::Page page) {
         case NavigationBar::Page::kTranscoder:
             target = transcoder_page_;
             title = QStringLiteral("\u8F6C\u7801\u5668");  // 转码器
+            break;
+        case NavigationBar::Page::kRecorder:
+            target = recorder_page_;
+            title = QStringLiteral("\u5F55\u5C4F");  // 录屏
             break;
         case NavigationBar::Page::kSettings:
             target = settings_page_;

@@ -1,47 +1,22 @@
 #include "navigation_bar.h"
 
 #include <QEvent>
-#include <QFile>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
-#include <QPainter>
 #include <QPixmap>
-#include <QSvgRenderer>
 #include <QVBoxLayout>
 
 #include "icon_button.h"
 #include "nav_item.h"
 #include "app_theme.h"
-
-#include <spdlog/spdlog.h>
+#include "shared_ui.h"
 
 namespace {
 
 QIcon CreateNavIcon(const QString& resource_path) {
-    SPDLOG_DEBUG("CreateNavIcon: loading {}", resource_path.toStdString());
-    QFile file(resource_path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        SPDLOG_ERROR("CreateNavIcon: FAILED to open {}", resource_path.toStdString());
-        return {};
-    }
-    QString svg = QString::fromUtf8(file.readAll());
-    SPDLOG_DEBUG("CreateNavIcon: read {} bytes from {}", file.size(), resource_path.toStdString());
-    svg.replace(QStringLiteral("currentColor"), ui_theme::kTextPrimary.name());
-    QSvgRenderer renderer(svg.toUtf8());
-    if (!renderer.isValid()) {
-        SPDLOG_ERROR("CreateNavIcon: QSvgRenderer invalid for {}", resource_path.toStdString());
-        return {};
-    }
-    QPixmap pixmap(ui_theme::kNavIconSize, ui_theme::kNavIconSize);
-    pixmap.fill(Qt::transparent);
-    {
-        QPainter p(&pixmap);
-        renderer.render(&p, QRectF(0, 0, ui_theme::kNavIconSize, ui_theme::kNavIconSize));
-    }
-    SPDLOG_DEBUG("CreateNavIcon: success for {}", resource_path.toStdString());
-    return QIcon(pixmap);
+    return shared_ui::LoadSvgIcon(resource_path, ui_theme::kNavIconSize);
 }
 
 }  // namespace
@@ -150,6 +125,11 @@ QWidget* NavigationBar::BuildQuickAccessBody() {
     connect(transcoder_item_, &NavItem::Clicked, this, [this] { SelectItem(Page::kTranscoder); });
     qa_body_layout->addWidget(transcoder_item_);
 
+    recorder_item_ = new NavItem(QStringLiteral("\u5F55\u5C4F"), quick_access_body_);  // 录屏
+    recorder_item_->SetIcon(CreateNavIcon(QStringLiteral(":/icons/recorder.svg")));
+    connect(recorder_item_, &NavItem::Clicked, this, [this] { SelectItem(Page::kRecorder); });
+    qa_body_layout->addWidget(recorder_item_);
+
     return quick_access_body_;
 }
 
@@ -166,6 +146,7 @@ void NavigationBar::UpdateSelection(Page page) {
     home_item_->SetSelected(page == Page::kHome);
     player_item_->SetSelected(page == Page::kPlayer);
     transcoder_item_->SetSelected(page == Page::kTranscoder);
+    recorder_item_->SetSelected(page == Page::kRecorder);
     settings_item_->SetSelected(page == Page::kSettings);
     current_page_ = page;
 }
