@@ -2,9 +2,7 @@
 
 Defines the Home page: a responsive card grid with one card per tool
 (Player, Transcoder), used to navigate into that tool.
-
 ## Requirements
-
 ### Requirement: Responsive card grid
 `HomePage` SHALL lay out its cards using a custom `FlowLayout` with 24px
 content padding, so cards reflow (wrap to the next row) as the window is
@@ -50,3 +48,11 @@ the navigation bar's selected item to match.
 - **WHEN** the user clicks the "转码器" card
 - **THEN** the content area switches to `TranscoderPage` and the "转码器"
   nav item becomes selected, identical to clicking the nav item directly
+
+### Requirement: 主页提供录屏卡片
+HomePage SHALL 在播放器、转码器卡片之后提供「录屏」卡片：缩略图为代码绘制的强调色显示器与红色录制圆点（不依赖图片资源），描述为「录制全屏、窗口或选定区域，可同时录制系统声音、麦克风与摄像头画面。」点击 SHALL 发出 `NavigateRequested(Page::kRecorder)`。
+
+#### Scenario: 点击录屏卡片
+- **WHEN** 在主页点击「录屏」卡片
+- **THEN** 切换到录屏页，导航栏「录屏」项变为选中态
+
