@@ -1,19 +1,20 @@
-// Windows implementation of capture::CameraSource on the Media Foundation
-// source reader, which decodes (MJPEG) and converts the camera output to RGB32.
-#include "capture/camera_source.h"
-
-#include "capture/win/win_util.h"  // First: configures <windows.h>
+// Windows implementation of capture::CameraSource on the Media Foundation source
+// reader in asynchronous mode, which decodes (MJPEG) and converts the camera
+// output to RGB32.
+#include "capture/win/mf_camera_source.h"
 
 #include <mfapi.h>
 #include <mferror.h>
-#include <mfidl.h>
 #include <mfreadwrite.h>
-#include <wrl/client.h>
+#include <wrl/implements.h>
 
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <optional>
+#include <utility>
 
 #include <spdlog/spdlog.h>
 
@@ -22,7 +23,11 @@
 namespace mvp::capture {
 namespace {
 
+using Microsoft::WRL::ClassicCom;
 using Microsoft::WRL::ComPtr;
+using Microsoft::WRL::Make;
+using Microsoft::WRL::RuntimeClass;
+using Microsoft::WRL::RuntimeClassFlags;
 
 constexpr DWORD kVideoStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
 // The overlay is small: a 720p camera mode is plenty and cheap to convert.
@@ -52,9 +57,86 @@ double ModeCost(const NativeMode& mode) {
     return area_cost + (mode.fps < kMinFrameRate ? 1e12 : 0.0);
 }
 
+// The capture device `device_id` (the first camera when empty).
+ComPtr<IMFMediaSource> OpenCaptureDevice(const std::string& device_id, std::string* name) {
+    std::string id = device_id;
+    for (const CameraInfo& camera : win::EnumerateCameras()) {
+        if (id.empty() || camera.id == id) {
+            id = camera.id;
+            *name = camera.name;
+            break;
+        }
+    }
+    if (id.empty()) {
+        SPDLOG_WARN("MfCameraSource: no camera connected");
+        return nullptr;
+    }
+    ComPtr<IMFAttributes> attributes;
+    HRESULT hr = MFCreateAttributes(&attributes, 2);
+    if (SUCCEEDED(hr)) {
+        hr = attributes->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = attributes->SetString(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, win::ToWide(id).c_str());
+    }
+    ComPtr<IMFMediaSource> source;
+    if (SUCCEEDED(hr)) hr = MFCreateDeviceSource(attributes.Get(), &source);
+    if (FAILED(hr)) {
+        SPDLOG_WARN("MfCameraSource: opening the camera failed for '{}' ({})", *name, win::HresultString(hr));
+        return nullptr;
+    }
+    return source;
+}
+
+// Async reads: a synchronous ReadSample cannot be cancelled, not even by shutting the source down.
+// One per reader (which keeps it alive, so late results land here). Written by Media Foundation
+// worker threads and Interrupt(), read by the capture thread.
+class ReadCallback : public RuntimeClass<RuntimeClassFlags<ClassicCom>, IMFSourceReaderCallback> {
+  public:
+    struct Result {
+        HRESULT status{S_OK};
+        DWORD flags{0};
+        ComPtr<IMFSample> sample;  // Null for a stream tick or an error
+    };
+
+    STDMETHODIMP OnReadSample(HRESULT status, DWORD, DWORD flags, LONGLONG, IMFSample* sample) override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            result_ = Result{status, flags, sample};
+        }
+        ready_.notify_all();
+        return S_OK;
+    }
+    STDMETHODIMP OnFlush(DWORD) override { return S_OK; }
+    STDMETHODIMP OnEvent(DWORD, IMFMediaEvent*) override { return S_OK; }
+
+    /// The result of the pending request; nullopt once interrupted.
+    std::optional<Result> Wait() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        ready_.wait(lock, [this] { return result_.has_value() || interrupted_; });
+        if (interrupted_) return std::nullopt;
+        return std::exchange(result_, std::nullopt);
+    }
+
+    /// Ends the current Wait() and makes every later one return at once.
+    void Interrupt() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            interrupted_ = true;
+        }
+        ready_.notify_all();
+    }
+
+  private:
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::optional<Result> result_;
+    bool interrupted_{false};
+};
+
 class MfCameraSource : public CameraSource {
   public:
-    explicit MfCameraSource(std::string device_id) : device_id_(std::move(device_id)) {}
+    explicit MfCameraSource(win::MediaSourceFactory factory) : factory_(std::move(factory)) {}
     ~MfCameraSource() override { Close(); }
 
     bool Open() override;
@@ -71,16 +153,21 @@ class MfCameraSource : public CameraSource {
     bool CreateReader();
     bool SelectNativeMode();
     bool SelectOutputType();
+    bool Interrupted();
+    ReadStatus Deliver(const ReadCallback::Result& result, uint8_t* dst, int stride);
     bool CopySample(IMFSample* sample, uint8_t* dst, int stride) const;
     bool Failed(const char* what, HRESULT hr) const;
 
-    const std::string device_id_;
+    const win::MediaSourceFactory factory_;
     std::unique_ptr<win::ScopedCom> com_;
     std::unique_ptr<win::ScopedMediaFoundation> mf_;
-    std::mutex source_mutex_;  // Guards source_ and interrupted_ against Interrupt()
     ComPtr<IMFMediaSource> source_;
-    bool interrupted_{false};  // Sticky: once interrupted, every Read returns at once
     ComPtr<IMFSourceReader> reader_;
+    // Guards callback_ (written on the capture thread) and interrupted_ against Interrupt().
+    std::mutex callback_mutex_;
+    ComPtr<ReadCallback> callback_;
+    bool interrupted_{false};   // Sticky: once interrupted, every Read returns at once
+    bool read_pending_{false};  // Capture thread: a request awaits its result in callback_
     std::string name_;
     int width_{0};
     int height_{0};
@@ -106,39 +193,26 @@ bool MfCameraSource::Open() {
 }
 
 bool MfCameraSource::CreateSource() {
-    std::string id = device_id_;
-    for (const CameraInfo& camera : win::EnumerateCameras()) {
-        if (id.empty() || camera.id == id) {
-            id = camera.id;
-            name_ = camera.name;
-            break;
-        }
-    }
-    if (id.empty()) {
-        SPDLOG_WARN("MfCameraSource: no camera connected");
-        return false;
-    }
-    ComPtr<IMFAttributes> attributes;
-    HRESULT hr = MFCreateAttributes(&attributes, 2);
-    if (SUCCEEDED(hr)) {
-        attributes->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID);
-        attributes->SetString(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, win::ToWide(id).c_str());
-        ComPtr<IMFMediaSource> source;
-        hr = MFCreateDeviceSource(attributes.Get(), &source);
-        std::lock_guard<std::mutex> lock(source_mutex_);
-        source_ = source;
-        if (interrupted_ && source_) {
-            source_->Shutdown();  // Interrupted while opening: reads must not block
-        }
-    }
-    return SUCCEEDED(hr) || Failed("opening the camera", hr);
+    source_ = factory_(&name_);
+    return source_ != nullptr;
 }
 
 bool MfCameraSource::CreateReader() {
+    ComPtr<ReadCallback> callback = Make<ReadCallback>();
+    if (!callback) return Failed("creating the read callback", E_OUTOFMEMORY);
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        if (interrupted_) callback->Interrupt();
+        callback_ = callback;
+    }
     ComPtr<IMFAttributes> attributes;
-    HRESULT hr = MFCreateAttributes(&attributes, 1);
+    HRESULT hr = MFCreateAttributes(&attributes, 2);
     // Lets the reader decode MJPEG and convert YUV to RGB32 for us.
     if (SUCCEEDED(hr)) hr = attributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+    if (SUCCEEDED(hr)) {
+        hr = attributes->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK,
+                                    static_cast<IMFSourceReaderCallback*>(callback.Get()));
+    }
     if (SUCCEEDED(hr)) hr = MFCreateSourceReaderFromMediaSource(source_.Get(), attributes.Get(), &reader_);
     return SUCCEEDED(hr) || Failed("creating the source reader", hr);
 }
@@ -187,21 +261,28 @@ bool MfCameraSource::SelectOutputType() {
 }
 
 void MfCameraSource::Close() {
+    // Releasing the reader drops a pending request; a late result only reaches its callback.
     reader_.Reset();
+    read_pending_ = false;
     {
-        std::lock_guard<std::mutex> lock(source_mutex_);
-        if (source_) source_->Shutdown();
-        source_.Reset();
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        callback_.Reset();
     }
+    if (source_) source_->Shutdown();
+    source_.Reset();
     mf_.reset();
     com_.reset();
 }
 
 void MfCameraSource::Interrupt() {
-    std::lock_guard<std::mutex> lock(source_mutex_);
+    std::lock_guard<std::mutex> lock(callback_mutex_);
     interrupted_ = true;
-    // A blocked ReadSample returns MF_E_SHUTDOWN once the source is shut down.
-    if (source_) source_->Shutdown();
+    if (callback_) callback_->Interrupt();
+}
+
+bool MfCameraSource::Interrupted() {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    return interrupted_;
 }
 
 std::string MfCameraSource::Description() const {
@@ -210,28 +291,32 @@ std::string MfCameraSource::Description() const {
 }
 
 CameraSource::ReadStatus MfCameraSource::Read(uint8_t* dst, int stride) {
-    {
-        std::lock_guard<std::mutex> lock(source_mutex_);
-        if (interrupted_) return ReadStatus::kNoFrame;
+    if (!read_pending_) {
+        if (Interrupted()) return ReadStatus::kNoFrame;
+        const HRESULT hr = reader_->ReadSample(kVideoStream, 0, nullptr, nullptr, nullptr, nullptr);
+        if (FAILED(hr)) {
+            Failed("requesting a frame", hr);
+            return ReadStatus::kFailed;
+        }
+        read_pending_ = true;
     }
-    DWORD flags = 0;
-    LONGLONG timestamp = 0;
-    ComPtr<IMFSample> sample;
-    const HRESULT hr = reader_->ReadSample(kVideoStream, 0, nullptr, &flags, &timestamp, &sample);
-    {
-        std::lock_guard<std::mutex> lock(source_mutex_);
-        if (interrupted_) return ReadStatus::kNoFrame;
-    }
-    if (FAILED(hr) || (flags & (MF_SOURCE_READERF_ERROR | MF_SOURCE_READERF_ENDOFSTREAM))) {
-        Failed("reading a frame", FAILED(hr) ? hr : MF_E_END_OF_STREAM);
+    const std::optional<ReadCallback::Result> result = callback_->Wait();
+    if (!result) return ReadStatus::kNoFrame;  // Interrupted: Close() drops the pending request
+    read_pending_ = false;
+    return Deliver(*result, dst, stride);
+}
+
+CameraSource::ReadStatus MfCameraSource::Deliver(const ReadCallback::Result& result, uint8_t* dst, int stride) {
+    if (FAILED(result.status) || (result.flags & (MF_SOURCE_READERF_ERROR | MF_SOURCE_READERF_ENDOFSTREAM))) {
+        Failed("reading a frame", FAILED(result.status) ? result.status : MF_E_END_OF_STREAM);
         return ReadStatus::kFailed;
     }
-    if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
+    if (result.flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
         SPDLOG_INFO("MfCameraSource: '{}' changed its format, reopening", name_);
         return ReadStatus::kFailed;
     }
-    if (!sample) return ReadStatus::kNoFrame;  // Stream tick (gap)
-    return CopySample(sample.Get(), dst, stride) ? ReadStatus::kFrame : ReadStatus::kNoFrame;
+    if (!result.sample) return ReadStatus::kNoFrame;  // Stream tick (gap)
+    return CopySample(result.sample.Get(), dst, stride) ? ReadStatus::kFrame : ReadStatus::kNoFrame;
 }
 
 bool MfCameraSource::CopySample(IMFSample* sample, uint8_t* dst, int stride) const {
@@ -268,8 +353,17 @@ bool MfCameraSource::Failed(const char* what, HRESULT hr) const {
 
 }  // namespace
 
+namespace win {
+
+std::unique_ptr<CameraSource> CreateMfCameraSource(MediaSourceFactory factory) {
+    return std::make_unique<MfCameraSource>(std::move(factory));
+}
+
+}  // namespace win
+
 std::unique_ptr<CameraSource> CreateCameraSource(const std::string& device_id) {
-    return std::make_unique<MfCameraSource>(device_id);
+    return win::CreateMfCameraSource(
+        [device_id](std::string* name) { return OpenCaptureDevice(device_id, name); });
 }
 
 }  // namespace mvp::capture
